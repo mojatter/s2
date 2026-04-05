@@ -242,9 +242,44 @@ type Storage interface {
 | `S2_SERVER_LISTEN` | `:9000` | Listen address |
 | `S2_SERVER_TYPE` | `osfs` | Storage backend type |
 | `S2_SERVER_ROOT` | `/var/lib/s2` | Root directory for bucket data |
+| `S2_SERVER_USER` | — | Username for authentication (disables auth if empty) |
+| `S2_SERVER_PASSWORD` | — | Password for authentication |
 
-`S2_SERVER_LISTEN`, `S2_SERVER_TYPE`, and `S2_SERVER_ROOT` take precedence over the config file.
+`S2_SERVER_LISTEN`, `S2_SERVER_TYPE`, `S2_SERVER_ROOT`, `S2_SERVER_USER`, and `S2_SERVER_PASSWORD` take precedence over the config file.
 Other settings (such as S3 backend options) are not configurable via environment variables — use `S2_SERVER_CONFIG` to point to a JSON config file instead.
+
+### Authentication
+
+When `S2_SERVER_USER` is set, the server requires credentials on all routes:
+
+- **Web Console** — HTTP Basic Auth
+- **S3 API** — AWS Signature Version 4 (`S2_SERVER_USER` as the Access Key ID, `S2_SERVER_PASSWORD` as the Secret Access Key)
+
+```sh
+S2_SERVER_USER=myuser S2_SERVER_PASSWORD=mypassword s2-server
+```
+
+Using the AWS CLI:
+
+```sh
+AWS_ACCESS_KEY_ID=myuser AWS_SECRET_ACCESS_KEY=mypassword \
+  aws --endpoint-url http://localhost:9000/s3api s3 ls
+```
+
+Or via a named profile in `~/.aws/config`:
+
+```ini
+[profile s2]
+endpoint_url = http://localhost:9000/s3api
+aws_access_key_id = myuser
+aws_secret_access_key = mypassword
+```
+
+```sh
+aws --profile s2 s3 ls
+```
+
+When `S2_SERVER_USER` is empty (the default), authentication is disabled.
 
 ### Config File
 
@@ -252,7 +287,9 @@ Other settings (such as S3 backend options) are not configurable via environment
 {
   "listen": ":9000",
   "type": "osfs",
-  "root": "/var/lib/s2"
+  "root": "/var/lib/s2",
+  "user": "myuser",
+  "password": "mypassword"
 }
 ```
 
