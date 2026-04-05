@@ -3,6 +3,7 @@ package s3api
 import (
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
 	"encoding/hex"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
@@ -330,6 +331,50 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func handleDeleteObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	bucketName := r.PathValue("bucket")
+
+	var req DeleteObjectsRequest
+	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, "MalformedXML", "The XML you provided was not well-formed", http.StatusBadRequest)
+		return
+	}
+
+	strg, err := s.Buckets.Get(ctx, bucketName)
+	if err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+
+	result := DeleteObjectsResult{}
+	for _, obj := range req.Objects {
+		if err := strg.Delete(ctx, obj.Key); err != nil {
+			code, msg, _ := s2ErrorToS3Error(err)
+			result.Errors = append(result.Errors, DeleteError{
+				Key:     obj.Key,
+				Code:    code,
+				Message: msg,
+			})
+			continue
+		}
+		if !req.Quiet {
+			result.Deleted = append(result.Deleted, DeletedObject{Key: obj.Key})
+		}
+	}
+
+	writeXML(w, http.StatusOK, result)
+}
+
+func handleBucketPOST(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	if _, ok := r.URL.Query()["delete"]; ok {
+		handleDeleteObjects(s, w, r)
+		return
+	}
+	writeError(w, r, "NotImplemented", "This operation is not implemented", http.StatusNotImplemented)
+}
+
 func handleBucketGET(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	if _, ok := r.URL.Query()["location"]; ok {
 		handleGetBucketLocation(s, w, r)
@@ -340,6 +385,7 @@ func handleBucketGET(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 func init() {
 	server.RegisterHandleFunc("GET /s3api/{bucket}", middleware.SigV4(handleBucketGET))
+	server.RegisterHandleFunc("POST /s3api/{bucket}", middleware.SigV4(handleBucketPOST))
 	server.RegisterHandleFunc("GET /s3api/{bucket}/{key...}", middleware.SigV4(handleGetObject))
 	server.RegisterHandleFunc("HEAD /s3api/{bucket}/{key...}", middleware.SigV4(handleGetObject))
 	server.RegisterHandleFunc("PUT /s3api/{bucket}/{key...}", middleware.SigV4(handlePutObject))
