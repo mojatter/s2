@@ -191,6 +191,50 @@ func (s *S3APISuite) TestDeleteBucket() {
 	})
 }
 
+// --- GetBucketLocation ---
+
+func (s *S3APISuite) TestGetBucketLocation() {
+	s.Run("existing bucket", func() {
+		s.createBucket("loc")
+
+		req := httptest.NewRequest("GET", "/s3api/loc?location", nil)
+		req.SetPathValue("bucket", "loc")
+		w := httptest.NewRecorder()
+		handleGetBucketLocation(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		var result LocationConstraint
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+		s.Equal("us-east-1", result.Location)
+	})
+
+	s.Run("nonexistent bucket", func() {
+		req := httptest.NewRequest("GET", "/s3api/no-such?location", nil)
+		req.SetPathValue("bucket", "no-such")
+		w := httptest.NewRecorder()
+		handleGetBucketLocation(s.server, w, req)
+
+		s.Equal(http.StatusNotFound, w.Code)
+		var errResp ErrorResponse
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+		s.Equal("NoSuchBucket", errResp.Code)
+	})
+
+	s.Run("dispatched via handleBucketGET", func() {
+		s.createBucket("disp")
+
+		req := httptest.NewRequest("GET", "/s3api/disp?location", nil)
+		req.SetPathValue("bucket", "disp")
+		w := httptest.NewRecorder()
+		handleBucketGET(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		var result LocationConstraint
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+		s.Equal("us-east-1", result.Location)
+	})
+}
+
 // --- HeadBucket ---
 
 func (s *S3APISuite) TestHeadBucket() {
