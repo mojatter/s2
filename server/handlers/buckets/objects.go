@@ -9,6 +9,7 @@ import (
 
 	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/server"
+	"github.com/mojatter/s2/server/middleware"
 )
 
 type Breadcrumb struct {
@@ -213,10 +214,10 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 
 
 func init() {
-	server.RegisterHandleFunc("GET /buckets/{name}", handleObjects)
-	server.RegisterHandleFunc("POST /buckets/{name}/folders", handleCreateFolder)
-	server.RegisterHandleFunc("POST /buckets/{name}/upload", handleUploadFile)
-	server.RegisterHandleFunc("DELETE /buckets/{name}/objects", handleDeleteObject)
+	server.RegisterHandleFunc("GET /buckets/{name}", middleware.BasicAuth(handleObjects))
+	server.RegisterHandleFunc("POST /buckets/{name}/folders", middleware.BasicAuth(handleCreateFolder))
+	server.RegisterHandleFunc("POST /buckets/{name}/upload", middleware.BasicAuth(handleUploadFile))
+	server.RegisterHandleFunc("DELETE /buckets/{name}/objects", middleware.BasicAuth(handleDeleteObject))
 	server.RegisterTemplate("buckets/objects.html")
 }
 

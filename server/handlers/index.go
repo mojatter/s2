@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/mojatter/s2/server"
+	"github.com/mojatter/s2/server/middleware"
 )
 
 func handleIndex(s *server.Server, w http.ResponseWriter, r *http.Request) {
@@ -63,9 +64,9 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 
 
 func init() {
-	server.RegisterHandleFunc("GET /", handleIndex)
-	server.RegisterHandleFunc("POST /buckets", handleCreateBucket)
-	server.RegisterHandleFunc("DELETE /buckets/{name}", handleDeleteBucket)
+	server.RegisterHandleFunc("GET /", middleware.BasicAuth(handleIndex))
+	server.RegisterHandleFunc("POST /buckets", middleware.BasicAuth(handleCreateBucket))
+	server.RegisterHandleFunc("DELETE /buckets/{name}", middleware.BasicAuth(handleDeleteBucket))
 	server.RegisterTemplate("index.html")
 }
 

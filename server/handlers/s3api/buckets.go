@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/mojatter/s2/server"
+	"github.com/mojatter/s2/server/middleware"
 )
 
 func HandleListBuckets(s *server.Server, w http.ResponseWriter, r *http.Request) {
@@ -88,9 +89,9 @@ func handleHeadBucket(s *server.Server, w http.ResponseWriter, r *http.Request) 
 }
 
 func init() {
-	server.RegisterHandleFunc("GET /s3api", HandleListBuckets)
-	server.RegisterHandleFunc("GET /s3api/", HandleListBuckets)
-	server.RegisterHandleFunc("PUT /s3api/{bucket}", handleCreateBucket)
-	server.RegisterHandleFunc("DELETE /s3api/{bucket}", handleDeleteBucket)
-	server.RegisterHandleFunc("HEAD /s3api/{bucket}", handleHeadBucket)
+	server.RegisterHandleFunc("GET /s3api", middleware.SigV4(HandleListBuckets))
+	server.RegisterHandleFunc("GET /s3api/", middleware.SigV4(HandleListBuckets))
+	server.RegisterHandleFunc("PUT /s3api/{bucket}", middleware.SigV4(handleCreateBucket))
+	server.RegisterHandleFunc("DELETE /s3api/{bucket}", middleware.SigV4(handleDeleteBucket))
+	server.RegisterHandleFunc("HEAD /s3api/{bucket}", middleware.SigV4(handleHeadBucket))
 }

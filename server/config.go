@@ -17,6 +17,8 @@ const (
 	EnvS2ServerRoot           = "S2_SERVER_ROOT"
 	EnvS2ServerMaxUploadSize  = "S2_SERVER_MAX_UPLOAD_SIZE"
 	EnvS2ServerMaxPreviewSize = "S2_SERVER_MAX_PREVIEW_SIZE"
+	EnvS2ServerUser           = "S2_SERVER_USER"
+	EnvS2ServerPassword       = "S2_SERVER_PASSWORD"
 )
 
 // Config is a configuration for the server.
@@ -28,6 +30,11 @@ type Config struct {
 	MaxUploadSize int64 `json:"max_upload_size"`
 	// MaxPreviewSize is the maximum file size for text preview in bytes (0 = default 10MB).
 	MaxPreviewSize int64 `json:"max_preview_size"`
+	// User is the username for authentication (Basic Auth for Web Console, Access Key ID for S3 API).
+	// When empty, authentication is disabled.
+	User string `json:"user"`
+	// Password is the password for authentication (Basic Auth password for Web Console, Secret Access Key for S3 API).
+	Password string `json:"password"`
 }
 
 const (
@@ -81,6 +88,12 @@ func (cfg *Config) LoadEnv() error {
 			return fmt.Errorf("invalid %s: %w", EnvS2ServerMaxPreviewSize, err)
 		}
 		cfg.MaxPreviewSize = n
+	}
+	if v := os.Getenv(EnvS2ServerUser); v != "" {
+		cfg.User = v
+	}
+	if v := os.Getenv(EnvS2ServerPassword); v != "" {
+		cfg.Password = v
 	}
 	return nil
 }

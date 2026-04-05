@@ -13,6 +13,7 @@ import (
 
 	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/server"
+	"github.com/mojatter/s2/server/middleware"
 )
 
 const (
@@ -330,9 +331,9 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 }
 
 func init() {
-	server.RegisterHandleFunc("GET /s3api/{bucket}", handleListObjects)
-	server.RegisterHandleFunc("GET /s3api/{bucket}/{key...}", handleGetObject)
-	server.RegisterHandleFunc("HEAD /s3api/{bucket}/{key...}", handleGetObject)
-	server.RegisterHandleFunc("PUT /s3api/{bucket}/{key...}", handlePutObject)
-	server.RegisterHandleFunc("DELETE /s3api/{bucket}/{key...}", handleDeleteObject)
+	server.RegisterHandleFunc("GET /s3api/{bucket}", middleware.SigV4(handleListObjects))
+	server.RegisterHandleFunc("GET /s3api/{bucket}/{key...}", middleware.SigV4(handleGetObject))
+	server.RegisterHandleFunc("HEAD /s3api/{bucket}/{key...}", middleware.SigV4(handleGetObject))
+	server.RegisterHandleFunc("PUT /s3api/{bucket}/{key...}", middleware.SigV4(handlePutObject))
+	server.RegisterHandleFunc("DELETE /s3api/{bucket}/{key...}", middleware.SigV4(handleDeleteObject))
 }

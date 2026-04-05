@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/mojatter/s2/server"
+	"github.com/mojatter/s2/server/middleware"
 )
 
 // contentTypeByExt returns the MIME type for the given file extension.
@@ -72,5 +73,5 @@ func handleView(s *server.Server, w http.ResponseWriter, r *http.Request) {
 }
 
 func init() {
-	server.RegisterHandleFunc("GET /buckets/{name}/view/{object...}", handleView)
+	server.RegisterHandleFunc("GET /buckets/{name}/view/{object...}", middleware.BasicAuth(handleView))
 }
