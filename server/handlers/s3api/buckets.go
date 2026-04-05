@@ -102,7 +102,7 @@ func handleGetBucketLocation(s *server.Server, w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	writeXML(w, http.StatusOK, LocationConstraint{Location: "us-east-1"})
+	writeXML(w, http.StatusOK, LocationConstraint{Location: s2Region})
 }
 
 func init() {

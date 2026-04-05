@@ -14,6 +14,7 @@ const (
 	// S3 constants
 	s2OwnerID          = "s2-id"
 	s2OwnerDisplayName = "s2-user"
+	s2Region           = "us-east-1"
 )
 
 func writeXML(w http.ResponseWriter, status int, v interface{}) {

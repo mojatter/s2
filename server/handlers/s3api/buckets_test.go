@@ -115,7 +115,7 @@ func (s *BucketsTestSuite) TestGetBucketLocation() {
 		s.Equal(http.StatusOK, w.Code)
 		var result LocationConstraint
 		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
-		s.Equal("us-east-1", result.Location)
+		s.Equal(s2Region, result.Location)
 	})
 
 	s.Run("nonexistent bucket", func() {
