@@ -51,7 +51,7 @@ dockers_v2:
       - s2-server
     dockerfile: server/Dockerfile.goreleaser
     images:
-      - "{{ .Env.DOCKERHUB_USER }}/s2"
+      - "{{ .Env.DOCKERHUB_USER }}/s2-server"
     tags:
       - "{{ .Version }}"
       - latest

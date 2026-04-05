@@ -1,4 +1,6 @@
 FROM scratch
-COPY s2-server /usr/sbin/s2-server
+ARG TARGETOS
+ARG TARGETARCH
+COPY ${TARGETOS}/${TARGETARCH}/s2-server /usr/sbin/s2-server
 EXPOSE 9000
 ENTRYPOINT ["/usr/sbin/s2-server"]
