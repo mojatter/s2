@@ -302,11 +302,22 @@ s2-server -f config.json
 | Method | Path | Operation |
 |--------|------|-----------|
 | GET | `/s3api` | ListBuckets |
-| GET | `/s3api/{bucket}` | ListObjects |
-| GET | `/s3api/{bucket}/{key...}` | GetObject |
+| PUT | `/s3api/{bucket}` | CreateBucket |
+| HEAD | `/s3api/{bucket}` | HeadBucket |
+| DELETE | `/s3api/{bucket}` | DeleteBucket |
+| GET | `/s3api/{bucket}?location` | GetBucketLocation |
+| GET | `/s3api/{bucket}` | ListObjectsV2 |
+| GET | `/s3api/{bucket}/{key...}` | GetObject (Range supported) |
 | HEAD | `/s3api/{bucket}/{key...}` | HeadObject |
-| PUT | `/s3api/{bucket}/{key...}` | PutObject |
+| PUT | `/s3api/{bucket}/{key...}` | PutObject / CopyObject |
 | DELETE | `/s3api/{bucket}/{key...}` | DeleteObject |
+| POST | `/s3api/{bucket}?delete` | DeleteObjects |
+| POST | `/s3api/{bucket}/{key...}?uploads` | CreateMultipartUpload |
+| PUT | `/s3api/{bucket}/{key...}?uploadId&partNumber` | UploadPart |
+| POST | `/s3api/{bucket}/{key...}?uploadId` | CompleteMultipartUpload |
+| DELETE | `/s3api/{bucket}/{key...}?uploadId` | AbortMultipartUpload |
+
+Custom metadata is supported via `x-amz-meta-*` headers on PutObject/CopyObject and returned on GetObject/HeadObject.
 
 ## Why S2?
 
