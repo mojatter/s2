@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/mojatter/s2/server"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -47,7 +48,6 @@ func (s *BucketsTestSuite) TestListBuckets() {
 		s.Contains(names, "alpha")
 		s.Contains(names, "beta")
 
-		// CreationDate should be a real timestamp, not a hardcoded mock
 		for _, b := range result.Buckets {
 			s.False(b.CreationDate.IsZero(), "CreationDate should not be zero")
 			s.True(b.CreationDate.Year() >= 2025, "CreationDate should be a recent timestamp")
@@ -104,67 +104,96 @@ func (s *BucketsTestSuite) TestDeleteBucket() {
 // --- GetBucketLocation ---
 
 func (s *BucketsTestSuite) TestGetBucketLocation() {
-	s.Run("existing bucket", func() {
-		s.createBucket("loc")
+	testCases := []struct {
+		caseName     string
+		bucket       string
+		createBucket bool
+		handler      server.HandlerFunc
+		wantStatus   int
+		wantLocation string
+		wantErrCode  string
+	}{
+		{
+			caseName:     "existing bucket",
+			bucket:       "loc",
+			createBucket: true,
+			handler:      handleGetBucketLocation,
+			wantStatus:   http.StatusOK,
+			wantLocation: s2Region,
+		},
+		{
+			caseName:    "nonexistent bucket",
+			bucket:      "no-such",
+			handler:     handleGetBucketLocation,
+			wantStatus:  http.StatusNotFound,
+			wantErrCode: "NoSuchBucket",
+		},
+		{
+			caseName:     "dispatched via handleBucketGET",
+			bucket:       "disp",
+			createBucket: true,
+			handler:      handleBucketGET,
+			wantStatus:   http.StatusOK,
+			wantLocation: s2Region,
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			if tc.createBucket {
+				s.createBucket(tc.bucket)
+			}
+			req := httptest.NewRequest("GET", "/s3api/"+tc.bucket+"?location", nil)
+			req.SetPathValue("bucket", tc.bucket)
+			w := httptest.NewRecorder()
+			tc.handler(s.server, w, req)
 
-		req := httptest.NewRequest("GET", "/s3api/loc?location", nil)
-		req.SetPathValue("bucket", "loc")
-		w := httptest.NewRecorder()
-		handleGetBucketLocation(s.server, w, req)
-
-		s.Equal(http.StatusOK, w.Code)
-		var result LocationConstraint
-		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
-		s.Equal(s2Region, result.Location)
-	})
-
-	s.Run("nonexistent bucket", func() {
-		req := httptest.NewRequest("GET", "/s3api/no-such?location", nil)
-		req.SetPathValue("bucket", "no-such")
-		w := httptest.NewRecorder()
-		handleGetBucketLocation(s.server, w, req)
-
-		s.Equal(http.StatusNotFound, w.Code)
-		var errResp ErrorResponse
-		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
-		s.Equal("NoSuchBucket", errResp.Code)
-	})
-
-	s.Run("dispatched via handleBucketGET", func() {
-		s.createBucket("disp")
-
-		req := httptest.NewRequest("GET", "/s3api/disp?location", nil)
-		req.SetPathValue("bucket", "disp")
-		w := httptest.NewRecorder()
-		handleBucketGET(s.server, w, req)
-
-		s.Equal(http.StatusOK, w.Code)
-		var result LocationConstraint
-		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
-		s.Equal("us-east-1", result.Location)
-	})
+			s.Equal(tc.wantStatus, w.Code)
+			if tc.wantLocation != "" {
+				var result LocationConstraint
+				s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+				s.Equal(tc.wantLocation, result.Location)
+			}
+			if tc.wantErrCode != "" {
+				var errResp ErrorResponse
+				s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+				s.Equal(tc.wantErrCode, errResp.Code)
+			}
+		})
+	}
 }
 
 // --- HeadBucket ---
 
 func (s *BucketsTestSuite) TestHeadBucket() {
-	s.Run("existing", func() {
-		s.createBucket("exists")
+	testCases := []struct {
+		caseName     string
+		bucket       string
+		createBucket bool
+		wantStatus   int
+	}{
+		{
+			caseName:     "existing",
+			bucket:       "exists",
+			createBucket: true,
+			wantStatus:   http.StatusOK,
+		},
+		{
+			caseName:   "not found",
+			bucket:     "nope",
+			wantStatus: http.StatusNotFound,
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			if tc.createBucket {
+				s.createBucket(tc.bucket)
+			}
+			req := httptest.NewRequest("HEAD", "/s3api/"+tc.bucket, nil)
+			req.SetPathValue("bucket", tc.bucket)
+			w := httptest.NewRecorder()
+			handleHeadBucket(s.server, w, req)
 
-		req := httptest.NewRequest("HEAD", "/s3api/exists", nil)
-		req.SetPathValue("bucket", "exists")
-		w := httptest.NewRecorder()
-		handleHeadBucket(s.server, w, req)
-
-		s.Equal(http.StatusOK, w.Code)
-	})
-
-	s.Run("not found", func() {
-		req := httptest.NewRequest("HEAD", "/s3api/nope", nil)
-		req.SetPathValue("bucket", "nope")
-		w := httptest.NewRecorder()
-		handleHeadBucket(s.server, w, req)
-
-		s.Equal(http.StatusNotFound, w.Code)
-	})
+			s.Equal(tc.wantStatus, w.Code)
+		})
+	}
 }
