@@ -1,0 +1,25 @@
+services:
+  s2:
+    build:
+      context: ../..
+      dockerfile: server/Dockerfile
+    environment:
+      S2_SERVER_LISTEN: ":9000"
+      S2_SERVER_USER: "testkey"
+      S2_SERVER_PASSWORD: "testsecret"
+    tmpfs:
+      - /var/lib/s2
+
+  test:
+    image: amazon/aws-cli
+    depends_on:
+      s2:
+        condition: service_started
+    environment:
+      AWS_ACCESS_KEY_ID: "testkey"
+      AWS_SECRET_ACCESS_KEY: "testsecret"
+      AWS_DEFAULT_REGION: "us-east-1"
+    entrypoint: [""]
+    command: ["/bin/sh", "/tests/run.sh"]
+    volumes:
+      - ./run.sh:/tests/run.sh:ro
