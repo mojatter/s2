@@ -67,6 +67,37 @@ type LocationConstraint struct {
 	Location string   `xml:",chardata"`
 }
 
+// DeleteObjectsRequest is the XML body for DeleteObjects (POST /{bucket}?delete).
+type DeleteObjectsRequest struct {
+	XMLName xml.Name       `xml:"Delete"`
+	Quiet   bool           `xml:"Quiet"`
+	Objects []DeleteObject `xml:"Object"`
+}
+
+// DeleteObject is a single object entry in DeleteObjectsRequest.
+type DeleteObject struct {
+	Key string `xml:"Key"`
+}
+
+// DeleteObjectsResult is the XML response for DeleteObjects.
+type DeleteObjectsResult struct {
+	XMLName xml.Name        `xml:"http://s3.amazonaws.com/doc/2006-03-01/ DeleteResult"`
+	Deleted []DeletedObject `xml:"Deleted,omitempty"`
+	Errors  []DeleteError   `xml:"Error,omitempty"`
+}
+
+// DeletedObject represents a successfully deleted object.
+type DeletedObject struct {
+	Key string `xml:"Key"`
+}
+
+// DeleteError represents a failed deletion in DeleteObjects.
+type DeleteError struct {
+	Key     string `xml:"Key"`
+	Code    string `xml:"Code"`
+	Message string `xml:"Message"`
+}
+
 // ErrorResponse represents the XML response for S3 errors.
 type ErrorResponse struct {
 	XMLName   xml.Name `xml:"Error"`

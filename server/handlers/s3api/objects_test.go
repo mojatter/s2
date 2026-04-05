@@ -624,6 +624,108 @@ func (s *ObjectsTestSuite) TestDeleteObject() {
 	})
 }
 
+// --- DeleteObjects ---
+
+func (s *ObjectsTestSuite) TestDeleteObjects() {
+	s.Run("delete multiple objects", func() {
+		s.putObject("do", "a.txt", "1")
+		s.putObject("do", "b.txt", "2")
+		s.putObject("do", "c.txt", "3")
+
+		body := `<Delete><Object><Key>a.txt</Key></Object><Object><Key>b.txt</Key></Object></Delete>`
+		req := httptest.NewRequest("POST", "/s3api/do?delete", strings.NewReader(body))
+		req.SetPathValue("bucket", "do")
+		w := httptest.NewRecorder()
+		handleDeleteObjects(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		var result DeleteObjectsResult
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+		s.Len(result.Deleted, 2)
+		s.Empty(result.Errors)
+
+		// c.txt should still exist
+		getReq := httptest.NewRequest("GET", "/s3api/do/c.txt", nil)
+		getReq.SetPathValue("bucket", "do")
+		getReq.SetPathValue("key", "c.txt")
+		getW := httptest.NewRecorder()
+		handleGetObject(s.server, getW, getReq)
+		s.Equal(http.StatusOK, getW.Code)
+	})
+
+	s.Run("quiet mode omits deleted", func() {
+		s.putObject("dq", "x.txt", "data")
+
+		body := `<Delete><Quiet>true</Quiet><Object><Key>x.txt</Key></Object></Delete>`
+		req := httptest.NewRequest("POST", "/s3api/dq?delete", strings.NewReader(body))
+		req.SetPathValue("bucket", "dq")
+		w := httptest.NewRecorder()
+		handleDeleteObjects(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		var result DeleteObjectsResult
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+		s.Empty(result.Deleted)
+		s.Empty(result.Errors)
+	})
+
+	s.Run("nonexistent key reports error", func() {
+		s.createBucket("de")
+
+		body := `<Delete><Object><Key>ghost.txt</Key></Object></Delete>`
+		req := httptest.NewRequest("POST", "/s3api/de?delete", strings.NewReader(body))
+		req.SetPathValue("bucket", "de")
+		w := httptest.NewRecorder()
+		handleDeleteObjects(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		var result DeleteObjectsResult
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+		s.Empty(result.Deleted)
+		s.Len(result.Errors, 1)
+		s.Equal("ghost.txt", result.Errors[0].Key)
+	})
+
+	s.Run("nonexistent bucket", func() {
+		body := `<Delete><Object><Key>a.txt</Key></Object></Delete>`
+		req := httptest.NewRequest("POST", "/s3api/no-bucket?delete", strings.NewReader(body))
+		req.SetPathValue("bucket", "no-bucket")
+		w := httptest.NewRecorder()
+		handleDeleteObjects(s.server, w, req)
+
+		s.Equal(http.StatusNotFound, w.Code)
+	})
+
+	s.Run("malformed XML", func() {
+		s.createBucket("dm")
+
+		req := httptest.NewRequest("POST", "/s3api/dm?delete", strings.NewReader("not xml"))
+		req.SetPathValue("bucket", "dm")
+		w := httptest.NewRecorder()
+		handleDeleteObjects(s.server, w, req)
+
+		s.Equal(http.StatusBadRequest, w.Code)
+		var errResp ErrorResponse
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+		s.Equal("MalformedXML", errResp.Code)
+	})
+
+	s.Run("dispatched via handleBucketPOST", func() {
+		s.putObject("dp", "f.txt", "data")
+
+		body := `<Delete><Object><Key>f.txt</Key></Object></Delete>`
+		req := httptest.NewRequest("POST", "/s3api/dp?delete", strings.NewReader(body))
+		req.SetPathValue("bucket", "dp")
+		w := httptest.NewRecorder()
+		handleBucketPOST(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		var result DeleteObjectsResult
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+		s.Len(result.Deleted, 1)
+	})
+}
+
 // --- XML response format ---
 
 func (s *ObjectsTestSuite) TestXMLResponseFormat() {
