@@ -1,6 +1,11 @@
+FROM busybox AS init
+RUN mkdir -p /var/lib/s2
+
 FROM scratch
 ARG TARGETOS
 ARG TARGETARCH
+COPY --from=init /var/lib/s2 /var/lib/s2
 COPY ${TARGETOS}/${TARGETARCH}/s2-server /usr/sbin/s2-server
+VOLUME /var/lib/s2
 EXPOSE 9000
 ENTRYPOINT ["/usr/sbin/s2-server"]
