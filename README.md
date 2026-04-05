@@ -23,6 +23,12 @@ To install the S2 server CLI:
 go install github.com/mojatter/s2/cmd/s2-server@latest
 ```
 
+Or run with Docker:
+
+```sh
+docker run -p 9000:9000 mojatter/s2-server
+```
+
 ## Quick Start
 
 ### As a Library
@@ -91,8 +97,11 @@ func main() {
 Start the server:
 
 ```sh
+# via go install
 s2-server
-# Listening on :9000
+
+# via Docker
+docker run -p 9000:9000 -v /your/data:/var/lib/s2 mojatter/s2-server
 ```
 
 Then access it with any S3 client:
