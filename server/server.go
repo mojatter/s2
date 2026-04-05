@@ -93,10 +93,10 @@ func Run(args []string) error {
 
 // Server is a web server that provides a Web Console and S3-compatible API for S2.
 type Server struct {
-	Config   *Config
-	Template *template.Template
-	Buckets  *Buckets
-	StartedAt    time.Time // server start time, used as epoch for upload ID generation
+	Config    *Config
+	Template  *template.Template
+	Buckets   *Buckets
+	StartedAt time.Time // server start time, used as epoch for upload ID generation
 }
 
 // NewServer creates a new server with the specified configuration.
@@ -110,10 +110,10 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 		return nil, err
 	}
 	return &Server{
-		Config:   cfg,
-		Template: tmpl,
-		Buckets:  buckets,
-		StartedAt:    time.Now(),
+		Config:    cfg,
+		Template:  tmpl,
+		Buckets:   buckets,
+		StartedAt: time.Now(),
 	}, nil
 }
 
@@ -140,5 +140,8 @@ func RegisterHandleFunc(pattern string, handler HandlerFunc) {
 	handlersMux.Lock()
 	defer handlersMux.Unlock()
 
+	if _, exists := handlers[pattern]; exists {
+		panic("s2: handler already registered for " + pattern)
+	}
 	handlers[pattern] = handler
 }
