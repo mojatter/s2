@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/mojatter/s2"
@@ -47,7 +48,7 @@ func DefaultConfig() *Config {
 }
 
 func (cfg *Config) LoadFile(filename string) error {
-	data, err := os.ReadFile(filename)
+	data, err := os.ReadFile(filepath.Clean(filename))
 	if err != nil {
 		return err
 	}

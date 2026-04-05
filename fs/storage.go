@@ -134,6 +134,9 @@ func (s *storage) ListRecursiveAfter(ctx context.Context, prefix string, limit i
 	}
 	objs := make([]s2.Object, 0, limit)
 	err := fs.WalkDir(s.fsys, ".", func(name string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
 		if after != "" && name <= after {
 			return nil
 		}

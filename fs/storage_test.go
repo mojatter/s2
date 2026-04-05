@@ -2,6 +2,7 @@ package fs
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"io/fs"
 	"testing"
@@ -13,6 +14,23 @@ import (
 	"github.com/mojatter/wfs/osfs"
 	"github.com/stretchr/testify/suite"
 )
+
+// errReadDirFS wraps an fs.FS and injects a ReadDir error for a specific path.
+type errReadDirFS struct {
+	fs.FS
+	errorPath string
+}
+
+func (e *errReadDirFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if name == e.errorPath {
+		return nil, fmt.Errorf("injected ReadDir error for %q", name)
+	}
+	return fs.ReadDir(e.FS, name)
+}
+
+func (e *errReadDirFS) Open(name string) (fs.File, error) {
+	return e.FS.Open(name)
+}
 
 type StorageTestSuite struct {
 	suite.Suite
@@ -335,6 +353,20 @@ func (s *StorageTestSuite) TestListRecursiveAfter() {
 			}
 		})
 	}
+}
+
+// TestListRecursiveAfter_WalkDirError verifies that an error passed to the
+// WalkDir callback (e.g. a failed ReadDir on a subdirectory) is propagated
+// instead of being silently ignored. This covers the err != nil guard added
+// at the top of the WalkDir callback in ListRecursiveAfter.
+func (s *StorageTestSuite) TestListRecursiveAfter_WalkDirError() {
+	base := s.testMemFS()
+	strg := &storage{fsys: &errReadDirFS{FS: base, errorPath: "cc"}}
+	ctx := context.Background()
+
+	_, err := strg.ListRecursive(ctx, "", 10)
+	s.Error(err)
+	s.ErrorContains(err, "injected ReadDir error")
 }
 
 func (s *StorageTestSuite) TestGet() {

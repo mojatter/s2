@@ -26,10 +26,11 @@ func handleIndex(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	buf.WriteTo(w)
+	_, _ = buf.WriteTo(w)
 }
 
 func handleCreateBucket(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	name := r.FormValue("name")
 	if name == "" {
 		http.Error(w, "bucket name is required", http.StatusBadRequest)

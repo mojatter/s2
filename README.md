@@ -1,4 +1,4 @@
-# S2 — Simple Storage
+# S2 - Simple Storage
 
 S2 is a lightweight object storage library and S3-compatible server written in Go.
 It provides a unified interface for multiple storage backends and an embeddable S3-compatible server — all in a single package.

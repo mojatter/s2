@@ -168,7 +168,7 @@ func (s *storage) list(ctx context.Context, prefix string, limit int, after stri
 			bucket:       s.bucket,
 			prefix:       s.prefix,
 			name:         key,
-			length:       uint64(aws.ToInt64(c.Size)),
+			length:       s2.MustUint64(aws.ToInt64(c.Size)),
 			lastModified: aws.ToTime(c.LastModified),
 		})
 	}
@@ -192,7 +192,7 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 		bucket:       s.bucket,
 		prefix:       s.prefix,
 		name:         name,
-		length:       uint64(aws.ToInt64(params.ContentLength)),
+		length:       s2.MustUint64(aws.ToInt64(params.ContentLength)),
 		lastModified: aws.ToTime(params.LastModified),
 		metadata:     s2.MetadataMap(params.Metadata),
 	}, nil
@@ -223,7 +223,7 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(path.Join(s.prefix, obj.Name())),
 		Body:          rc,
-		ContentLength: aws.Int64(int64(obj.Length())),
+		ContentLength: aws.Int64(s2.MustInt64(obj.Length())),
 		Metadata:      obj.Metadata().ToMap(),
 	})
 	return err

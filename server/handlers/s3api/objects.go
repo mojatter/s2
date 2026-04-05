@@ -1,7 +1,7 @@
 package s3api
 
 import (
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -167,7 +167,7 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	if r.Method != http.MethodHead {
-		io.Copy(w, rc)
+		_, _ = io.Copy(w, rc)
 	}
 }
 
@@ -198,9 +198,9 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Wrap body with MD5 hash calculation
-	hash := md5.New()
+	hash := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
 	body := io.TeeReader(r.Body, hash)
-	obj := s2.NewObjectReader(key, io.NopCloser(body), uint64(r.ContentLength))
+	obj := s2.NewObjectReader(key, io.NopCloser(body), s2.MustUint64(r.ContentLength))
 
 	if err := strg.Put(ctx, obj); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
@@ -231,7 +231,7 @@ func objectETag(obj s2.Object) string {
 			return etag
 		}
 	}
-	return `"` + hex.EncodeToString(md5.New().Sum(nil)) + `"`
+	return `"` + hex.EncodeToString(md5.New().Sum(nil)) + `"` // #nosec G401 -- MD5 is required for S3-compatible ETag
 }
 
 const metaHeaderPrefix = "X-Amz-Meta-"

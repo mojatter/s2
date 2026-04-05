@@ -4,6 +4,7 @@ import (
 	"io"
 	"io/fs"
 	"testing"
+	"time"
 
 	"github.com/mojatter/s2"
 	"github.com/mojatter/wfs/memfs"
@@ -115,6 +116,28 @@ func (s *ObjectTestSuite) TestOpenRange() {
 		s.Error(err)
 	})
 }
+
+// TestNewObjectFileInfo_NegativeSize verifies that newObjectFileInfo panics when
+// fs.FileInfo.Size() returns a negative value. This covers the MustUint64
+// conversion replacing the bare uint64() cast.
+func (s *ObjectTestSuite) TestNewObjectFileInfo_NegativeSize() {
+	s.Panics(func() {
+		newObjectFileInfo(nil, "bad.txt", &fakeFileInfo{size: -1})
+	})
+}
+
+// fakeFileInfo is a minimal fs.FileInfo with a controllable Size().
+type fakeFileInfo struct {
+	fs.FileInfo
+	size int64
+}
+
+func (f *fakeFileInfo) Size() int64      { return f.size }
+func (f *fakeFileInfo) IsDir() bool      { return false }
+func (f *fakeFileInfo) Name() string     { return "fake" }
+func (f *fakeFileInfo) Mode() fs.FileMode { return 0 }
+func (f *fakeFileInfo) Sys() any         { return nil }
+func (f *fakeFileInfo) ModTime() time.Time { return time.Time{} }
 
 func (s *ObjectTestSuite) TestMetadata() {
 	testCases := []struct {

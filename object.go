@@ -63,7 +63,7 @@ func NewObject(ctx context.Context, name string, opts ...ObjectOption) (Object, 
 	}
 	o := &object{
 		name:         name,
-		length:       uint64(info.Size()),
+		length:       MustUint64(info.Size()),
 		lastModified: info.ModTime(),
 	}
 	for _, opt := range opts {
@@ -119,22 +119,22 @@ func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
 		return rc, nil
 	}
 	if seeker, ok := rc.(io.ReadSeeker); ok {
-		if _, err := seeker.Seek(int64(offset), io.SeekStart); err != nil {
-			rc.Close()
+		if _, err := seeker.Seek(MustInt64(offset), io.SeekStart); err != nil {
+			_ = rc.Close()
 			return nil, err
 		}
 		return &limitReadCloser{
-			Reader: io.LimitReader(seeker, int64(length)),
+			Reader: io.LimitReader(seeker, MustInt64(length)),
 			Closer: rc,
 		}, nil
 	}
 	// Fallback for non-seeker
-	if _, err := io.CopyN(io.Discard, rc, int64(offset)); err != nil {
-		rc.Close()
+	if _, err := io.CopyN(io.Discard, rc, MustInt64(offset)); err != nil {
+		_ = rc.Close()
 		return nil, err
 	}
 	return &limitReadCloser{
-		Reader: io.LimitReader(rc, int64(length)),
+		Reader: io.LimitReader(rc, MustInt64(length)),
 		Closer: rc,
 	}, nil
 }

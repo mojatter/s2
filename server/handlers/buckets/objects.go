@@ -86,7 +86,7 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		buf.WriteTo(w)
+		_, _ = buf.WriteTo(w)
 		return
 	}
 
@@ -103,12 +103,13 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	buf.WriteTo(w)
+	_, _ = buf.WriteTo(w)
 }
 
 func handleCreateFolder(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue("name")
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	prefix := r.FormValue("prefix")
 	folderName := r.FormValue("folder_name")
 	if folderName == "" {
@@ -158,7 +159,7 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	}
 
 	key := path.Join(prefix, header.Filename)
-	obj := s2.NewObjectReader(key, file, uint64(header.Size))
+	obj := s2.NewObjectReader(key, file, s2.MustUint64(header.Size))
 	if err := strg.Put(ctx, obj); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

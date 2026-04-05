@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/mojatter/s2"
 	_ "github.com/mojatter/s2/fs"
@@ -30,7 +31,7 @@ func LoadConfigs(r io.Reader) (Configs, error) {
 // LoadConfigsFile reads the file at the given path and parses it as a JSON format
 // into Configs.
 func LoadConfigsFile(filename string) (Configs, error) {
-	f, err := os.Open(filename)
+	f, err := os.Open(filepath.Clean(filename))
 	if err != nil {
 		return nil, fmt.Errorf("open config file: %w", err)
 	}

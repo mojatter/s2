@@ -27,7 +27,9 @@ func handleStatic(s *Server, w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", contentType)
-	w.Write(content)
+	if _, err := w.Write(content); err != nil { // #nosec G705 -- content is from embed.FS, not user input
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func init() {

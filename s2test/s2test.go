@@ -293,7 +293,7 @@ func TestStorageCopyMove(ctx context.Context, strg s2.Storage) error {
 			errorf("Open(%q) after Copy failed: %v", dst, err)
 		} else {
 			b, _ := io.ReadAll(rc)
-			rc.Close()
+			_ = rc.Close()
 			if string(b) != string(body) {
 				errorf("Copy body = %q, want %q", string(b), string(body))
 			}
@@ -330,7 +330,7 @@ func TestStorageCopyMove(ctx context.Context, strg s2.Storage) error {
 			errorf("Open(%q) after Move failed: %v", moved, err)
 		} else {
 			b, _ := io.ReadAll(rc)
-			rc.Close()
+			_ = rc.Close()
 			if string(b) != string(body) {
 				errorf("Move body = %q, want %q", string(b), string(body))
 			}
@@ -412,7 +412,7 @@ func TestStoragePutMetadata(ctx context.Context, strg s2.Storage) error {
 		return fmt.Errorf("Open(%q) failed: %w", name, err)
 	}
 	b, _ := io.ReadAll(rc)
-	rc.Close()
+	_ = rc.Close()
 	if string(b) != string(body) {
 		return fmt.Errorf("body changed after PutMetadata: got %q, want %q", string(b), string(body))
 	}

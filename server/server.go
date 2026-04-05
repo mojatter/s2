@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"time"
 )
 
 const (
@@ -113,8 +114,9 @@ func (s *Server) Start() error {
 		})
 	}
 	server := &http.Server{
-		Addr:    s.Config.Listen,
-		Handler: mux,
+		Addr:              s.Config.Listen,
+		Handler:           mux,
+		ReadHeaderTimeout: 30 * time.Second,
 	}
 	fmt.Printf("Server listening on %s\n", s.Config.Listen)
 	return server.ListenAndServe()
