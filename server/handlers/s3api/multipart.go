@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible multipart ETag
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/server"
@@ -36,9 +38,12 @@ func partKey(uploadID string, partNumber int) string {
 	return fmt.Sprintf("%s%s/%05d", multipartPrefix, uploadID, partNumber)
 }
 
-func newUploadID() (string, error) {
+// newUploadID generates a 16-byte upload ID: 4 bytes of elapsed seconds
+// since the server started followed by 12 bytes of random data.
+func newUploadID(started time.Time) (string, error) {
 	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
+	binary.BigEndian.PutUint32(b[:4], uint32(time.Since(started).Seconds()))
+	if _, err := rand.Read(b[4:]); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
@@ -55,7 +60,7 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 		return
 	}
 
-	uploadID, err := newUploadID()
+	uploadID, err := newUploadID(s.StartedAt)
 	if err != nil {
 		writeError(w, r, "InternalError", "Failed to generate upload ID", http.StatusInternalServerError)
 		return
@@ -94,7 +99,7 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	maxSize := s.Config.MaxUploadSize
 	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 
-	data, err := io.ReadAll(r.Body)
+	data, err := io.ReadAll(unwrapAWSChunkedBody(r))
 	if err != nil {
 		writeError(w, r, "InternalError", "Failed to read part data", http.StatusInternalServerError)
 		return

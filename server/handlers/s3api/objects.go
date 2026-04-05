@@ -286,8 +286,15 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	// Wrap body with MD5 hash calculation
 	hash := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
-	body := io.TeeReader(r.Body, hash)
-	obj := s2.NewObjectReader(key, io.NopCloser(body), s2.MustUint64(r.ContentLength))
+	decodedBody := unwrapAWSChunkedBody(r)
+	body := io.TeeReader(decodedBody, hash)
+	contentLength := r.ContentLength
+	if v := r.Header.Get("X-Amz-Decoded-Content-Length"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			contentLength = n
+		}
+	}
+	obj := s2.NewObjectReader(key, io.NopCloser(body), s2.MustUint64(contentLength))
 
 	if err := strg.Put(ctx, obj); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
