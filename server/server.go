@@ -117,17 +117,22 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 	}, nil
 }
 
-// Start starts the server.
-func (s *Server) Start() error {
+// Handler builds and returns the HTTP handler without starting a listener.
+func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	for pattern, handler := range handlers {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			handler(s, w, r)
 		})
 	}
+	return mux
+}
+
+// Start starts the server.
+func (s *Server) Start() error {
 	server := &http.Server{
 		Addr:              s.Config.Listen,
-		Handler:           mux,
+		Handler:           s.Handler(),
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	fmt.Printf("Server listening on %s\n", s.Config.Listen)
