@@ -82,6 +82,11 @@ func (s *storage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
 	}, nil
 }
 
+// isMetaDir reports whether a directory entry is the internal metadata directory.
+func isMetaDir(name string) bool {
+	return name == ".meta"
+}
+
 func (s *storage) List(ctx context.Context, prefix string, limit int) ([]s2.Object, []string, error) {
 	return s.ListAfter(ctx, prefix, limit, "")
 }
@@ -105,6 +110,9 @@ func (s *storage) ListAfter(ctx context.Context, prefix string, limit int, after
 			name = filepath.Join(prefix, entry.Name())
 		}
 		if after != "" && name <= after {
+			continue
+		}
+		if isMetaDir(entry.Name()) {
 			continue
 		}
 		info, err := entry.Info()
@@ -148,6 +156,9 @@ func (s *storage) ListRecursiveAfter(ctx context.Context, prefix string, limit i
 			return fmt.Errorf("failed to get info: %w", err)
 		}
 		if info.IsDir() {
+			if isMetaDir(d.Name()) {
+				return fs.SkipDir
+			}
 			return nil
 		}
 		objs = append(objs, newObjectFileInfo(s.fsys, name, info))

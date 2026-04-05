@@ -76,6 +76,7 @@ func handleListObjects(s *server.Server, w http.ResponseWriter, r *http.Request)
 	}
 
 	objs = server.FilterKeep(objs)
+	objs = filterMultipart(objs)
 
 	isTruncated := false
 	var nextToken string
@@ -253,6 +254,11 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, obj s2.Object, r
 }
 
 func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	// UploadPart: PUT /{bucket}/{key}?partNumber=N&uploadId=X
+	if r.URL.Query().Get("uploadId") != "" {
+		handleUploadPart(s, w, r)
+		return
+	}
 	// If x-amz-copy-source is present, this is a CopyObject request
 	if copySource := r.Header.Get("x-amz-copy-source"); copySource != "" {
 		handleCopyObject(s, w, r, copySource)
@@ -398,6 +404,12 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
+		return
+	}
+
+	// AbortMultipartUpload: DELETE /{bucket}/{key}?uploadId=X
+	if r.URL.Query().Get("uploadId") != "" {
+		handleAbortMultipartUpload(s, w, r)
 		return
 	}
 
