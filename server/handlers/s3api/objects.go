@@ -360,7 +360,7 @@ func handleDeleteObjects(s *server.Server, w http.ResponseWriter, r *http.Reques
 			continue
 		}
 		if !req.Quiet {
-			result.Deleted = append(result.Deleted, DeletedObject{Key: obj.Key})
+			result.Deleted = append(result.Deleted, DeletedObject(obj))
 		}
 	}
 
