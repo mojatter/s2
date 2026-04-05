@@ -330,8 +330,16 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func handleBucketGET(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	if _, ok := r.URL.Query()["location"]; ok {
+		handleGetBucketLocation(s, w, r)
+		return
+	}
+	handleListObjects(s, w, r)
+}
+
 func init() {
-	server.RegisterHandleFunc("GET /s3api/{bucket}", middleware.SigV4(handleListObjects))
+	server.RegisterHandleFunc("GET /s3api/{bucket}", middleware.SigV4(handleBucketGET))
 	server.RegisterHandleFunc("GET /s3api/{bucket}/{key...}", middleware.SigV4(handleGetObject))
 	server.RegisterHandleFunc("HEAD /s3api/{bucket}/{key...}", middleware.SigV4(handleGetObject))
 	server.RegisterHandleFunc("PUT /s3api/{bucket}/{key...}", middleware.SigV4(handlePutObject))

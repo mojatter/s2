@@ -5,219 +5,24 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/xml"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/mojatter/s2"
-	"github.com/mojatter/s2/server"
 	"github.com/stretchr/testify/suite"
 )
 
-type S3APISuite struct {
-	suite.Suite
-	server *server.Server
-}
+type ObjectsTestSuite struct{ s3apiSuite }
 
-func TestS3APISuite(t *testing.T) {
-	suite.Run(t, &S3APISuite{})
-}
-
-func (s *S3APISuite) SetupTest() {
-	cfg := server.DefaultConfig()
-	cfg.Root = s.T().TempDir()
-	srv, err := server.NewServer(context.Background(), cfg)
-	s.Require().NoError(err)
-	s.server = srv
-}
-
-func (s *S3APISuite) putObject(bucket, key, content string) {
-	s.T().Helper()
-	ctx := context.Background()
-	if ok, _ := s.server.Buckets.Exists(bucket); !ok {
-		s.Require().NoError(s.server.Buckets.Create(ctx, bucket))
-	}
-	strg, err := s.server.Buckets.Get(ctx, bucket)
-	s.Require().NoError(err)
-	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes(key, []byte(content))))
-}
-
-func (s *S3APISuite) createBucket(name string) {
-	s.T().Helper()
-	s.Require().NoError(s.server.Buckets.Create(context.Background(), name))
-}
-
-// --- Error mapping ---
-
-func (s *S3APISuite) TestS2ErrorToS3Error() {
-	testCases := []struct {
-		caseName   string
-		err        error
-		wantCode   string
-		wantStatus int
-	}{
-		{
-			caseName:   "not exist",
-			err:        &s2.ErrNotExist{Name: "key"},
-			wantCode:   "NoSuchKey",
-			wantStatus: http.StatusNotFound,
-		},
-		{
-			caseName:   "no such bucket",
-			err:        &ErrNoSuchBucket{Name: "b"},
-			wantCode:   "NoSuchBucket",
-			wantStatus: http.StatusNotFound,
-		},
-		{
-			caseName:   "wrapped not exist",
-			err:        fmt.Errorf("wrap: %w", &s2.ErrNotExist{Name: "key"}),
-			wantCode:   "NoSuchKey",
-			wantStatus: http.StatusNotFound,
-		},
-		{
-			caseName:   "bucket not found",
-			err:        &server.ErrBucketNotFound{Name: "b"},
-			wantCode:   "NoSuchBucket",
-			wantStatus: http.StatusNotFound,
-		},
-		{
-			caseName:   "wrapped bucket not found",
-			err:        fmt.Errorf("wrap: %w", &server.ErrBucketNotFound{Name: "b"}),
-			wantCode:   "NoSuchBucket",
-			wantStatus: http.StatusNotFound,
-		},
-		{
-			caseName:   "unknown error",
-			err:        fmt.Errorf("something broke"),
-			wantCode:   "InternalError",
-			wantStatus: http.StatusInternalServerError,
-		},
-	}
-	for _, tc := range testCases {
-		s.Run(tc.caseName, func() {
-			code, _, status := s2ErrorToS3Error(tc.err)
-			s.Equal(tc.wantCode, code)
-			s.Equal(tc.wantStatus, status)
-		})
-	}
-}
-
-// --- ListBuckets ---
-
-func (s *S3APISuite) TestListBuckets() {
-	s.Run("empty", func() {
-		req := httptest.NewRequest("GET", "/s3api", nil)
-		w := httptest.NewRecorder()
-		HandleListBuckets(s.server, w, req)
-
-		s.Equal(http.StatusOK, w.Code)
-		var result ListAllMyBucketsResult
-		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
-		s.Empty(result.Buckets)
-		s.Equal(s2OwnerID, result.Owner.ID)
-	})
-
-	s.Run("with buckets", func() {
-		s.createBucket("alpha")
-		s.createBucket("beta")
-
-		req := httptest.NewRequest("GET", "/s3api", nil)
-		w := httptest.NewRecorder()
-		HandleListBuckets(s.server, w, req)
-
-		s.Equal(http.StatusOK, w.Code)
-		var result ListAllMyBucketsResult
-		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
-		s.Len(result.Buckets, 2)
-
-		names := []string{result.Buckets[0].Name, result.Buckets[1].Name}
-		s.Contains(names, "alpha")
-		s.Contains(names, "beta")
-
-		// CreationDate should be a real timestamp, not a hardcoded mock
-		for _, b := range result.Buckets {
-			s.False(b.CreationDate.IsZero(), "CreationDate should not be zero")
-			s.True(b.CreationDate.Year() >= 2025, "CreationDate should be a recent timestamp")
-		}
-	})
-}
-
-// --- CreateBucket ---
-
-func (s *S3APISuite) TestCreateBucket() {
-	req := httptest.NewRequest("PUT", "/s3api/new-bucket", nil)
-	req.SetPathValue("bucket", "new-bucket")
-	w := httptest.NewRecorder()
-	handleCreateBucket(s.server, w, req)
-
-	s.Equal(http.StatusOK, w.Code)
-
-	exists, err := s.server.Buckets.Exists("new-bucket")
-	s.Require().NoError(err)
-	s.True(exists)
-}
-
-// --- DeleteBucket ---
-
-func (s *S3APISuite) TestDeleteBucket() {
-	s.Run("existing", func() {
-		s.createBucket("to-delete")
-
-		req := httptest.NewRequest("DELETE", "/s3api/to-delete", nil)
-		req.SetPathValue("bucket", "to-delete")
-		w := httptest.NewRecorder()
-		handleDeleteBucket(s.server, w, req)
-
-		s.Equal(http.StatusNoContent, w.Code)
-
-		exists, err := s.server.Buckets.Exists("to-delete")
-		s.Require().NoError(err)
-		s.False(exists)
-	})
-
-	s.Run("not found", func() {
-		req := httptest.NewRequest("DELETE", "/s3api/nonexistent", nil)
-		req.SetPathValue("bucket", "nonexistent")
-		w := httptest.NewRecorder()
-		handleDeleteBucket(s.server, w, req)
-
-		s.Equal(http.StatusNotFound, w.Code)
-		var errResp ErrorResponse
-		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
-		s.Equal("NoSuchBucket", errResp.Code)
-	})
-}
-
-// --- HeadBucket ---
-
-func (s *S3APISuite) TestHeadBucket() {
-	s.Run("existing", func() {
-		s.createBucket("exists")
-
-		req := httptest.NewRequest("HEAD", "/s3api/exists", nil)
-		req.SetPathValue("bucket", "exists")
-		w := httptest.NewRecorder()
-		handleHeadBucket(s.server, w, req)
-
-		s.Equal(http.StatusOK, w.Code)
-	})
-
-	s.Run("not found", func() {
-		req := httptest.NewRequest("HEAD", "/s3api/nope", nil)
-		req.SetPathValue("bucket", "nope")
-		w := httptest.NewRecorder()
-		handleHeadBucket(s.server, w, req)
-
-		s.Equal(http.StatusNotFound, w.Code)
-	})
+func TestObjectsTestSuite(t *testing.T) {
+	suite.Run(t, &ObjectsTestSuite{})
 }
 
 // --- ListObjects ---
 
-func (s *S3APISuite) TestListObjects() {
+func (s *ObjectsTestSuite) TestListObjects() {
 	s.Run("with delimiter", func() {
 		s.putObject("b", "file.txt", "hello")
 		s.putObject("b", "dir/nested.txt", "world")
@@ -304,7 +109,7 @@ func (s *S3APISuite) TestListObjects() {
 
 // --- ListObjects pagination ---
 
-func (s *S3APISuite) TestListObjects_Pagination() {
+func (s *ObjectsTestSuite) TestListObjects_Pagination() {
 	s.putObject("pg", "a.txt", "1")
 	s.putObject("pg", "b.txt", "2")
 	s.putObject("pg", "c.txt", "3")
@@ -400,7 +205,7 @@ func (s *S3APISuite) TestListObjects_Pagination() {
 
 // --- GetObject ---
 
-func (s *S3APISuite) TestGetObject() {
+func (s *ObjectsTestSuite) TestGetObject() {
 	s.Run("typical", func() {
 		s.putObject("b", "hello.txt", "Hello, S2!")
 
@@ -447,7 +252,7 @@ func (s *S3APISuite) TestGetObject() {
 
 // --- HeadObject ---
 
-func (s *S3APISuite) TestHeadObject() {
+func (s *ObjectsTestSuite) TestHeadObject() {
 	s.putObject("hb", "file.txt", "content")
 
 	s.Run("returns headers without body", func() {
@@ -477,7 +282,7 @@ func (s *S3APISuite) TestHeadObject() {
 
 // --- PutObject ---
 
-func (s *S3APISuite) TestPutObject() {
+func (s *ObjectsTestSuite) TestPutObject() {
 	s.Run("typical", func() {
 		s.createBucket("pb")
 
@@ -527,7 +332,7 @@ func (s *S3APISuite) TestPutObject() {
 
 // --- PutObject ETag ---
 
-func (s *S3APISuite) TestPutObject_ETag() {
+func (s *ObjectsTestSuite) TestPutObject_ETag() {
 	s.createBucket("etag")
 
 	testCases := []struct {
@@ -559,7 +364,7 @@ func (s *S3APISuite) TestPutObject_ETag() {
 
 // --- PutObject ETag persists for GetObject ---
 
-func (s *S3APISuite) TestETag_RoundTrip() {
+func (s *ObjectsTestSuite) TestETag_RoundTrip() {
 	s.createBucket("ert")
 
 	body := "roundtrip"
@@ -604,7 +409,7 @@ func (s *S3APISuite) TestETag_RoundTrip() {
 
 // --- Metadata ---
 
-func (s *S3APISuite) TestMetadata() {
+func (s *ObjectsTestSuite) TestMetadata() {
 	s.Run("put and get metadata", func() {
 		s.createBucket("md")
 
@@ -679,56 +484,9 @@ func (s *S3APISuite) TestMetadata() {
 	})
 }
 
-// --- parseMetadataHeaders ---
-
-func (s *S3APISuite) TestParseMetadataHeaders() {
-	testCases := []struct {
-		caseName string
-		headers  map[string]string
-		want     s2.MetadataMap
-	}{
-		{
-			caseName: "typical",
-			headers:  map[string]string{"X-Amz-Meta-Key": "val"},
-			want:     s2.MetadataMap{"key": "val"},
-		},
-		{
-			caseName: "multiple",
-			headers: map[string]string{
-				"X-Amz-Meta-A": "1",
-				"X-Amz-Meta-B": "2",
-			},
-			want: s2.MetadataMap{"a": "1", "b": "2"},
-		},
-		{
-			caseName: "non-meta headers ignored",
-			headers: map[string]string{
-				"Content-Type":  "text/plain",
-				"X-Amz-Meta-Ok": "yes",
-			},
-			want: s2.MetadataMap{"ok": "yes"},
-		},
-		{
-			caseName: "empty",
-			headers:  map[string]string{},
-			want:     s2.MetadataMap{},
-		},
-	}
-	for _, tc := range testCases {
-		s.Run(tc.caseName, func() {
-			req := httptest.NewRequest("PUT", "/", nil)
-			for k, v := range tc.headers {
-				req.Header.Set(k, v)
-			}
-			got := parseMetadataHeaders(req)
-			s.Equal(tc.want, got)
-		})
-	}
-}
-
 // --- CopyObject ---
 
-func (s *S3APISuite) TestCopyObject() {
+func (s *ObjectsTestSuite) TestCopyObject() {
 	s.Run("same bucket", func() {
 		s.putObject("cb", "src.txt", "source data")
 
@@ -831,7 +589,7 @@ func (s *S3APISuite) TestCopyObject() {
 
 // --- DeleteObject ---
 
-func (s *S3APISuite) TestDeleteObject() {
+func (s *ObjectsTestSuite) TestDeleteObject() {
 	s.Run("existing", func() {
 		s.putObject("db", "to-delete.txt", "bye")
 
@@ -868,7 +626,7 @@ func (s *S3APISuite) TestDeleteObject() {
 
 // --- XML response format ---
 
-func (s *S3APISuite) TestXMLResponseFormat() {
+func (s *ObjectsTestSuite) TestXMLResponseFormat() {
 	s.createBucket("xf")
 
 	req := httptest.NewRequest("GET", "/s3api/xf", nil)

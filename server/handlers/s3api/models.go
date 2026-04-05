@@ -61,6 +61,12 @@ type CopyObjectResult struct {
 	ETag         string    `xml:"ETag"`
 }
 
+// LocationConstraint represents the XML response for GetBucketLocation.
+type LocationConstraint struct {
+	XMLName  xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ LocationConstraint"`
+	Location string   `xml:",chardata"`
+}
+
 // ErrorResponse represents the XML response for S3 errors.
 type ErrorResponse struct {
 	XMLName   xml.Name `xml:"Error"`

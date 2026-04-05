@@ -88,6 +88,23 @@ func handleHeadBucket(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusOK)
 }
 
+func handleGetBucketLocation(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	bucketName := r.PathValue("bucket")
+
+	exists, err := s.Buckets.Exists(bucketName)
+	if err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+	if !exists {
+		writeError(w, r, "NoSuchBucket", "The specified bucket does not exist", http.StatusNotFound)
+		return
+	}
+
+	writeXML(w, http.StatusOK, LocationConstraint{Location: s2Region})
+}
+
 func init() {
 	server.RegisterHandleFunc("GET /s3api", middleware.SigV4(HandleListBuckets))
 	server.RegisterHandleFunc("GET /s3api/", middleware.SigV4(HandleListBuckets))
