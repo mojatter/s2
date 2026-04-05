@@ -12,6 +12,8 @@ builds:
     binary: s2-server
     env:
       - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X github.com/mojatter/s2/server.version={{.Version}}
     goos:
       - linux
       - darwin

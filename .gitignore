@@ -33,3 +33,6 @@ go.work.sum
 
 # goreleaser
 dist/
+
+# build output
+bin/

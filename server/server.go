@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -17,8 +18,17 @@ const (
 	usage = cmd + " [flags]"
 )
 
-// version will update by github actions.
-var version = "0.0.1"
+// version is set at build time via -ldflags.
+// Falls back to the module version embedded by go install.
+var version = "dev"
+
+func init() {
+	if version == "dev" {
+		if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			version = info.Main.Version
+		}
+	}
+}
 
 var (
 	handlersMux sync.Mutex
