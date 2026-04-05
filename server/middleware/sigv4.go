@@ -11,13 +11,16 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/mojatter/s2/server"
 )
 
+const sigV4MaxClockSkew = 15 * time.Minute
+
 // SigV4 returns a handler that enforces AWS Signature Version 4 authentication for S3 API routes.
 // Authentication is skipped when User is not configured.
-// Timestamp validation is intentionally omitted.
+// Requests with X-Amz-Date outside ±15 minutes of server time are rejected.
 func SigV4(next server.HandlerFunc) server.HandlerFunc {
 	return func(srv *server.Server, w http.ResponseWriter, r *http.Request) {
 		if srv.Config.User == "" {
@@ -90,6 +93,13 @@ func verifySignatureV4(r *http.Request, accessKeyID, secretAccessKey string) err
 	datetime := r.Header.Get("X-Amz-Date")
 	if datetime == "" {
 		return fmt.Errorf("missing X-Amz-Date header")
+	}
+	reqTime, err := time.Parse("20060102T150405Z", datetime)
+	if err != nil {
+		return fmt.Errorf("invalid X-Amz-Date: %w", err)
+	}
+	if diff := time.Since(reqTime).Abs(); diff > sigV4MaxClockSkew {
+		return fmt.Errorf("request timestamp too skewed: %v", diff.Round(time.Second))
 	}
 
 	signedHeaders := strings.Split(signedHeadersStr, ";")

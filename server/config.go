@@ -18,7 +18,7 @@ const (
 	EnvS2ServerMaxUploadSize  = "S2_SERVER_MAX_UPLOAD_SIZE"
 	EnvS2ServerMaxPreviewSize = "S2_SERVER_MAX_PREVIEW_SIZE"
 	EnvS2ServerUser           = "S2_SERVER_USER"
-	EnvS2ServerPassword       = "S2_SERVER_PASSWORD"
+	EnvS2ServerPassword       = "S2_SERVER_PASSWORD" // #nosec G101 -- env var name, not a credential
 )
 
 // Config is a configuration for the server.

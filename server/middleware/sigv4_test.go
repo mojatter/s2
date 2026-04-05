@@ -14,13 +14,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// signRequest adds AWS Signature V4 headers to r using the same signing logic as this package.
+// signRequest adds AWS Signature V4 headers to r signed at the current time.
 func signRequest(r *http.Request, accessKey, secretKey string) {
-	now := time.Now().UTC()
+	signRequestAt(r, accessKey, secretKey, time.Now().UTC())
+}
+
+// signRequestAt adds AWS Signature V4 headers to r signed at the given time.
+func signRequestAt(r *http.Request, accessKey, secretKey string, now time.Time) {
 	date := now.Format("20060102")
 	datetime := now.Format("20060102T150405Z")
-	region := "us-east-1"
-	service := "s3"
+	const region, service = "us-east-1", "s3"
 
 	r.Header.Set("X-Amz-Date", datetime)
 	r.Header.Set("X-Amz-Content-Sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
@@ -40,6 +43,32 @@ func signRequest(r *http.Request, accessKey, secretKey string) {
 		"AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
 		accessKey, scope, strings.Join(signedHeaders, ";"), sig,
 	))
+}
+
+func TestSigV4_ExpiredTimestamp(t *testing.T) {
+	srv := &server.Server{Config: &server.Config{User: "minioadmin", Password: "minioadmin"}}
+	handler := SigV4(noopHandler)
+
+	r := httptest.NewRequest(http.MethodGet, "/s3api", nil)
+	// Sign with a timestamp 16 minutes in the past
+	signRequestAt(r, "minioadmin", "minioadmin", time.Now().UTC().Add(-16*time.Minute))
+	w := httptest.NewRecorder()
+	handler(srv, w, r)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+func TestSigV4_FutureTimestamp(t *testing.T) {
+	srv := &server.Server{Config: &server.Config{User: "minioadmin", Password: "minioadmin"}}
+	handler := SigV4(noopHandler)
+
+	r := httptest.NewRequest(http.MethodGet, "/s3api", nil)
+	// Sign with a timestamp 16 minutes in the future
+	signRequestAt(r, "minioadmin", "minioadmin", time.Now().UTC().Add(16*time.Minute))
+	w := httptest.NewRecorder()
+	handler(srv, w, r)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
 func TestSigV4_NoAuth(t *testing.T) {
