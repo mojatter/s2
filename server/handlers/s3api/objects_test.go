@@ -807,6 +807,99 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 		s.Equal(http.StatusOK, w.Code)
 		s.Equal("Hello, World!", w.Body.String())
 	})
+
+	s.Run("invalid scheme", func() {
+		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req.SetPathValue("bucket", "rng")
+		req.SetPathValue("key", "data.txt")
+		req.Header.Set("Range", "pages=1-2")
+		w := httptest.NewRecorder()
+		handleGetObject(s.server, w, req)
+
+		s.Equal(http.StatusRequestedRangeNotSatisfiable, w.Code)
+	})
+
+	s.Run("suffix zero returns 416", func() {
+		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req.SetPathValue("bucket", "rng")
+		req.SetPathValue("key", "data.txt")
+		req.Header.Set("Range", "bytes=-0")
+		w := httptest.NewRecorder()
+		handleGetObject(s.server, w, req)
+
+		s.Equal(http.StatusRequestedRangeNotSatisfiable, w.Code)
+	})
+
+	s.Run("suffix exceeding file size returns entire file", func() {
+		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req.SetPathValue("bucket", "rng")
+		req.SetPathValue("key", "data.txt")
+		req.Header.Set("Range", "bytes=-999")
+		w := httptest.NewRecorder()
+		handleGetObject(s.server, w, req)
+
+		s.Equal(http.StatusPartialContent, w.Code)
+		s.Equal("Hello, World!", w.Body.String())
+		s.Equal("bytes 0-12/13", w.Header().Get("Content-Range"))
+	})
+
+	s.Run("non-numeric start returns 416", func() {
+		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req.SetPathValue("bucket", "rng")
+		req.SetPathValue("key", "data.txt")
+		req.Header.Set("Range", "bytes=abc-5")
+		w := httptest.NewRecorder()
+		handleGetObject(s.server, w, req)
+
+		s.Equal(http.StatusRequestedRangeNotSatisfiable, w.Code)
+	})
+
+	s.Run("non-numeric end returns 416", func() {
+		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req.SetPathValue("bucket", "rng")
+		req.SetPathValue("key", "data.txt")
+		req.Header.Set("Range", "bytes=0-xyz")
+		w := httptest.NewRecorder()
+		handleGetObject(s.server, w, req)
+
+		s.Equal(http.StatusRequestedRangeNotSatisfiable, w.Code)
+	})
+
+	s.Run("start greater than end returns 416", func() {
+		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req.SetPathValue("bucket", "rng")
+		req.SetPathValue("key", "data.txt")
+		req.Header.Set("Range", "bytes=10-5")
+		w := httptest.NewRecorder()
+		handleGetObject(s.server, w, req)
+
+		s.Equal(http.StatusRequestedRangeNotSatisfiable, w.Code)
+	})
+
+	s.Run("non-numeric suffix returns 416", func() {
+		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req.SetPathValue("bucket", "rng")
+		req.SetPathValue("key", "data.txt")
+		req.Header.Set("Range", "bytes=-abc")
+		w := httptest.NewRecorder()
+		handleGetObject(s.server, w, req)
+
+		s.Equal(http.StatusRequestedRangeNotSatisfiable, w.Code)
+	})
+
+	s.Run("single byte range", func() {
+		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req.SetPathValue("bucket", "rng")
+		req.SetPathValue("key", "data.txt")
+		req.Header.Set("Range", "bytes=0-0")
+		w := httptest.NewRecorder()
+		handleGetObject(s.server, w, req)
+
+		s.Equal(http.StatusPartialContent, w.Code)
+		s.Equal("H", w.Body.String())
+		s.Equal("bytes 0-0/13", w.Header().Get("Content-Range"))
+		s.Equal("1", w.Header().Get("Content-Length"))
+	})
 }
 
 // --- XML response format ---
