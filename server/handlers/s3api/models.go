@@ -98,6 +98,35 @@ type DeleteError struct {
 	Message string `xml:"Message"`
 }
 
+// InitiateMultipartUploadResult is the XML response for CreateMultipartUpload.
+type InitiateMultipartUploadResult struct {
+	XMLName  xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ InitiateMultipartUploadResult"`
+	Bucket   string   `xml:"Bucket"`
+	Key      string   `xml:"Key"`
+	UploadID string   `xml:"UploadId"`
+}
+
+// CompleteMultipartUploadRequest is the XML body for CompleteMultipartUpload.
+type CompleteMultipartUploadRequest struct {
+	XMLName xml.Name       `xml:"CompleteMultipartUpload"`
+	Parts   []CompletePart `xml:"Part"`
+}
+
+// CompletePart is one part entry in CompleteMultipartUploadRequest.
+type CompletePart struct {
+	PartNumber int    `xml:"PartNumber"`
+	ETag       string `xml:"ETag"`
+}
+
+// CompleteMultipartUploadResult is the XML response for CompleteMultipartUpload.
+type CompleteMultipartUploadResult struct {
+	XMLName  xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ CompleteMultipartUploadResult"`
+	Location string   `xml:"Location"`
+	Bucket   string   `xml:"Bucket"`
+	Key      string   `xml:"Key"`
+	ETag     string   `xml:"ETag"`
+}
+
 // ErrorResponse represents the XML response for S3 errors.
 type ErrorResponse struct {
 	XMLName   xml.Name `xml:"Error"`

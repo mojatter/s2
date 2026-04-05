@@ -96,6 +96,7 @@ type Server struct {
 	Config   *Config
 	Template *template.Template
 	Buckets  *Buckets
+	StartedAt    time.Time // server start time, used as epoch for upload ID generation
 }
 
 // NewServer creates a new server with the specified configuration.
@@ -112,6 +113,7 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 		Config:   cfg,
 		Template: tmpl,
 		Buckets:  buckets,
+		StartedAt:    time.Now(),
 	}, nil
 }
 

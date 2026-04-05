@@ -902,6 +902,155 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 	})
 }
 
+// --- Multipart Upload ---
+
+func (s *ObjectsTestSuite) TestMultipartUpload() {
+	s.Run("full lifecycle", func() {
+		s.createBucket("mp")
+
+		// CreateMultipartUpload
+		createReq := httptest.NewRequest("POST", "/s3api/mp/large.txt?uploads", nil)
+		createReq.SetPathValue("bucket", "mp")
+		createReq.SetPathValue("key", "large.txt")
+		createW := httptest.NewRecorder()
+		handleCreateMultipartUpload(s.server, createW, createReq)
+
+		s.Equal(http.StatusOK, createW.Code)
+		var initResult InitiateMultipartUploadResult
+		s.Require().NoError(xml.Unmarshal(createW.Body.Bytes(), &initResult))
+		s.Equal("mp", initResult.Bucket)
+		s.Equal("large.txt", initResult.Key)
+		s.NotEmpty(initResult.UploadID)
+		uploadID := initResult.UploadID
+
+		// UploadPart 1
+		part1 := "Hello, "
+		req1 := httptest.NewRequest("PUT", "/s3api/mp/large.txt?partNumber=1&uploadId="+uploadID, strings.NewReader(part1))
+		req1.SetPathValue("bucket", "mp")
+		req1.SetPathValue("key", "large.txt")
+		req1.ContentLength = int64(len(part1))
+		w1 := httptest.NewRecorder()
+		handleUploadPart(s.server, w1, req1)
+		s.Equal(http.StatusOK, w1.Code)
+		s.NotEmpty(w1.Header().Get("ETag"))
+
+		// UploadPart 2
+		part2 := "World!"
+		req2 := httptest.NewRequest("PUT", "/s3api/mp/large.txt?partNumber=2&uploadId="+uploadID, strings.NewReader(part2))
+		req2.SetPathValue("bucket", "mp")
+		req2.SetPathValue("key", "large.txt")
+		req2.ContentLength = int64(len(part2))
+		w2 := httptest.NewRecorder()
+		handleUploadPart(s.server, w2, req2)
+		s.Equal(http.StatusOK, w2.Code)
+
+		// CompleteMultipartUpload
+		completeBody := `<CompleteMultipartUpload>` +
+			`<Part><PartNumber>1</PartNumber><ETag>` + w1.Header().Get("ETag") + `</ETag></Part>` +
+			`<Part><PartNumber>2</PartNumber><ETag>` + w2.Header().Get("ETag") + `</ETag></Part>` +
+			`</CompleteMultipartUpload>`
+		completeReq := httptest.NewRequest("POST", "/s3api/mp/large.txt?uploadId="+uploadID, strings.NewReader(completeBody))
+		completeReq.SetPathValue("bucket", "mp")
+		completeReq.SetPathValue("key", "large.txt")
+		completeW := httptest.NewRecorder()
+		handleCompleteMultipartUpload(s.server, completeW, completeReq)
+
+		s.Equal(http.StatusOK, completeW.Code)
+		var completeResult CompleteMultipartUploadResult
+		s.Require().NoError(xml.Unmarshal(completeW.Body.Bytes(), &completeResult))
+		s.Equal("mp", completeResult.Bucket)
+		s.Equal("large.txt", completeResult.Key)
+		s.Contains(completeResult.ETag, "-2") // multipart ETag ends with -<partCount>
+
+		// Verify assembled content
+		getReq := httptest.NewRequest("GET", "/s3api/mp/large.txt", nil)
+		getReq.SetPathValue("bucket", "mp")
+		getReq.SetPathValue("key", "large.txt")
+		getW := httptest.NewRecorder()
+		handleGetObject(s.server, getW, getReq)
+		s.Equal(http.StatusOK, getW.Code)
+		s.Equal("Hello, World!", getW.Body.String())
+
+		// Parts must be cleaned up — they should not appear in list results
+		listReq := httptest.NewRequest("GET", "/s3api/mp", nil)
+		listReq.SetPathValue("bucket", "mp")
+		listW := httptest.NewRecorder()
+		handleListObjects(s.server, listW, listReq)
+		var listResult ListBucketResult
+		s.Require().NoError(xml.Unmarshal(listW.Body.Bytes(), &listResult))
+		s.Len(listResult.Contents, 1)
+		s.Equal("large.txt", listResult.Contents[0].Key)
+	})
+
+	s.Run("abort cleans up parts", func() {
+		s.createBucket("ab")
+
+		createReq := httptest.NewRequest("POST", "/s3api/ab/f.txt?uploads", nil)
+		createReq.SetPathValue("bucket", "ab")
+		createReq.SetPathValue("key", "f.txt")
+		createW := httptest.NewRecorder()
+		handleCreateMultipartUpload(s.server, createW, createReq)
+		var initResult InitiateMultipartUploadResult
+		s.Require().NoError(xml.Unmarshal(createW.Body.Bytes(), &initResult))
+		uploadID := initResult.UploadID
+
+		// Upload a part
+		partReq := httptest.NewRequest("PUT", "/s3api/ab/f.txt?partNumber=1&uploadId="+uploadID, strings.NewReader("data"))
+		partReq.SetPathValue("bucket", "ab")
+		partReq.SetPathValue("key", "f.txt")
+		partReq.ContentLength = 4
+		partW := httptest.NewRecorder()
+		handleUploadPart(s.server, partW, partReq)
+		s.Equal(http.StatusOK, partW.Code)
+
+		// Abort
+		abortReq := httptest.NewRequest("DELETE", "/s3api/ab/f.txt?uploadId="+uploadID, nil)
+		abortReq.SetPathValue("bucket", "ab")
+		abortReq.SetPathValue("key", "f.txt")
+		abortW := httptest.NewRecorder()
+		handleAbortMultipartUpload(s.server, abortW, abortReq)
+		s.Equal(http.StatusNoContent, abortW.Code)
+
+		// List should be empty (final object was never written)
+		listReq := httptest.NewRequest("GET", "/s3api/ab", nil)
+		listReq.SetPathValue("bucket", "ab")
+		listW := httptest.NewRecorder()
+		handleListObjects(s.server, listW, listReq)
+		var listResult ListBucketResult
+		s.Require().NoError(xml.Unmarshal(listW.Body.Bytes(), &listResult))
+		s.Empty(listResult.Contents)
+	})
+
+	s.Run("parts hidden from list", func() {
+		s.createBucket("hid")
+
+		createReq := httptest.NewRequest("POST", "/s3api/hid/obj.txt?uploads", nil)
+		createReq.SetPathValue("bucket", "hid")
+		createReq.SetPathValue("key", "obj.txt")
+		createW := httptest.NewRecorder()
+		handleCreateMultipartUpload(s.server, createW, createReq)
+		var initResult InitiateMultipartUploadResult
+		s.Require().NoError(xml.Unmarshal(createW.Body.Bytes(), &initResult))
+		uploadID := initResult.UploadID
+
+		// Upload part but don't complete
+		partReq := httptest.NewRequest("PUT", "/s3api/hid/obj.txt?partNumber=1&uploadId="+uploadID, strings.NewReader("partial"))
+		partReq.SetPathValue("bucket", "hid")
+		partReq.SetPathValue("key", "obj.txt")
+		partReq.ContentLength = 7
+		handleUploadPart(s.server, httptest.NewRecorder(), partReq)
+
+		// Parts must not appear in list
+		listReq := httptest.NewRequest("GET", "/s3api/hid", nil)
+		listReq.SetPathValue("bucket", "hid")
+		listW := httptest.NewRecorder()
+		handleListObjects(s.server, listW, listReq)
+		var listResult ListBucketResult
+		s.Require().NoError(xml.Unmarshal(listW.Body.Bytes(), &listResult))
+		s.Empty(listResult.Contents)
+	})
+}
+
 // --- XML response format ---
 
 func (s *ObjectsTestSuite) TestXMLResponseFormat() {
