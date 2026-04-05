@@ -143,18 +143,6 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rc, err := obj.Open()
-	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
-		return
-	}
-	defer rc.Close()
-
-	w.Header().Set("Content-Length", strconv.FormatUint(obj.Length(), 10))
-	w.Header().Set("Last-Modified", obj.LastModified().Format(http.TimeFormat))
-	w.Header().Set("ETag", objectETag(obj))
-
 	// Write user metadata as x-amz-meta-* headers
 	if md := obj.Metadata(); md != nil {
 		for _, k := range md.Keys() {
@@ -165,7 +153,23 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("x-amz-meta-"+k, v)
 		}
 	}
+	w.Header().Set("Last-Modified", obj.LastModified().Format(http.TimeFormat))
+	w.Header().Set("ETag", objectETag(obj))
 
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" && r.Method != http.MethodHead {
+		handleRangeRequest(w, r, obj, rangeHeader)
+		return
+	}
+
+	rc, err := obj.Open()
+	if err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+	defer rc.Close()
+
+	w.Header().Set("Content-Length", strconv.FormatUint(obj.Length(), 10))
 	w.WriteHeader(http.StatusOK)
 
 	if r.Method != http.MethodHead {

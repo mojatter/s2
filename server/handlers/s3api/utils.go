@@ -4,7 +4,10 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/server"
@@ -44,6 +47,81 @@ type ErrNoSuchBucket struct {
 
 func (e *ErrNoSuchBucket) Error() string {
 	return "no such bucket: " + e.Name
+}
+
+func handleRangeRequest(w http.ResponseWriter, r *http.Request, obj s2.Object, rangeHeader string) {
+	if !strings.HasPrefix(rangeHeader, "bytes=") {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", obj.Length()))
+		writeError(w, r, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+
+	spec := rangeHeader[len("bytes="):]
+	var start, end uint64
+	total := obj.Length()
+
+	if before, after, ok := strings.Cut(spec, "-"); ok {
+		if before == "" {
+			// Suffix range: bytes=-N (last N bytes)
+			n, err := strconv.ParseUint(after, 10, 64)
+			if err != nil || n == 0 {
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
+				writeError(w, r, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			if n > total {
+				n = total
+			}
+			start = total - n
+			end = total - 1
+		} else {
+			s, err := strconv.ParseUint(before, 10, 64)
+			if err != nil || s >= total {
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
+				writeError(w, r, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
+			start = s
+			if after == "" {
+				end = total - 1
+			} else {
+				e, err := strconv.ParseUint(after, 10, 64)
+				if err != nil {
+					w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
+					writeError(w, r, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+					return
+				}
+				if e >= total {
+					e = total - 1
+				}
+				end = e
+			}
+		}
+	} else {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
+		writeError(w, r, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+
+	if start > end {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
+		writeError(w, r, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+
+	length := end - start + 1
+	rc, err := obj.OpenRange(start, length)
+	if err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+	defer rc.Close()
+
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
+	w.Header().Set("Content-Length", strconv.FormatUint(length, 10))
+	w.WriteHeader(http.StatusPartialContent)
+	_, _ = io.Copy(w, rc)
 }
 
 func s2ErrorToS3Error(err error) (string, string, int) {
