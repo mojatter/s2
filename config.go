@@ -1,0 +1,40 @@
+package s2
+
+type Type string
+
+const (
+	TypeOSFS  Type = "osfs"
+	TypeMemFS Type = "memfs"
+	TypeS3    Type = "s3"
+)
+
+var Types = []Type{TypeOSFS, TypeMemFS, TypeS3}
+
+// S3Config holds S3-specific configuration.
+// When fields are empty, the AWS SDK defaults (environment variables, shared
+// credentials, IAM role, etc.) are used.
+type S3Config struct {
+	// EndpointURL is a custom S3-compatible endpoint (e.g. "http://localhost:9000/s3api").
+	EndpointURL string `json:"endpoint_url,omitempty"`
+	// Region is the AWS region (e.g. "ap-northeast-1").
+	Region string `json:"region,omitempty"`
+	// AccessKeyID is the AWS access key ID.
+	AccessKeyID string `json:"access_key_id,omitempty"`
+	// SecretAccessKey is the AWS secret access key.
+	SecretAccessKey string `json:"secret_access_key,omitempty"`
+}
+
+// Config is a configuration for a storage.
+type Config struct {
+	// Type is the type of storage.
+	Type Type `json:"type"`
+	// Root is the root path of the storage.
+	// If Type is TypeOSFS, Root is the root path of the file system.
+	// If Type is TypeMemFS, Root is not used.
+	// If Type is TypeS3, Root is the S3 bucket name. The string following / in the bucket name is treated as a prefix.
+	Root string `json:"root"`
+	// SignedURL is the presign URL of the storage. This is used for TypeOSFS and TypeMemFS.
+	SignedURL string `json:"signed_url,omitempty"`
+	// S3 holds S3-specific settings. Only used when Type is TypeS3.
+	S3 *S3Config `json:"s3,omitempty"`
+}

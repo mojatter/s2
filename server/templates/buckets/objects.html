@@ -1,0 +1,154 @@
+<div class="header">
+  <div class="welcome-msg">
+    <h1>{{.BucketName}}</h1>
+    <div class="breadcrumbs">
+      <a href="/buckets/{{.BucketName}}" hx-get="/buckets/{{.BucketName}}" hx-target="#main-content" hx-push-url="true">root</a>
+      {{range .Breadcrumbs}}
+      <span class="separator">/</span>
+      <a href="/buckets/{{$.BucketName}}?prefix={{.Prefix}}" hx-get="/buckets/{{$.BucketName}}?prefix={{.Prefix}}" hx-target="#main-content" hx-push-url="true">{{.Name}}</a>
+      {{end}}
+    </div>
+  </div>
+  <div class="toolbar">
+    <button class="btn-primary-sm" onclick="this.nextElementSibling.classList.toggle('active')">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+        <line x1="12" y1="11" x2="12" y2="17"></line><line x1="9" y1="14" x2="15" y2="14"></line>
+      </svg>
+      New Folder
+    </button>
+    <form class="new-folder-form inline-form" hx-post="/buckets/{{.BucketName}}/folders" hx-target="#main-content">
+      <input type="hidden" name="prefix" value="{{.CurrentPrefix}}">
+      <input type="text" name="folder_name" placeholder="Folder name..." required>
+      <button type="submit">Create</button>
+    </form>
+
+    <div class="divider"></div>
+
+    <button class="btn-secondary-sm" onclick="this.nextElementSibling.querySelector('input[type=file]').click()">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line>
+      </svg>
+      Upload File
+    </button>
+    <form hx-post="/buckets/{{.BucketName}}/upload" hx-encoding="multipart/form-data" hx-target="#main-content" style="display:none;">
+      <input type="hidden" name="prefix" value="{{.CurrentPrefix}}">
+      <input type="file" name="file" onchange="this.form.requestSubmit()">
+    </form>
+  </div>
+</div>
+
+
+<div class="main-view">
+  <div class="object-table-container">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Size</th>
+          <th>Last Modified</th>
+          <th style="width: 100px;">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{if .HasParent}}
+        <tr>
+          <td>
+            <div class="obj-name-wrap">
+              <span class="obj-icon">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M10 18l-6-6 6-6"></path><path d="M4 12h18"></path>
+                </svg>
+              </span>
+              <a href="/buckets/{{.BucketName}}?prefix={{.ParentPrefix}}" hx-get="/buckets/{{.BucketName}}?prefix={{.ParentPrefix}}" hx-target="#main-content" hx-push-url="true">.. (Parent Directory)</a>
+            </div>
+          </td>
+          <td>-</td>
+          <td>-</td>
+          <td></td>
+        </tr>
+        {{end}}
+
+        {{range .Prefixes}}
+        <tr>
+          <td>
+            <div class="obj-name-wrap">
+              <span class="obj-icon folder-icon">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                </svg>
+              </span>
+              <a href="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-get="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-target="#main-content" hx-push-url="true">{{baseName .}}/</a>
+            </div>
+          </td>
+          <td>-</td>
+          <td>-</td>
+          <td>
+            <button class="btn-delete-sm" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.}}/&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete folder '{{baseName .}}' and all its contents?" hx-target="#main-content" title="Delete Folder">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+              </svg>
+            </button>
+          </td>
+        </tr>
+
+        {{end}}
+
+        {{range .Objects}}
+        <tr>
+          <td>
+            <div class="obj-name-wrap">
+              <span class="obj-icon">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
+                  <polyline points="13 2 13 9 20 9"></polyline>
+                </svg>
+              </span>
+              {{baseName .Name}}
+            </div>
+          </td>
+          <td>{{formatSize .Length}}</td>
+          <td>{{formatTime .LastModified}}</td>
+          <td>
+            <div class="actions-cell">
+              {{if isPreviewable .Name .Length}}
+              <button class="btn-view" title="Preview File" onclick="openPreview('/buckets/{{$.BucketName}}/view/{{.Name}}', '{{baseName .Name}}')">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle>
+                </svg>
+              </button>
+              {{end}}
+              <a class="btn-download" href="/buckets/{{$.BucketName}}/view/{{.Name}}" download="{{baseName .Name}}" title="Download File">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+              </a>
+              <button class="btn-delete-sm" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.Name}}&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete file '{{baseName .Name}}'?" hx-target="#main-content" title="Delete File">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                </svg>
+              </button>
+            </div>
+          </td>
+        </tr>
+
+        {{else}}
+          {{if not .Prefixes}}
+          <tr>
+            <td colspan="4" class="empty-state">
+              <div class="empty-icon">
+                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <line x1="12" y1="8" x2="12" y2="12"></line>
+                  <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                </svg>
+              </div>
+              <p>This folder is empty.</p>
+            </td>
+          </tr>
+          {{end}}
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
