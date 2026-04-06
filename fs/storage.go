@@ -92,22 +92,29 @@ func (s *storage) List(ctx context.Context, prefix string, limit int) ([]s2.Obje
 }
 
 func (s *storage) ListAfter(ctx context.Context, prefix string, limit int, after string) ([]s2.Object, []string, error) {
-	if prefix == "" {
-		prefix = "."
-	}
 	if limit <= 0 {
 		limit = 1000
 	}
-	entries, err := fs.ReadDir(s.fsys, prefix)
+	// Normalize prefix into a directory path acceptable to fs.ReadDir.
+	// S3 callers commonly pass a trailing slash (e.g. "dir/"), which fs.ValidPath rejects.
+	dir := strings.TrimSuffix(prefix, "/")
+	if dir == "" {
+		dir = "."
+	}
+	entries, err := fs.ReadDir(s.fsys, dir)
 	if err != nil {
+		// A non-existent prefix is not an error in S3 semantics; return an empty result.
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil, nil
+		}
 		return nil, nil, fmt.Errorf("failed to read dir: %w", err)
 	}
 	prefixes := make([]string, 0)
 	objs := make([]s2.Object, 0, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
-		if prefix != "." {
-			name = filepath.Join(prefix, entry.Name())
+		if dir != "." {
+			name = filepath.Join(dir, entry.Name())
 		}
 		if after != "" && name <= after {
 			continue

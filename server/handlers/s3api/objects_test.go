@@ -105,6 +105,56 @@ func (s *ObjectsTestSuite) TestListObjects() {
 		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
 		s.Equal("NoSuchBucket", errResp.Code)
 	})
+
+	s.Run("prefix with trailing slash and delimiter", func() {
+		s.putObject("ts", "dir/a.txt", "a")
+		s.putObject("ts", "dir/b.txt", "b")
+		s.putObject("ts", "other.txt", "x")
+
+		req := httptest.NewRequest("GET", "/s3api/ts?delimiter=/&prefix=dir/", nil)
+		req.SetPathValue("bucket", "ts")
+		w := httptest.NewRecorder()
+		handleListObjects(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		var result ListBucketResult
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+		s.Len(result.Contents, 2)
+		s.Equal("dir/a.txt", result.Contents[0].Key)
+		s.Equal("dir/b.txt", result.Contents[1].Key)
+	})
+
+	s.Run("nonexistent prefix with delimiter returns empty", func() {
+		s.createBucket("np")
+		s.putObject("np", "real.txt", "x")
+
+		req := httptest.NewRequest("GET", "/s3api/np?delimiter=/&prefix=nope/", nil)
+		req.SetPathValue("bucket", "np")
+		w := httptest.NewRecorder()
+		handleListObjects(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		var result ListBucketResult
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+		s.Empty(result.Contents)
+		s.Empty(result.CommonPrefixes)
+	})
+
+	s.Run("nonexistent prefix without trailing slash returns empty", func() {
+		s.createBucket("np2")
+		s.putObject("np2", "real.txt", "x")
+
+		req := httptest.NewRequest("GET", "/s3api/np2?delimiter=/&prefix=nope", nil)
+		req.SetPathValue("bucket", "np2")
+		w := httptest.NewRecorder()
+		handleListObjects(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		var result ListBucketResult
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+		s.Empty(result.Contents)
+		s.Empty(result.CommonPrefixes)
+	})
 }
 
 // --- ListObjects pagination ---
