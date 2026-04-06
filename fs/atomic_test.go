@@ -3,7 +3,6 @@ package fs
 import (
 	"context"
 	"io"
-	iofs "io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,13 +146,6 @@ func TestTempName_Unique(t *testing.T) {
 	require.True(t, strings.HasPrefix(filepath.Base(a), tmpPrefix))
 	require.Equal(t, "dir", filepath.Dir(a))
 }
-
-// Verify that atomicWrite falls back gracefully when the filesystem does not
-// implement wfs.RenameFS. Wrap an osfs in an iofs.FS-only adapter to strip
-// the RenameFS capability.
-type readOnlyFS struct{ iofs.FS }
-
-func (readOnlyFS) Rename(string, string) error { panic("should not be called") }
 
 func TestAtomicWrite_FallbackWhenNoRename(t *testing.T) {
 	// Use a memfs storage and assert that even without a RenameFS the file
