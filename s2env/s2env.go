@@ -35,7 +35,7 @@ func LoadConfigsFile(filename string) (Configs, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open config file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return LoadConfigs(f)
 }
 

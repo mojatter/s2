@@ -151,7 +151,7 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	strg, err := s.Buckets.Get(ctx, name)
 	if err != nil {

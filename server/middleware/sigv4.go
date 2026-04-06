@@ -52,7 +52,7 @@ func writeS3AuthError(w http.ResponseWriter, r *http.Request, message string) {
 	}
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(http.StatusForbidden)
-	fmt.Fprint(w, xml.Header)
+	_, _ = fmt.Fprint(w, xml.Header)
 	enc := xml.NewEncoder(w)
 	if err := enc.Encode(resp); err != nil {
 		slog.Error("Failed to encode XML", "error", err)
