@@ -3,6 +3,7 @@ package objects
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"path"
@@ -68,7 +69,7 @@ func handleView(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"%s\"", path.Base(objectName)))
 
 	if _, err := io.Copy(w, rc); err != nil {
-		fmt.Printf("Error copying object content: %v\n", err)
+		slog.Error("Failed to copy object content", "error", err)
 	}
 }
 

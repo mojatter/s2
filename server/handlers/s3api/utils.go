@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -27,7 +28,7 @@ func writeXML(w http.ResponseWriter, status int, v interface{}) {
 	fmt.Fprintf(w, xml.Header)
 	enc := xml.NewEncoder(w)
 	if err := enc.Encode(v); err != nil {
-		fmt.Printf("Error encoding XML: %v\n", err)
+		slog.Error("Failed to encode XML", "error", err)
 	}
 }
 
