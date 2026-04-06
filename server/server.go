@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -89,7 +90,7 @@ func Run(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Listening on %s\n", cfg.Listen)
+	slog.Info("Listening", "addr", cfg.Listen)
 	return srv.Start(ctx)
 }
 
@@ -137,7 +138,7 @@ func (s *Server) Start(ctx context.Context) error {
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 30 * time.Second,
 	}
-	fmt.Printf("Server listening on %s\n", s.Config.Listen)
+	slog.Info("Server listening", "addr", s.Config.Listen)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -148,7 +149,7 @@ func (s *Server) Start(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		fmt.Println("Shutting down...")
+		slog.Info("Shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
@@ -54,7 +55,7 @@ func writeS3AuthError(w http.ResponseWriter, r *http.Request, message string) {
 	fmt.Fprint(w, xml.Header)
 	enc := xml.NewEncoder(w)
 	if err := enc.Encode(resp); err != nil {
-		fmt.Printf("Error encoding XML: %v\n", err)
+		slog.Error("Failed to encode XML", "error", err)
 	}
 }
 
