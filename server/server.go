@@ -90,6 +90,16 @@ func Run(args []string) error {
 	if err != nil {
 		return err
 	}
+	for _, name := range cfg.Buckets {
+		if ok, _ := srv.Buckets.Exists(name); ok {
+			continue
+		}
+		if err := srv.Buckets.Create(ctx, name); err != nil {
+			return fmt.Errorf("create initial bucket %q: %w", name, err)
+		}
+		slog.Info("Created initial bucket", "name", name)
+	}
+
 	slog.Info("Listening", "addr", cfg.Listen)
 	return srv.Start(ctx)
 }
