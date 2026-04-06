@@ -1,12 +1,12 @@
 package fs
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -141,14 +141,9 @@ func saveMetadata(fsys fs.FS, name string, md s2.Metadata) error {
 		}
 		return nil
 	}
-	metaFile, err := wfs.CreateFile(fsys, metaName, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("failed to create meta file: %w", err)
-	}
-	defer func() { _ = metaFile.Close() }()
-
-	if err := json.NewEncoder(metaFile).Encode(md); err != nil {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(md); err != nil {
 		return fmt.Errorf("failed to encode meta file: %w", err)
 	}
-	return nil
+	return atomicWrite(fsys, metaName, &buf)
 }
