@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/mojatter/s2"
 )
@@ -19,6 +20,7 @@ const (
 	EnvS2ServerMaxPreviewSize = "S2_SERVER_MAX_PREVIEW_SIZE"
 	EnvS2ServerUser           = "S2_SERVER_USER"
 	EnvS2ServerPassword       = "S2_SERVER_PASSWORD" // #nosec G101 -- env var name, not a credential
+	EnvS2ServerBuckets        = "S2_SERVER_BUCKETS"
 )
 
 // Config is a configuration for the server.
@@ -35,6 +37,8 @@ type Config struct {
 	User string `json:"user"`
 	// Password is the password for authentication (Basic Auth password for Web Console, Secret Access Key for S3 API).
 	Password string `json:"password"`
+	// Buckets is a list of bucket names to create on startup if they don't already exist.
+	Buckets []string `json:"buckets"`
 }
 
 const (
@@ -94,6 +98,9 @@ func (cfg *Config) LoadEnv() error {
 	}
 	if v := os.Getenv(EnvS2ServerPassword); v != "" {
 		cfg.Password = v
+	}
+	if v := os.Getenv(EnvS2ServerBuckets); v != "" {
+		cfg.Buckets = strings.Split(v, ",")
 	}
 	return nil
 }

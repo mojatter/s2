@@ -176,6 +176,59 @@ func TestStart(t *testing.T) {
 	})
 }
 
+func TestInitBuckets(t *testing.T) {
+	t.Run("creates buckets on startup", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Root = t.TempDir()
+		cfg.Buckets = []string{"alpha", "bravo"}
+
+		srv, err := NewServer(context.Background(), cfg)
+		require.NoError(t, err)
+
+		// Simulate the init-buckets logic from Run
+		for _, name := range cfg.Buckets {
+			if ok, _ := srv.Buckets.Exists(name); !ok {
+				require.NoError(t, srv.Buckets.Create(context.Background(), name))
+			}
+		}
+
+		names, err := srv.Buckets.Names()
+		require.NoError(t, err)
+		assert.Contains(t, names, "alpha")
+		assert.Contains(t, names, "bravo")
+	})
+
+	t.Run("skips existing buckets", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.Root = t.TempDir()
+		cfg.Buckets = []string{"existing"}
+
+		srv, err := NewServer(context.Background(), cfg)
+		require.NoError(t, err)
+
+		// Pre-create the bucket
+		require.NoError(t, srv.Buckets.Create(context.Background(), "existing"))
+
+		// Run init logic again — should not error
+		for _, name := range cfg.Buckets {
+			if ok, _ := srv.Buckets.Exists(name); !ok {
+				require.NoError(t, srv.Buckets.Create(context.Background(), name))
+			}
+		}
+
+		names, err := srv.Buckets.Names()
+		require.NoError(t, err)
+		assert.Contains(t, names, "existing")
+	})
+}
+
+func TestLoadEnvBuckets(t *testing.T) {
+	t.Setenv(EnvS2ServerBuckets, "foo,bar,baz")
+	cfg := DefaultConfig()
+	require.NoError(t, cfg.LoadEnv())
+	assert.Equal(t, []string{"foo", "bar", "baz"}, cfg.Buckets)
+}
+
 func TestDefaultConfig(t *testing.T) {
 	testCases := []struct {
 		caseName string

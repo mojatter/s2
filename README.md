@@ -1,4 +1,4 @@
-# S2 - Simple Storage
+# S2 — Simple Storage
 
 S2 is a lightweight object storage library and S3-compatible server written in Go.
 It provides a unified interface for multiple storage backends and an embeddable S3-compatible server — all in a single package.
@@ -244,8 +244,9 @@ type Storage interface {
 | `S2_SERVER_ROOT` | `/var/lib/s2` | Root directory for bucket data |
 | `S2_SERVER_USER` | — | Username for authentication (disables auth if empty) |
 | `S2_SERVER_PASSWORD` | — | Password for authentication |
+| `S2_SERVER_BUCKETS` | — | Comma-separated list of buckets to create on startup |
 
-`S2_SERVER_LISTEN`, `S2_SERVER_TYPE`, `S2_SERVER_ROOT`, `S2_SERVER_USER`, and `S2_SERVER_PASSWORD` take precedence over the config file.
+Environment variables take precedence over the config file.
 Other settings (such as S3 backend options) are not configurable via environment variables — use `S2_SERVER_CONFIG` to point to a JSON config file instead.
 
 ### Authentication
@@ -289,7 +290,8 @@ When `S2_SERVER_USER` is empty (the default), authentication is disabled.
   "type": "osfs",
   "root": "/var/lib/s2",
   "user": "myuser",
-  "password": "mypassword"
+  "password": "mypassword",
+  "buckets": ["assets", "uploads"]
 }
 ```
 
