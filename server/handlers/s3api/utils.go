@@ -25,7 +25,7 @@ const (
 func writeXML(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, xml.Header)
+	_, _ = fmt.Fprint(w, xml.Header)
 	enc := xml.NewEncoder(w)
 	if err := enc.Encode(v); err != nil {
 		slog.Error("Failed to encode XML", "error", err)

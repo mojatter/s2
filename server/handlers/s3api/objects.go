@@ -219,7 +219,7 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, code, msg, status)
 		return
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	w.Header().Set("Content-Length", strconv.FormatUint(obj.Length(), 10))
 	w.WriteHeader(http.StatusOK)
@@ -296,7 +296,7 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, obj s2.Object, r
 		writeError(w, r, code, msg, status)
 		return
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
 	w.Header().Set("Content-Length", strconv.FormatUint(length, 10))
@@ -429,7 +429,7 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 		writeError(w, r, code, msg, status)
 		return
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	// Write to destination
 	dstStrg, err := s.Buckets.Get(ctx, dstBucket)

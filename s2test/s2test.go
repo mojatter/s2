@@ -206,7 +206,7 @@ func TestStorageGetPut(ctx context.Context, strg s2.Storage) error {
 	if err != nil {
 		return fmt.Errorf("Get(%q).Open() failed: %w", name, err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	b, err := io.ReadAll(rc)
 	if err != nil {
 		return fmt.Errorf("ReadAll failed: %w", err)

@@ -16,8 +16,17 @@ linters:
     gosec:
       excludes:
         # G104 (unhandled errors) overlaps with errcheck and we
-        # intentionally ignore some Close errors.
+        # intentionally ignore some Close errors via the '_ =' pattern.
         - G104
+  exclusions:
+    rules:
+      # Test files routinely call Close() without checking, write fixture
+      # files with 0o644 permissions, and use crypto/md5 to compute S3
+      # ETags for assertions. None of these are real concerns in test code.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
 
 issues:
   max-issues-per-linter: 0

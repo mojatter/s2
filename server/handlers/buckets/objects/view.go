@@ -62,7 +62,7 @@ func handleView(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	ct := contentTypeByExt(path.Ext(objectName))
 	w.Header().Set("Content-Type", ct)
