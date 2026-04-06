@@ -1,7 +1,62 @@
 # S2 — Simple Storage
 
+[![PkgGoDev](https://pkg.go.dev/badge/github.com/mojatter/s2)](https://pkg.go.dev/github.com/mojatter/s2)
+[![Go Report Card](https://goreportcard.com/badge/github.com/mojatter/s2)](https://goreportcard.com/report/github.com/mojatter/s2)
+
 S2 is a lightweight object storage library and S3-compatible server written in Go.
 It provides a unified interface for multiple storage backends and an embeddable S3-compatible server — all in a single package.
+
+## Why S2?
+
+MinIO was the go-to S3-compatible server for local development, but it entered maintenance mode in December 2025 and was archived in February 2026. S2 fills this gap with a different philosophy:
+
+- **Library-first** — Use S2 as a Go library with a clean interface, or run it as a server. Most alternatives are server-only.
+- **Truly lightweight** — Single binary, no external dependencies, starts in milliseconds.
+- **Test-friendly** — Use `memfs` backend for fast, isolated tests without Docker or external processes.
+
+## Migrating from MinIO
+
+For most local-development use cases, replacing MinIO with S2 is a one-line change in `docker-compose.yml`. S2 listens on the same `:9000` port and serves the S3 API under `/s3api`.
+
+**docker-compose.yml**
+
+```yaml
+services:
+  s3:
+    image: mojatter/s2-server
+    ports:
+      - "9000:9000"
+    environment:
+      S2_SERVER_USER: minioadmin
+      S2_SERVER_PASSWORD: minioadmin
+      S2_SERVER_BUCKETS: assets,uploads
+    volumes:
+      - s2-data:/var/lib/s2
+
+volumes:
+  s2-data:
+```
+
+**Endpoint difference** — MinIO serves the S3 API at the root (`http://localhost:9000`), while S2 serves it under `/s3api` (`http://localhost:9000/s3api`). Update your S3 client's endpoint URL accordingly. The path under `/s3api` is reserved for the Web Console.
+
+**Environment variable mapping**
+
+| MinIO | S2 |
+|-------|----|
+| `MINIO_ROOT_USER` | `S2_SERVER_USER` |
+| `MINIO_ROOT_PASSWORD` | `S2_SERVER_PASSWORD` |
+| `MINIO_VOLUMES` | `S2_SERVER_ROOT` (default `/var/lib/s2`) |
+| `MINIO_DEFAULT_BUCKETS` | `S2_SERVER_BUCKETS` |
+
+**Migrating existing data** — S2's `osfs` backend stores objects as plain files on disk (no proprietary format), so any S3 client can copy data over:
+
+```sh
+# Mirror an existing MinIO instance into a fresh S2 instance
+aws --endpoint-url http://old-minio:9000 s3 sync s3://my-bucket /tmp/dump
+aws --endpoint-url http://localhost:9000/s3api s3 sync /tmp/dump s3://my-bucket
+```
+
+Or use `mc mirror` directly between the two endpoints.
 
 ## Features
 
@@ -143,6 +198,37 @@ Or use the AWS CLI:
 aws --endpoint-url http://localhost:9000/s3api s3 ls
 aws --endpoint-url http://localhost:9000/s3api s3 cp ./file.txt s3://my-bucket/file.txt
 ```
+
+### In Tests
+
+For tests, swap any backend for `memfs` to get an isolated, in-process storage with no Docker, no temp directories, and no cleanup. The same `s2.Storage` interface is used in production and tests.
+
+```go
+package mypkg_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/mojatter/s2"
+	_ "github.com/mojatter/s2/fs" // registers memfs
+)
+
+func TestUploadAvatar(t *testing.T) {
+	ctx := context.Background()
+	strg, err := s2.NewStorage(ctx, s2.Config{Type: s2.TypeMemFS})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := UploadAvatar(ctx, strg, "user-1", []byte("...")); err != nil {
+		t.Fatal(err)
+	}
+	// assert via strg.Get / strg.List ...
+}
+```
+
+The `s2test` package provides reusable assertion helpers (e.g. `s2test.TestStorageList`) for validating `Storage` implementations and exercising your own code against any backend.
 
 ## Storage Backends
 
@@ -321,13 +407,18 @@ s2-server -f config.json
 
 Custom metadata is supported via `x-amz-meta-*` headers on PutObject/CopyObject and returned on GetObject/HeadObject.
 
-## Why S2?
+## Limitations
 
-MinIO was the go-to S3-compatible server for local development, but it entered maintenance mode in December 2025 and was archived in February 2026. S2 fills this gap with a different philosophy:
+S2 aims to cover the parts of the S3 API that matter for local development and lightweight production use. Some features are intentionally **not** implemented:
 
-- **Library-first** — Use S2 as a Go library with a clean interface, or run it as a server. Most alternatives are server-only.
-- **Truly lightweight** — Single binary, no external dependencies, starts in milliseconds.
-- **Test-friendly** — Use `memfs` backend for fast, isolated tests without Docker or external processes.
+- **Object versioning** — `VersionId`, version listing, and `s3:GetObjectVersion` are not supported. Buckets behave as if versioning is permanently disabled.
+- **ListObjectsV2 only** — The legacy `ListObjects` (V1) API is not implemented. Most modern SDKs use V2 by default; older clients may need configuration changes.
+- **Server-side encryption (SSE-S3 / SSE-KMS / SSE-C)** — Not implemented. Use full-disk encryption at the OS level if needed.
+- **Bucket policies, ACLs, IAM** — Authentication is a single user/password pair; there is no per-bucket or per-object access control. For multi-tenant scenarios, use AWS S3 or another full-featured implementation.
+- **Replication, lifecycle rules, object lock** — Not implemented.
+- **`osfs` durability** — Object writes are **not yet atomic**: a crash mid-write can leave a partially-written file on disk. For local development this is rarely an issue, but production use of `osfs` should keep this in mind. Atomic writes (temp file + rename + fsync) are planned.
+
+If your use case needs any of the above, S2 is probably not the right tool — consider AWS S3, Ceph RGW, or SeaweedFS.
 
 ## License
 
