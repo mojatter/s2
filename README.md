@@ -416,7 +416,6 @@ S2 aims to cover the parts of the S3 API that matter for local development and l
 - **Server-side encryption (SSE-S3 / SSE-KMS / SSE-C)** — Not implemented. Use full-disk encryption at the OS level if needed.
 - **Bucket policies, ACLs, IAM** — Authentication is a single user/password pair; there is no per-bucket or per-object access control. For multi-tenant scenarios, use AWS S3 or another full-featured implementation.
 - **Replication, lifecycle rules, object lock** — Not implemented.
-- **`osfs` durability** — Object writes are **not yet atomic**: a crash mid-write can leave a partially-written file on disk. For local development this is rarely an issue, but production use of `osfs` should keep this in mind. Atomic writes (temp file + rename + fsync) are planned.
 
 If your use case needs any of the above, S2 is probably not the right tool — consider AWS S3, Ceph RGW, or SeaweedFS.
 

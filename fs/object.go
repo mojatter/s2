@@ -1,13 +1,13 @@
 package fs
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
-	"path/filepath"
+	"path"
 	"time"
 
 	"github.com/mojatter/s2"
@@ -103,7 +103,7 @@ func (l *limitReadCloser) Read(p []byte) (n int, err error) {
 
 
 func metaPath(name string) string {
-	return filepath.Join(".meta", name)
+	return path.Join(".meta", name)
 }
 
 func loadMetadata(fsys fs.FS, name string) (s2.Metadata, error) {
@@ -141,14 +141,9 @@ func saveMetadata(fsys fs.FS, name string, md s2.Metadata) error {
 		}
 		return nil
 	}
-	metaFile, err := wfs.CreateFile(fsys, metaName, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("failed to create meta file: %w", err)
-	}
-	defer func() { _ = metaFile.Close() }()
-
-	if err := json.NewEncoder(metaFile).Encode(md); err != nil {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(md); err != nil {
 		return fmt.Errorf("failed to encode meta file: %w", err)
 	}
-	return nil
+	return atomicWrite(fsys, metaName, &buf)
 }

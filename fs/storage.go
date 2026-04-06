@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"net/url"
-	"os"
-	"path/filepath"
+	"path"
 	"strings"
 	"time"
 
@@ -114,12 +112,12 @@ func (s *storage) ListAfter(ctx context.Context, prefix string, limit int, after
 	for _, entry := range entries {
 		name := entry.Name()
 		if dir != "." {
-			name = filepath.Join(dir, entry.Name())
+			name = path.Join(dir, entry.Name())
 		}
 		if after != "" && name <= after {
 			continue
 		}
-		if isMetaDir(entry.Name()) {
+		if isMetaDir(entry.Name()) || isTempFile(entry.Name()) {
 			continue
 		}
 		info, err := entry.Info()
@@ -166,6 +164,9 @@ func (s *storage) ListRecursiveAfter(ctx context.Context, prefix string, limit i
 			if isMetaDir(d.Name()) {
 				return fs.SkipDir
 			}
+			return nil
+		}
+		if isTempFile(d.Name()) {
 			return nil
 		}
 		objs = append(objs, newObjectFileInfo(s.fsys, name, info))
@@ -218,14 +219,8 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 	}
 	defer func() { _ = rc.Close() }()
 
-	out, err := wfs.CreateFile(s.fsys, obj.Name(), os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
-	}
-	defer func() { _ = out.Close() }()
-
-	if _, err := io.Copy(out, rc); err != nil {
-		return fmt.Errorf("failed to copy: %w", err)
+	if err := atomicWrite(s.fsys, obj.Name(), rc); err != nil {
+		return err
 	}
 	return saveMetadata(s.fsys, obj.Name(), obj.Metadata())
 }
@@ -248,19 +243,33 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 	}
 	defer func() { _ = rc.Close() }()
 
-	out, err := wfs.CreateFile(s.fsys, dst, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
-	}
-	defer func() { _ = out.Close() }()
-
-	if _, err := io.Copy(out, rc); err != nil {
-		return fmt.Errorf("failed to copy: %w", err)
+	if err := atomicWrite(s.fsys, dst, rc); err != nil {
+		return err
 	}
 	return saveMetadata(s.fsys, dst, srcObj.Metadata())
 }
 
 func (s *storage) Move(ctx context.Context, src, dst string) error {
+	// Prefer a direct rename on filesystems that support it: it's atomic and
+	// avoids reading the object body twice.
+	if _, ok := s.fsys.(wfs.RenameFS); ok {
+		if _, err := s.Get(ctx, src); err != nil {
+			return err
+		}
+		if err := wfs.Rename(s.fsys, src, dst); err != nil {
+			return fmt.Errorf("failed to rename %q to %q: %w", src, dst, err)
+		}
+		// Move metadata too. If the source has no metadata, ignore ErrNotExist.
+		srcMeta := metaPath(src)
+		if _, err := fs.Stat(s.fsys, srcMeta); err == nil {
+			if err := wfs.Rename(s.fsys, srcMeta, metaPath(dst)); err != nil {
+				return fmt.Errorf("failed to rename metadata for %q: %w", src, err)
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("failed to stat metadata for %q: %w", src, err)
+		}
+		return nil
+	}
 	if err := s.Copy(ctx, src, dst); err != nil {
 		return err
 	}
