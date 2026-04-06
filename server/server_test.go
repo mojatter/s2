@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -112,6 +113,66 @@ func TestRegisterHandleFunc(t *testing.T) {
 		assert.PanicsWithValue(t, "s2: handler already registered for GET /test", func() {
 			RegisterHandleFunc("GET /test", noop)
 		})
+	})
+}
+
+func TestStart(t *testing.T) {
+	t.Run("returns nil on context cancel", func(t *testing.T) {
+		// Pick a free port upfront so we know what to dial
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		addr := ln.Addr().String()
+		ln.Close()
+
+		cfg := DefaultConfig()
+		cfg.Root = t.TempDir()
+		cfg.Listen = addr
+
+		srv, err := NewServer(context.Background(), cfg)
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- srv.Start(ctx)
+		}()
+
+		// Wait for server to be listening
+		require.Eventually(t, func() bool {
+			conn, dialErr := net.Dial("tcp", addr)
+			if dialErr != nil {
+				return false
+			}
+			conn.Close()
+			return true
+		}, 3*time.Second, 10*time.Millisecond)
+
+		cancel()
+
+		select {
+		case err := <-errCh:
+			assert.NoError(t, err)
+		case <-time.After(15 * time.Second):
+			t.Fatal("Start did not return after context cancel")
+		}
+	})
+
+	t.Run("returns error on port conflict", func(t *testing.T) {
+		// Occupy a port
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer ln.Close()
+
+		cfg := DefaultConfig()
+		cfg.Root = t.TempDir()
+		cfg.Listen = ln.Addr().String()
+
+		srv, err := NewServer(context.Background(), cfg)
+		require.NoError(t, err)
+
+		err = srv.Start(context.Background())
+		assert.Error(t, err)
 	})
 }
 
