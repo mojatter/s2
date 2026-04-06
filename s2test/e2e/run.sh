@@ -114,6 +114,23 @@ run_test "MultipartUpload" sh -c '
   [ "$out" = "part1datapart2data" ]
 '
 
+# Listing nonexistent / trailing-slash prefixes (regression for ListAfter bug)
+run_test "ListNonexistentPrefix" sh -c '
+  EP="'"$ENDPOINT"'"
+  out=$(aws s3 --endpoint-url "$EP" ls s3://test-bucket/no-such-dir/ 2>&1)
+  # Should succeed and produce no output
+  [ -z "$out" ]
+'
+
+run_test "ListPrefixWithTrailingSlash" sh -c '
+  EP="'"$ENDPOINT"'"
+  echo -n "x" | aws s3 --endpoint-url "$EP" cp - s3://test-bucket/sub/a.txt
+  echo -n "y" | aws s3 --endpoint-url "$EP" cp - s3://test-bucket/sub/b.txt
+  out=$(aws s3 --endpoint-url "$EP" ls s3://test-bucket/sub/)
+  echo "$out" | grep -q "a.txt"
+  echo "$out" | grep -q "b.txt"
+'
+
 # Cleanup
 run_test "DeleteBucket" sh -c '
   aws s3 --endpoint-url "'"$ENDPOINT"'" rm s3://test-bucket --recursive
