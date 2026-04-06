@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"path/filepath"
+	"path"
 	"time"
 
 	"github.com/mojatter/s2"
@@ -103,7 +103,7 @@ func (l *limitReadCloser) Read(p []byte) (n int, err error) {
 
 
 func metaPath(name string) string {
-	return filepath.Join(".meta", name)
+	return path.Join(".meta", name)
 }
 
 func loadMetadata(fsys fs.FS, name string) (s2.Metadata, error) {

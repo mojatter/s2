@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/url"
-	"path/filepath"
+	"path"
 	"strings"
 	"time"
 
@@ -112,7 +112,7 @@ func (s *storage) ListAfter(ctx context.Context, prefix string, limit int, after
 	for _, entry := range entries {
 		name := entry.Name()
 		if dir != "." {
-			name = filepath.Join(dir, entry.Name())
+			name = path.Join(dir, entry.Name())
 		}
 		if after != "" && name <= after {
 			continue

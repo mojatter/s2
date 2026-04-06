@@ -41,25 +41,25 @@ func atomicWrite(fsys iofs.FS, name string, src io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
-	cleanup := func() { _ = wfs.RemoveFile(fsys, tmp) }
+	// After a successful Rename the temp path no longer exists, so this is
+	// a no-op on the success path. On any error path it cleans up the
+	// leftover temp file.
+	defer func() { _ = wfs.RemoveFile(fsys, tmp) }()
+
 	if _, err := io.Copy(f, src); err != nil {
 		_ = f.Close()
-		cleanup()
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 	if sf, ok := f.(wfs.SyncWriterFile); ok {
 		if err := sf.Sync(); err != nil {
 			_ = f.Close()
-			cleanup()
 			return fmt.Errorf("failed to sync temp file: %w", err)
 		}
 	}
 	if err := f.Close(); err != nil {
-		cleanup()
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
 	if err := wfs.Rename(fsys, tmp, name); err != nil {
-		cleanup()
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 	return nil
@@ -87,7 +87,11 @@ func tempName(name string) (string, error) {
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", fmt.Errorf("failed to generate temp name: %w", err)
 	}
-	return dir + tmpPrefix + base + "." + hex.EncodeToString(buf[:]), nil
+	tmpBase := tmpPrefix + base + "." + hex.EncodeToString(buf[:])
+	if dir == "" {
+		return tmpBase, nil
+	}
+	return path.Join(dir, tmpBase), nil
 }
 
 // isTempFile reports whether a basename is an in-flight atomic-write temp
