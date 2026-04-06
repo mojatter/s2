@@ -7,8 +7,10 @@ import (
 	"html/template"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime/debug"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -80,15 +82,15 @@ func Run(args []string) error {
 		return err
 	}
 
-	srv, err := NewServer(context.Background(), cfg)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	srv, err := NewServer(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("Listening on %s\n", cfg.Listen)
-	if err := srv.Start(); err != nil {
-		return err
-	}
-	return nil
+	return srv.Start(ctx)
 }
 
 // Server is a web server that provides a Web Console and S3-compatible API for S2.
@@ -128,15 +130,32 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// Start starts the server.
-func (s *Server) Start() error {
-	server := &http.Server{
+// Start starts the server and shuts it down gracefully when ctx is cancelled.
+func (s *Server) Start(ctx context.Context) error {
+	srv := &http.Server{
 		Addr:              s.Config.Listen,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	fmt.Printf("Server listening on %s\n", s.Config.Listen)
-	return server.ListenAndServe()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		fmt.Println("Shutting down...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("shutdown: %w", err)
+		}
+		return nil
+	}
 }
 
 type HandlerFunc func(srv *Server, w http.ResponseWriter, r *http.Request)
