@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./docs/s2-gopher-gemini.png" alt="S2 — Simple Storage" width="480">
+</p>
+
 # S2 — Simple Storage
 
 [![PkgGoDev](https://pkg.go.dev/badge/github.com/mojatter/s2)](https://pkg.go.dev/github.com/mojatter/s2)
@@ -27,8 +31,8 @@ services:
     ports:
       - "9000:9000"
     environment:
-      S2_SERVER_USER: minioadmin
-      S2_SERVER_PASSWORD: minioadmin
+      S2_SERVER_USER: myuser
+      S2_SERVER_PASSWORD: mypassword
       S2_SERVER_BUCKETS: assets,uploads
     volumes:
       - s2-data:/var/lib/s2
@@ -65,6 +69,10 @@ Or use `mc mirror` directly between the two endpoints.
 - **Lightweight** — Minimal dependencies, single binary, `go install` ready
 - **Pluggable Backends** — Register storage implementations with a blank import
 - **Web Console** — Built-in browser interface for managing buckets and objects
+
+<p align="center">
+  <img src="./docs/web-console.png" alt="S2 Web Console" width="720">
+</p>
 
 ## Install
 
@@ -258,8 +266,8 @@ strg, err := s2.NewStorage(ctx, s2.Config{
     S3: &s2.S3Config{
         EndpointURL:    "http://localhost:9000/s3api",
         Region:         "ap-northeast-1",
-        AccessKeyID:    "minioadmin",
-        SecretAccessKey: "minioadmin",
+        AccessKeyID:    "s2user",
+        SecretAccessKey: "s2password",
     },
 })
 ```
@@ -273,8 +281,8 @@ With `s2env`, use the `"s3"` key in JSON:
     "root": "dev-bucket",
     "s3": {
       "endpoint_url": "http://localhost:9000/s3api",
-      "access_key_id": "minioadmin",
-      "secret_access_key": "minioadmin"
+      "access_key_id": "myuser",
+      "secret_access_key": "mypassword"
     }
   },
   "prod": {
@@ -422,3 +430,8 @@ If your use case needs any of the above, S2 is probably not the right tool — c
 ## License
 
 MIT
+
+## Credits
+
+The header image was generated with [Google Gemini](https://gemini.google.com/).
+It includes the Go Gopher mascot, originally designed by [Renée French](https://reneefrench.blogspot.com/) and licensed under [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).
