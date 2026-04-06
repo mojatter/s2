@@ -140,6 +140,97 @@ func (s *ObjectsTestSuite) TestListObjects() {
 		s.Empty(result.CommonPrefixes)
 	})
 
+	s.Run("non-directory-aligned prefix with delimiter", func() {
+		s.putObject("nda", "images/a.png", "a")
+		s.putObject("nda", "images/b.png", "b")
+		s.putObject("nda", "docs/c.txt", "c")
+
+		testCases := []struct {
+			caseName       string
+			prefix         string
+			wantContents   []string
+			wantPrefixes   []string
+		}{
+			{
+				caseName:     "partial prefix matches subdir as common prefix",
+				prefix:       "im",
+				wantContents: nil,
+				wantPrefixes: []string{"images/"},
+			},
+			{
+				caseName:     "partial prefix matching nothing",
+				prefix:       "z",
+				wantContents: nil,
+				wantPrefixes: nil,
+			},
+			{
+				caseName:     "directory + partial filename",
+				prefix:       "images/a",
+				wantContents: []string{"images/a.png"},
+				wantPrefixes: nil,
+			},
+			{
+				caseName:     "directory + nonexistent partial filename",
+				prefix:       "images/z",
+				wantContents: nil,
+				wantPrefixes: nil,
+			},
+			{
+				caseName:     "directory with trailing slash lists contents",
+				prefix:       "images/",
+				wantContents: []string{"images/a.png", "images/b.png"},
+				wantPrefixes: nil,
+			},
+		}
+		for _, tc := range testCases {
+			s.Run(tc.caseName, func() {
+				url := "/s3api/nda?delimiter=/&prefix=" + tc.prefix
+				req := httptest.NewRequest("GET", url, nil)
+				req.SetPathValue("bucket", "nda")
+				w := httptest.NewRecorder()
+				handleListObjects(s.server, w, req)
+
+				s.Equal(http.StatusOK, w.Code)
+				var result ListBucketResult
+				s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+
+				gotContents := make([]string, len(result.Contents))
+				for i, c := range result.Contents {
+					gotContents[i] = c.Key
+				}
+				gotPrefixes := make([]string, len(result.CommonPrefixes))
+				for i, p := range result.CommonPrefixes {
+					gotPrefixes[i] = p.Prefix
+				}
+				if len(gotContents) == 0 {
+					gotContents = nil
+				}
+				if len(gotPrefixes) == 0 {
+					gotPrefixes = nil
+				}
+				s.Equal(tc.wantContents, gotContents)
+				s.Equal(tc.wantPrefixes, gotPrefixes)
+			})
+		}
+	})
+
+	s.Run("non-directory-aligned prefix without delimiter (recursive)", func() {
+		s.putObject("ndr", "images/a.png", "a")
+		s.putObject("ndr", "images/b.png", "b")
+
+		req := httptest.NewRequest("GET", "/s3api/ndr?prefix=im", nil)
+		req.SetPathValue("bucket", "ndr")
+		w := httptest.NewRecorder()
+		handleListObjects(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		var result ListBucketResult
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+		s.Len(result.Contents, 2)
+		s.Equal("images/a.png", result.Contents[0].Key)
+		s.Equal("images/b.png", result.Contents[1].Key)
+	})
+
 	s.Run("nonexistent prefix without trailing slash returns empty", func() {
 		s.createBucket("np2")
 		s.putObject("np2", "real.txt", "x")

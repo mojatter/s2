@@ -22,6 +22,47 @@ const (
 	defaultMaxKeys  = 1000
 )
 
+// splitS3Prefix splits an S3 prefix at the last "/" so the directory portion
+// can be passed to a directory-oriented List call and the remainder used as a
+// basename filter on the entries.
+//
+//	"images/a"  -> ("images/", "a")
+//	"images/"   -> ("images/", "")
+//	"im"        -> ("",        "im")
+//	""          -> ("",        "")
+func splitS3Prefix(prefix string) (listDir, baseFilter string) {
+	if i := strings.LastIndex(prefix, "/"); i >= 0 {
+		return prefix[:i+1], prefix[i+1:]
+	}
+	return "", prefix
+}
+
+// entryBasename returns the portion of a full key after the listDir, which is
+// the basename of the entry inside the listed directory.
+func entryBasename(key, listDir string) string {
+	return strings.TrimPrefix(key, listDir)
+}
+
+func filterObjectsByBasename(objs []s2.Object, listDir, baseFilter string) []s2.Object {
+	out := objs[:0]
+	for _, obj := range objs {
+		if strings.HasPrefix(entryBasename(obj.Name(), listDir), baseFilter) {
+			out = append(out, obj)
+		}
+	}
+	return out
+}
+
+func filterPrefixesByBasename(prefixes []string, listDir, baseFilter string) []string {
+	out := prefixes[:0]
+	for _, p := range prefixes {
+		if strings.HasPrefix(entryBasename(p, listDir), baseFilter) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func handleListObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
@@ -57,16 +98,26 @@ func handleListObjects(s *server.Server, w http.ResponseWriter, r *http.Request)
 	var objs []s2.Object
 	var prefixes []string
 	if delimiter == "" {
+		// Recursive: ListRecursive already does string-prefix matching, so an
+		// arbitrary S3 prefix (e.g. "im" matching "images/a.png") works as-is.
 		if after != "" {
 			objs, err = strg.ListRecursiveAfter(ctx, prefix, fetchLimit, after)
 		} else {
 			objs, err = strg.ListRecursive(ctx, prefix, fetchLimit)
 		}
 	} else {
+		// Delimited: S3 prefixes are arbitrary strings, but storage.List has
+		// directory semantics. Split the prefix at the last "/" so we list the
+		// directory portion and filter the entries by the remaining basename.
+		listDir, baseFilter := splitS3Prefix(prefix)
 		if after != "" {
-			objs, prefixes, err = strg.ListAfter(ctx, prefix, fetchLimit, after)
+			objs, prefixes, err = strg.ListAfter(ctx, listDir, fetchLimit, after)
 		} else {
-			objs, prefixes, err = strg.List(ctx, prefix, fetchLimit)
+			objs, prefixes, err = strg.List(ctx, listDir, fetchLimit)
+		}
+		if err == nil && baseFilter != "" {
+			objs = filterObjectsByBasename(objs, listDir, baseFilter)
+			prefixes = filterPrefixesByBasename(prefixes, listDir, baseFilter)
 		}
 	}
 	if err != nil {

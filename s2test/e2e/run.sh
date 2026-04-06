@@ -131,6 +131,27 @@ run_test "ListPrefixWithTrailingSlash" sh -c '
   echo "$out" | grep -q "b.txt"
 '
 
+# Non-directory-aligned S3 prefix matching (e.g. "im" matches "images/")
+run_test "ListPartialPrefixMatchesSubdir" sh -c '
+  EP="'"$ENDPOINT"'"
+  echo -n "1" | aws s3 --endpoint-url "$EP" cp - s3://test-bucket/images/a.png
+  echo -n "2" | aws s3 --endpoint-url "$EP" cp - s3://test-bucket/images/b.png
+  # list-objects-v2 with prefix=im delimiter=/ should return CommonPrefix images/
+  out=$(aws s3api --endpoint-url "$EP" list-objects-v2 \
+    --bucket test-bucket --prefix im --delimiter / \
+    --query "CommonPrefixes[].Prefix" --output text)
+  [ "$out" = "images/" ]
+'
+
+run_test "ListDirAndPartialFilename" sh -c '
+  EP="'"$ENDPOINT"'"
+  # prefix=images/a delimiter=/ should return only images/a.png in Contents
+  out=$(aws s3api --endpoint-url "$EP" list-objects-v2 \
+    --bucket test-bucket --prefix images/a --delimiter / \
+    --query "Contents[].Key" --output text)
+  [ "$out" = "images/a.png" ]
+'
+
 # Cleanup
 run_test "DeleteBucket" sh -c '
   aws s3 --endpoint-url "'"$ENDPOINT"'" rm s3://test-bucket --recursive
