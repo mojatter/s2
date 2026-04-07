@@ -152,6 +152,23 @@ run_test "ListDirAndPartialFilename" sh -c '
   [ "$out" = "images/a.png" ]
 '
 
+# Presigned URL (query-string SigV4)
+run_test "PresignedGetObject" sh -c '
+  EP="'"$ENDPOINT"'"
+  echo -n "presigned body" | aws s3 --endpoint-url "$EP" cp - s3://test-bucket/presigned.txt
+  url=$(aws s3 presign --endpoint-url "$EP" s3://test-bucket/presigned.txt --expires-in 300)
+  out=$(curl -sS -f "$url")
+  [ "$out" = "presigned body" ]
+'
+
+run_test "PresignedGetObject_TamperedSignatureRejected" sh -c '
+  EP="'"$ENDPOINT"'"
+  url=$(aws s3 presign --endpoint-url "$EP" s3://test-bucket/presigned.txt --expires-in 300)
+  tampered=$(echo "$url" | sed "s/X-Amz-Signature=[0-9a-f]*/X-Amz-Signature=deadbeef/")
+  status=$(curl -sS -o /dev/null -w "%{http_code}" "$tampered")
+  [ "$status" = "403" ]
+'
+
 # Cleanup
 run_test "DeleteBucket" sh -c '
   aws s3 --endpoint-url "'"$ENDPOINT"'" rm s3://test-bucket --recursive
