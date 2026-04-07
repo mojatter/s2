@@ -37,7 +37,7 @@ func TestNewStorage(t *testing.T) {
 			cfg: Config{
 				Type: "UNKNOWN",
 			},
-			wantErr: "unknown type: UNKNOWN",
+			wantErr: "s2: unknown storage type: UNKNOWN",
 		},
 	}
 	for _, tc := range testCases {

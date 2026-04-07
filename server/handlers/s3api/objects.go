@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mojatter/s2"
+	"github.com/mojatter/s2/internal/numconv"
 	"github.com/mojatter/s2/server"
 	"github.com/mojatter/s2/server/middleware"
 )
@@ -95,26 +96,33 @@ func handleListObjects(s *server.Server, w http.ResponseWriter, r *http.Request)
 	// Fetch extra to detect truncation (+1) and account for hidden .keep files (+1)
 	fetchLimit := maxKeys + 2
 
-	var objs []s2.Object
-	var prefixes []string
+	var (
+		objs     []s2.Object
+		prefixes []string
+		res      s2.ListResult
+	)
 	if delimiter == "" {
-		// Recursive: ListRecursive already does string-prefix matching, so an
+		// Recursive: List already does string-prefix matching, so an
 		// arbitrary S3 prefix (e.g. "im" matching "images/a.png") works as-is.
-		if after != "" {
-			objs, err = strg.ListRecursiveAfter(ctx, prefix, fetchLimit, after)
-		} else {
-			objs, err = strg.ListRecursive(ctx, prefix, fetchLimit)
-		}
+		res, err = strg.List(ctx, s2.ListOptions{
+			Prefix:    prefix,
+			After:     after,
+			Limit:     fetchLimit,
+			Recursive: true,
+		})
+		objs = res.Objects
 	} else {
 		// Delimited: S3 prefixes are arbitrary strings, but storage.List has
 		// directory semantics. Split the prefix at the last "/" so we list the
 		// directory portion and filter the entries by the remaining basename.
 		listDir, baseFilter := splitS3Prefix(prefix)
-		if after != "" {
-			objs, prefixes, err = strg.ListAfter(ctx, listDir, fetchLimit, after)
-		} else {
-			objs, prefixes, err = strg.List(ctx, listDir, fetchLimit)
-		}
+		res, err = strg.List(ctx, s2.ListOptions{
+			Prefix: listDir,
+			After:  after,
+			Limit:  fetchLimit,
+		})
+		objs = res.Objects
+		prefixes = res.CommonPrefixes
 		if err == nil && baseFilter != "" {
 			objs = filterObjectsByBasename(objs, listDir, baseFilter)
 			prefixes = filterPrefixesByBasename(prefixes, listDir, baseFilter)
@@ -196,14 +204,11 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write user metadata as x-amz-meta-* headers
-	if md := obj.Metadata(); md != nil {
-		for _, k := range md.Keys() {
-			if k == etagMetadataKey {
-				continue
-			}
-			v, _ := md.Get(k)
-			w.Header().Set("x-amz-meta-"+k, v)
+	for k, v := range obj.Metadata() {
+		if k == etagMetadataKey {
+			continue
 		}
+		w.Header().Set("x-amz-meta-"+k, v)
 	}
 	w.Header().Set("Last-Modified", obj.LastModified().Format(http.TimeFormat))
 	w.Header().Set("ETag", objectETag(obj))
@@ -345,7 +350,7 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 			contentLength = n
 		}
 	}
-	obj := s2.NewObjectReader(key, io.NopCloser(body), s2.MustUint64(contentLength))
+	obj := s2.NewObjectReader(key, io.NopCloser(body), numconv.MustUint64(contentLength))
 
 	if err := strg.Put(ctx, obj); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
@@ -381,8 +386,8 @@ func objectETag(obj s2.Object) string {
 
 const metaHeaderPrefix = "X-Amz-Meta-"
 
-func parseMetadataHeaders(r *http.Request) s2.MetadataMap {
-	md := make(s2.MetadataMap)
+func parseMetadataHeaders(r *http.Request) s2.Metadata {
+	md := make(s2.Metadata)
 	for key, values := range r.Header {
 		if strings.HasPrefix(key, metaHeaderPrefix) && len(values) > 0 {
 			metaKey := strings.ToLower(key[len(metaHeaderPrefix):])

@@ -32,7 +32,7 @@ func (s *ObjectTestSuite) TestObjectProperties() {
 		name:         "test.txt",
 		length:       uint64(5),
 		lastModified: now,
-		metadata:     s2.MetadataMap{"existing": "true"},
+		metadata:     s2.Metadata{"existing": "true"},
 	}
 
 	s.Equal("test.txt", obj.Name())
@@ -66,10 +66,10 @@ func (s *ObjectTestSuite) TestObjectMetadataNil() {
 		bucket: "my-bucket",
 		name:   "test.txt",
 	}
-	// metadata is nil, should return empty MetadataMap
+	// metadata is nil, Metadata() should return an empty (non-nil) Metadata
 	md := obj.Metadata()
 	s.NotNil(md)
-	s.Equal(0, md.Len())
+	s.Equal(0, len(md))
 }
 
 func (s *ObjectTestSuite) TestObjectOpenRange() {
@@ -96,8 +96,7 @@ func (s *ObjectTestSuite) TestObjectOpenRange() {
 		}
 		_, err := obj.OpenRange(0, 5)
 		s.Error(err)
-		var notExist *s2.ErrNotExist
-		s.ErrorAs(err, &notExist)
+		s.ErrorIs(err, s2.ErrNotExist)
 	})
 }
 
@@ -114,6 +113,5 @@ func (s *ObjectTestSuite) TestObjectOpenNotFound() {
 	s.Nil(rc)
 
 	// Ensure it wraps into s2.ErrNotExist
-	var notExist *s2.ErrNotExist
-	s.Require().ErrorAs(err, &notExist)
+	s.Require().ErrorIs(err, s2.ErrNotExist)
 }

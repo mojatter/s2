@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNewObject(t *testing.T) {
+func TestNewObjectFromFile(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "s2test")
 	require.NoError(t, err)
 	defer os.RemoveAll(tempDir)
@@ -22,7 +22,7 @@ func TestNewObject(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx := context.Background()
-	obj, err := NewObject(ctx, tempFile)
+	obj, err := NewObjectFromFile(ctx, tempFile)
 	require.NoError(t, err)
 	assert.Equal(t, tempFile, obj.Name())
 	assert.Equal(t, uint64(5), obj.Length())
@@ -37,14 +37,13 @@ func TestNewObject(t *testing.T) {
 	assert.Equal(t, "hello", string(content))
 
 	// Test non-existent file
-	_, err = NewObject(ctx, filepath.Join(tempDir, "nonexistent"))
+	_, err = NewObjectFromFile(ctx, filepath.Join(tempDir, "nonexistent"))
 	assert.Error(t, err)
 
 	// Test directory
-	_, err = NewObject(ctx, tempDir)
+	_, err = NewObjectFromFile(ctx, tempDir)
 	assert.Error(t, err)
-	var errNotExist *ErrNotExist
-	assert.ErrorAs(t, err, &errNotExist)
+	assert.ErrorIs(t, err, ErrNotExist)
 }
 
 func TestNewObjectReader(t *testing.T) {
@@ -74,13 +73,13 @@ func TestNewObjectBytes(t *testing.T) {
 
 	md := obj.Metadata()
 	assert.NotNil(t, md)
-	md.Put("foo", "bar")
-	assert.Equal(t, "bar", obj.Metadata().ToMap()["foo"])
+	md.Set("foo", "bar")
+	assert.Equal(t, "bar", obj.Metadata()["foo"])
 }
 
 func TestObjectOptions(t *testing.T) {
 	t.Run("WithMetadata on NewObjectBytes", func(t *testing.T) {
-		md := MetadataMap{"author": "alice", "version": "1"}
+		md := Metadata{"author": "alice", "version": "1"}
 		obj := NewObjectBytes("meta.txt", []byte("data"), WithMetadata(md))
 
 		v, ok := obj.Metadata().Get("author")
@@ -99,7 +98,7 @@ func TestObjectOptions(t *testing.T) {
 	})
 
 	t.Run("WithMetadata on NewObjectReader", func(t *testing.T) {
-		md := MetadataMap{"key": "val"}
+		md := Metadata{"key": "val"}
 		body := io.NopCloser(os.Stdin)
 		obj := NewObjectReader("r.txt", body, 0, WithMetadata(md))
 
@@ -116,8 +115,8 @@ func TestObjectOptions(t *testing.T) {
 		f := filepath.Join(tempDir, "opt.txt")
 		require.NoError(t, os.WriteFile(f, []byte("hello"), 0644))
 
-		md := MetadataMap{"key": "val"}
-		obj, err := NewObject(context.Background(), f, WithMetadata(md))
+		md := Metadata{"key": "val"}
+		obj, err := NewObjectFromFile(context.Background(), f, WithMetadata(md))
 		require.NoError(t, err)
 
 		v, ok := obj.Metadata().Get("key")
@@ -127,7 +126,7 @@ func TestObjectOptions(t *testing.T) {
 
 	t.Run("multiple options", func(t *testing.T) {
 		ts := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-		md := MetadataMap{"a": "b"}
+		md := Metadata{"a": "b"}
 		obj := NewObjectBytes("multi.txt", []byte("x"), WithMetadata(md), WithLastModified(ts))
 
 		assert.Equal(t, ts, obj.LastModified())
@@ -146,7 +145,7 @@ func TestOpenRange(t *testing.T) {
 	require.NoError(t, os.WriteFile(f, []byte("Hello, World!"), 0644))
 
 	ctx := context.Background()
-	obj, err := NewObject(ctx, f)
+	obj, err := NewObjectFromFile(ctx, f)
 	require.NoError(t, err)
 
 	t.Run("full range", func(t *testing.T) {
@@ -159,7 +158,7 @@ func TestOpenRange(t *testing.T) {
 
 	t.Run("partial from middle", func(t *testing.T) {
 		// Re-create obj since Open consumes body for non-file objects
-		obj, err := NewObject(ctx, f)
+		obj, err := NewObjectFromFile(ctx, f)
 		require.NoError(t, err)
 		rc, err := obj.OpenRange(7, 5)
 		require.NoError(t, err)
@@ -169,7 +168,7 @@ func TestOpenRange(t *testing.T) {
 	})
 
 	t.Run("partial from start", func(t *testing.T) {
-		obj, err := NewObject(ctx, f)
+		obj, err := NewObjectFromFile(ctx, f)
 		require.NoError(t, err)
 		rc, err := obj.OpenRange(0, 5)
 		require.NoError(t, err)

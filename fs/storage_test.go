@@ -180,7 +180,9 @@ func (s *StorageTestSuite) TestList() {
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			got, _, err := tc.strg.List(tc.ctx, tc.prefix, tc.limit)
+			res, err := tc.strg.List(tc.ctx, s2.ListOptions{Prefix: tc.prefix, Limit: tc.limit})
+			got := res.Objects
+			_ = got
 			if tc.wantErr != "" {
 				s.EqualError(err, tc.wantErr)
 				return
@@ -260,7 +262,8 @@ func (s *StorageTestSuite) TestListRecursive() {
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			got, err := tc.strg.ListRecursive(tc.ctx, tc.prefix, tc.limit)
+			res, err := tc.strg.List(tc.ctx, s2.ListOptions{Prefix: tc.prefix, Limit: tc.limit, Recursive: true})
+			got := res.Objects
 			if tc.wantErr != "" {
 				s.EqualError(err, tc.wantErr)
 				return
@@ -313,7 +316,8 @@ func (s *StorageTestSuite) TestListAfter() {
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			got, _, err := tc.strg.ListAfter(tc.ctx, tc.prefix, tc.limit, tc.after)
+			res, err := tc.strg.List(tc.ctx, s2.ListOptions{Prefix: tc.prefix, Limit: tc.limit, After: tc.after})
+			got := res.Objects
 			s.Require().NoError(err)
 			s.Require().Equal(len(tc.want), len(got))
 			for i, w := range tc.want {
@@ -345,7 +349,8 @@ func (s *StorageTestSuite) TestListRecursiveAfter() {
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			got, err := tc.strg.ListRecursiveAfter(tc.ctx, tc.prefix, tc.limit, tc.after)
+			res, err := tc.strg.List(tc.ctx, s2.ListOptions{Prefix: tc.prefix, Limit: tc.limit, After: tc.after, Recursive: true})
+			got := res.Objects
 			s.Require().NoError(err)
 			s.Require().Equal(len(tc.want), len(got))
 			for i, w := range tc.want {
@@ -364,7 +369,7 @@ func (s *StorageTestSuite) TestListRecursiveAfter_WalkDirError() {
 	strg := &storage{fsys: &errReadDirFS{FS: base, errorPath: "cc"}}
 	ctx := context.Background()
 
-	_, err := strg.ListRecursive(ctx, "", 10)
+	_, err := strg.List(ctx, s2.ListOptions{Limit: 10, Recursive: true})
 	s.Error(err)
 	s.ErrorContains(err, "injected ReadDir error")
 }
@@ -422,7 +427,7 @@ func (s *StorageTestSuite) TestPut() {
 			obj: &s2test.BytesObject{
 				Name_:     "new.txt",
 				Data:      []byte("new content"),
-				Metadata_: s2.MetadataMap{"key": "val"},
+				Metadata_: s2.Metadata{"key": "val"},
 			},
 			wantBody: "new content",
 		},
@@ -433,7 +438,7 @@ func (s *StorageTestSuite) TestPut() {
 				o := &s2test.BytesObject{
 					Name_:     "empty-meta.txt",
 					Data:      []byte("content"),
-					Metadata_: s2.MetadataMap{"key": "val"},
+					Metadata_: s2.Metadata{"key": "val"},
 				}
 				_ = strg.Put(context.Background(), o)
 				return strg
@@ -442,7 +447,7 @@ func (s *StorageTestSuite) TestPut() {
 			obj: &s2test.BytesObject{
 				Name_:     "empty-meta.txt",
 				Data:      []byte("updated"),
-				Metadata_: s2.MetadataMap{},
+				Metadata_: s2.Metadata{},
 			},
 			wantBody: "updated",
 		},
@@ -460,11 +465,11 @@ func (s *StorageTestSuite) TestPut() {
 
 			body, _ := io.ReadAll(rc)
 			s.Equal(tc.wantBody, string(body))
-			if tc.obj.Metadata().Len() > 0 {
+			if len(tc.obj.Metadata()) > 0 {
 				v, _ := got.Metadata().Get("key")
 				s.Equal("val", v)
 			} else {
-				s.Equal(0, got.Metadata().Len())
+				s.Equal(0, len(got.Metadata()))
 			}
 		})
 	}
@@ -521,8 +526,9 @@ func (s *StorageTestSuite) TestDeleteRecursive() {
 			}
 			s.Require().NoError(err)
 
-			objs, err := tc.strg.ListRecursive(tc.ctx, "", 10)
+			res, err := tc.strg.List(tc.ctx, s2.ListOptions{Limit: 10, Recursive: true})
 			s.Require().NoError(err)
+			objs := res.Objects
 			s.Equal(len(tc.wantLeft), len(objs))
 			for i, w := range tc.wantLeft {
 				s.Equal(w, objs[i].Name())
@@ -539,9 +545,9 @@ func (s *StorageTestSuite) TestSub() {
 		s.Require().NoError(err)
 		s.Equal(s2.TypeMemFS, sub.Type())
 
-		objs, err := sub.ListRecursive(context.Background(), "", 10)
+		res, err := sub.List(context.Background(), s2.ListOptions{Limit: 10, Recursive: true})
 		s.Require().NoError(err)
-		s.Len(objs, 2)
+		s.Len(res.Objects, 2)
 	})
 }
 
@@ -571,7 +577,7 @@ func (s *StorageTestSuite) TestPutMetadata() {
 	ctx := context.Background()
 
 	s.Run("typical", func() {
-		err := strg.PutMetadata(ctx, "a.txt", s2.MetadataMap{"key": "val"})
+		err := strg.PutMetadata(ctx, "a.txt", s2.Metadata{"key": "val"})
 		s.Require().NoError(err)
 
 		obj, err := strg.Get(ctx, "a.txt")
@@ -582,7 +588,7 @@ func (s *StorageTestSuite) TestPutMetadata() {
 	})
 
 	s.Run("not found", func() {
-		err := strg.PutMetadata(ctx, "not-found.txt", s2.MetadataMap{"key": "val"})
+		err := strg.PutMetadata(ctx, "not-found.txt", s2.Metadata{"key": "val"})
 		s.Error(err)
 	})
 }
@@ -677,7 +683,7 @@ func (s *StorageTestSuite) TestSignedURL() {
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			got, err := tc.strg.SignedURL(tc.ctx, tc.name, tc.ttl)
+			got, err := tc.strg.SignedURL(tc.ctx, s2.SignedURLOptions{Name: tc.name, TTL: tc.ttl})
 			if tc.wantErr != "" {
 				s.ErrorContains(err, tc.wantErr)
 				return

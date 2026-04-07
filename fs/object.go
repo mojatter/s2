@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mojatter/s2"
+	"github.com/mojatter/s2/internal/numconv"
 	"github.com/mojatter/wfs"
 )
 
@@ -26,7 +27,7 @@ func newObjectFileInfo(fsys fs.FS, name string, info fs.FileInfo) *object {
 	return &object{
 		fsys:         fsys,
 		name:         name,
-		length:       s2.MustUint64(info.Size()),
+		length:       numconv.MustUint64(info.Size()),
 		lastModified: info.ModTime(),
 	}
 }
@@ -58,7 +59,7 @@ func (o *object) LastModified() time.Time {
 
 func (o *object) Metadata() s2.Metadata {
 	if o.metadata == nil {
-		o.metadata = make(s2.MetadataMap)
+		o.metadata = make(s2.Metadata)
 	}
 	return o.metadata
 }
@@ -72,22 +73,22 @@ func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
 		return rc, nil
 	}
 	if seeker, ok := rc.(io.ReadSeeker); ok {
-		if _, err := seeker.Seek(s2.MustInt64(offset), io.SeekStart); err != nil {
+		if _, err := seeker.Seek(numconv.MustInt64(offset), io.SeekStart); err != nil {
 			_ = rc.Close()
 			return nil, err
 		}
 		return &limitReadCloser{
-			Reader: io.LimitReader(seeker, s2.MustInt64(length)),
+			Reader: io.LimitReader(seeker, numconv.MustInt64(length)),
 			Closer: rc,
 		}, nil
 	}
 	// Fallback for non-seeker
-	if _, err := io.CopyN(io.Discard, rc, s2.MustInt64(offset)); err != nil {
+	if _, err := io.CopyN(io.Discard, rc, numconv.MustInt64(offset)); err != nil {
 		_ = rc.Close()
 		return nil, err
 	}
 	return &limitReadCloser{
-		Reader: io.LimitReader(rc, s2.MustInt64(length)),
+		Reader: io.LimitReader(rc, numconv.MustInt64(length)),
 		Closer: rc,
 	}, nil
 }
@@ -116,7 +117,7 @@ func loadMetadata(fsys fs.FS, name string) (s2.Metadata, error) {
 	}
 	defer func() { _ = metaFile.Close() }()
 
-	var md s2.MetadataMap
+	var md s2.Metadata
 	if err := json.NewDecoder(metaFile).Decode(&md); err != nil {
 		return nil, fmt.Errorf("failed to decode meta file: %w", err)
 	}
@@ -125,7 +126,7 @@ func loadMetadata(fsys fs.FS, name string) (s2.Metadata, error) {
 
 func saveMetadata(fsys fs.FS, name string, md s2.Metadata) error {
 	metaName := metaPath(name)
-	if md.Len() == 0 {
+	if len(md) == 0 {
 		metaInfo, err := fs.Stat(fsys, metaName)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
@@ -134,7 +135,7 @@ func saveMetadata(fsys fs.FS, name string, md s2.Metadata) error {
 			return fmt.Errorf("failed to stat meta file: %w", err)
 		}
 		if metaInfo.IsDir() {
-			return &s2.ErrNotExist{Name: metaName}
+			return fmt.Errorf("%w: %s", s2.ErrNotExist, metaName)
 		}
 		if err := wfs.RemoveFile(fsys, metaName); err != nil {
 			return fmt.Errorf("failed to remove meta file: %w", err)

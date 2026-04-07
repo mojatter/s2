@@ -2,6 +2,7 @@ package s2test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -56,30 +57,30 @@ func TestStorageListWithPrefixes(ctx context.Context, strg s2.Storage, prefix st
 		}
 	}
 
-	objs, prefixes, err := strg.List(ctx, prefix, 0)
+	res, err := strg.List(ctx, s2.ListOptions{Prefix: prefix})
 	if err != nil {
-		errorf("List(%q, 0) failed: %v", prefix, err)
+		errorf("List(prefix=%q) failed: %v", prefix, err)
 	} else {
-		checkMatch(fmt.Sprintf("List(%q, 0)", prefix), objs, expected)
-		checkPrefixes(fmt.Sprintf("List(%q, 0) prefixes", prefix), prefixes, expectedPrefixes)
+		checkMatch(fmt.Sprintf("List(prefix=%q)", prefix), res.Objects, expected)
+		checkPrefixes(fmt.Sprintf("List(prefix=%q) prefixes", prefix), res.CommonPrefixes, expectedPrefixes)
 	}
 
 	if len(expected) > 1 {
 		limit := len(expected) / 2
-		objs1, _, err := strg.List(ctx, prefix, limit)
+		res1, err := strg.List(ctx, s2.ListOptions{Prefix: prefix, Limit: limit})
 		if err != nil {
-			errorf("List(%q, %d) failed: %v", prefix, limit, err)
-		} else if len(objs1) != limit {
-			errorf("List(%q, %d) returned %d objects", prefix, limit, len(objs1))
+			errorf("List(prefix=%q, limit=%d) failed: %v", prefix, limit, err)
+		} else if len(res1.Objects) != limit {
+			errorf("List(prefix=%q, limit=%d) returned %d objects", prefix, limit, len(res1.Objects))
 		} else {
-			last := objs1[len(objs1)-1].Name()
-			objs2, _, err := strg.ListAfter(ctx, prefix, 0, last)
+			last := res1.Objects[len(res1.Objects)-1].Name()
+			res2, err := strg.List(ctx, s2.ListOptions{Prefix: prefix, After: last})
 			if err != nil {
-				errorf("ListAfter(%q, 0, %q) failed: %v", prefix, last, err)
+				errorf("List(prefix=%q, after=%q) failed: %v", prefix, last, err)
 			} else {
 				var combined []s2.Object
-				combined = append(combined, objs1...)
-				combined = append(combined, objs2...)
+				combined = append(combined, res1.Objects...)
+				combined = append(combined, res2.Objects...)
 				checkMatch(fmt.Sprintf("List Pagination (prefix %q, limit %d, after %q)", prefix, limit, last), combined, expected)
 			}
 		}
@@ -114,17 +115,16 @@ func TestStorageListRecursive(ctx context.Context, strg s2.Storage, expected ...
 		}
 	}
 
-	// 1. Check ListRecursive("", 0)
-	objs, err := strg.ListRecursive(ctx, "", 0)
+	// 1. Check List(Recursive: true)
+	res, err := strg.List(ctx, s2.ListOptions{Recursive: true})
 	if err != nil {
-		errorf("ListRecursive(\"\", 0) failed: %v", err)
+		errorf("List(recursive) failed: %v", err)
 	} else {
-		checkMatch("ListRecursive(\"\", 0)", objs, expected)
+		checkMatch("List(recursive)", res.Objects, expected)
 	}
 
 	// 2. Test prefix filtering
 	if len(expected) > 0 {
-		// Find a prefix that matches a subset
 		for _, name := range expected {
 			if idx := strings.LastIndex(name, "/"); idx > 0 {
 				prefix := name[:idx+1]
@@ -135,11 +135,11 @@ func TestStorageListRecursive(ctx context.Context, strg s2.Storage, expected ...
 					}
 				}
 				if len(want) > 0 && len(want) < len(expected) {
-					objs, err := strg.ListRecursive(ctx, prefix, 0)
+					res, err := strg.List(ctx, s2.ListOptions{Prefix: prefix, Recursive: true})
 					if err != nil {
-						errorf("ListRecursive(%q, 0) failed: %v", prefix, err)
+						errorf("List(prefix=%q, recursive) failed: %v", prefix, err)
 					} else {
-						checkMatch(fmt.Sprintf("ListRecursive(%q, 0)", prefix), objs, want)
+						checkMatch(fmt.Sprintf("List(prefix=%q, recursive)", prefix), res.Objects, want)
 					}
 					break // test one prefix
 				}
@@ -147,23 +147,23 @@ func TestStorageListRecursive(ctx context.Context, strg s2.Storage, expected ...
 		}
 	}
 
-	// 3. Test Pagination (ListRecursive & ListRecursiveAfter)
+	// 3. Test pagination via After
 	if len(expected) > 1 {
 		limit := len(expected) / 2
-		objs1, err := strg.ListRecursive(ctx, "", limit)
+		res1, err := strg.List(ctx, s2.ListOptions{Limit: limit, Recursive: true})
 		if err != nil {
-			errorf("ListRecursive pagination failed: %v", err)
-		} else if len(objs1) != limit {
-			errorf("ListRecursive(\"\", %d) returned %d objects", limit, len(objs1))
+			errorf("List recursive pagination failed: %v", err)
+		} else if len(res1.Objects) != limit {
+			errorf("List(limit=%d, recursive) returned %d objects", limit, len(res1.Objects))
 		} else {
-			last := objs1[len(objs1)-1].Name()
-			objs2, err := strg.ListRecursiveAfter(ctx, "", 0, last)
+			last := res1.Objects[len(res1.Objects)-1].Name()
+			res2, err := strg.List(ctx, s2.ListOptions{After: last, Recursive: true})
 			if err != nil {
-				errorf("ListRecursiveAfter(\"\", 0, %q) failed: %v", last, err)
+				errorf("List(after=%q, recursive) failed: %v", last, err)
 			} else {
 				var combined []s2.Object
-				combined = append(combined, objs1...)
-				combined = append(combined, objs2...)
+				combined = append(combined, res1.Objects...)
+				combined = append(combined, res2.Objects...)
 				checkMatch(fmt.Sprintf("Pagination combined (limit %d, after %q)", limit, last), combined, expected)
 			}
 		}
@@ -185,7 +185,7 @@ func TestStorageGetPut(ctx context.Context, strg s2.Storage) error {
 	name := "s2test-getput.txt"
 	body := []byte("s2test content")
 	obj := s2.NewObjectBytes(name, body)
-	obj.Metadata().Put("test-key", "test-val")
+	obj.Metadata().Set("test-key", "test-val")
 
 	if err := strg.Put(ctx, obj); err != nil {
 		return fmt.Errorf("Put(%q) failed: %w", name, err)
@@ -234,7 +234,7 @@ func TestStorageGetNotExist(ctx context.Context, strg s2.Storage) error {
 	if err == nil {
 		return fmt.Errorf("Get for non-existent object should return error")
 	}
-	if !s2.IsNotExist(err) {
+	if !errors.Is(err, s2.ErrNotExist) {
 		return fmt.Errorf("Get for non-existent object returned %v, want ErrNotExist", err)
 	}
 	return nil
@@ -309,7 +309,7 @@ func TestStorageCopyMove(ctx context.Context, strg s2.Storage) error {
 
 	// Move
 	moved := "s2test-copymove-moved.txt"
-	if err := strg.Move(ctx, src, moved); err != nil {
+	if err := s2.Move(ctx, strg, src, moved); err != nil {
 		return fmt.Errorf("Move(%q, %q) failed: %w", src, moved, err)
 	}
 
@@ -396,7 +396,7 @@ func TestStoragePutMetadata(ctx context.Context, strg s2.Storage) error {
 		return fmt.Errorf("Put(%q) failed: %w", name, err)
 	}
 
-	md := s2.MetadataMap{"author": "s2test", "version": "1"}
+	md := s2.Metadata{"author": "s2test", "version": "1"}
 	if err := strg.PutMetadata(ctx, name, md); err != nil {
 		return fmt.Errorf("PutMetadata(%q) failed: %w", name, err)
 	}

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"path"
 	"strings"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
@@ -14,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/mojatter/s2"
+	"github.com/mojatter/s2/internal/numconv"
 )
 
 var (
@@ -32,6 +32,7 @@ type clientAPI interface {
 
 type presignClientAPI interface {
 	PresignGetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.PresignOptions)) (*v4.PresignedHTTPRequest, error)
+	PresignPutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.PresignOptions)) (*v4.PresignedHTTPRequest, error)
 }
 
 type storage struct {
@@ -108,41 +109,33 @@ func (s *storage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
 	}, nil
 }
 
-func (s *storage) List(ctx context.Context, prefix string, limit int) ([]s2.Object, []string, error) {
-	return s.list(ctx, prefix, limit, "", "/")
-}
+// defaultListLimit caps a List call when ListOptions.Limit is unset (0).
+// It mirrors S3's default ListObjectsV2 page size.
+const defaultListLimit = 1000
 
-func (s *storage) ListAfter(ctx context.Context, prefix string, limit int, after string) ([]s2.Object, []string, error) {
-	return s.list(ctx, prefix, limit, after, "/")
-}
-
-func (s *storage) ListRecursive(ctx context.Context, prefix string, limit int) ([]s2.Object, error) {
-	objs, _, err := s.list(ctx, prefix, limit, "", "")
-	return objs, err
-}
-
-func (s *storage) ListRecursiveAfter(ctx context.Context, prefix string, limit int, after string) ([]s2.Object, error) {
-	objs, _, err := s.list(ctx, prefix, limit, after, "")
-	return objs, err
-}
-
-func (s *storage) list(ctx context.Context, prefix string, limit int, after string, delimiter string) ([]s2.Object, []string, error) {
+func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	limit := opts.Limit
 	if limit <= 0 {
-		limit = 1000
+		limit = defaultListLimit
 	}
+	delimiter := "/"
+	if opts.Recursive {
+		delimiter = ""
+	}
+
 	input := &s3.ListObjectsV2Input{
 		Bucket:  aws.String(s.bucket),
 		MaxKeys: aws.Int32(int32(limit)),
 	}
-	inputPrefix := path.Join(s.prefix, prefix)
+	inputPrefix := path.Join(s.prefix, opts.Prefix)
 	if delimiter != "" && inputPrefix != "" && !strings.HasSuffix(inputPrefix, delimiter) {
 		inputPrefix += delimiter
 	}
 	if inputPrefix != "" {
 		input.Prefix = aws.String(inputPrefix)
 	}
-	if after != "" {
-		input.StartAfter = aws.String(after)
+	if opts.After != "" {
+		input.StartAfter = aws.String(opts.After)
 	}
 	if delimiter != "" {
 		input.Delimiter = aws.String(delimiter)
@@ -150,29 +143,34 @@ func (s *storage) list(ctx context.Context, prefix string, limit int, after stri
 
 	res, err := s.client.ListObjectsV2(ctx, input)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to list objects: %w", err)
+		return s2.ListResult{}, fmt.Errorf("failed to list objects: %w", err)
 	}
 
-	prefixes := make([]string, 0, len(res.CommonPrefixes))
-	for _, p := range res.CommonPrefixes {
-		prefixes = append(prefixes, aws.ToString(p.Prefix))
+	out := s2.ListResult{
+		CommonPrefixes: make([]string, 0, len(res.CommonPrefixes)),
+		Objects:        make([]s2.Object, 0, len(res.Contents)),
 	}
-	objs := make([]s2.Object, 0, len(res.Contents))
+	for _, p := range res.CommonPrefixes {
+		out.CommonPrefixes = append(out.CommonPrefixes, aws.ToString(p.Prefix))
+	}
 	for _, c := range res.Contents {
 		key := aws.ToString(c.Key)
 		if s.prefix != "" {
 			key = key[len(s.prefix)+1:]
 		}
-		objs = append(objs, &object{
+		out.Objects = append(out.Objects, &object{
 			client:       s.client,
 			bucket:       s.bucket,
 			prefix:       s.prefix,
 			name:         key,
-			length:       s2.MustUint64(aws.ToInt64(c.Size)),
+			length:       numconv.MustUint64(aws.ToInt64(c.Size)),
 			lastModified: aws.ToTime(c.LastModified),
 		})
 	}
-	return objs, prefixes, nil
+	if aws.ToBool(res.IsTruncated) {
+		out.NextAfter = aws.ToString(res.NextContinuationToken)
+	}
+	return out, nil
 }
 
 func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
@@ -183,7 +181,7 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 	if err != nil {
 		var noSuchKeyErr *s3types.NoSuchKey
 		if errors.As(err, &noSuchKeyErr) {
-			return nil, &s2.ErrNotExist{Name: name}
+			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, name)
 		}
 		return nil, fmt.Errorf("failed to get object: %w", err)
 	}
@@ -192,9 +190,9 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 		bucket:       s.bucket,
 		prefix:       s.prefix,
 		name:         name,
-		length:       s2.MustUint64(aws.ToInt64(params.ContentLength)),
+		length:       numconv.MustUint64(aws.ToInt64(params.ContentLength)),
 		lastModified: aws.ToTime(params.LastModified),
-		metadata:     s2.MetadataMap(params.Metadata),
+		metadata:     s2.Metadata(params.Metadata),
 	}, nil
 }
 
@@ -223,8 +221,8 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(path.Join(s.prefix, obj.Name())),
 		Body:          rc,
-		ContentLength: aws.Int64(s2.MustInt64(obj.Length())),
-		Metadata:      obj.Metadata().ToMap(),
+		ContentLength: aws.Int64(numconv.MustInt64(obj.Length())),
+		Metadata:      obj.Metadata(),
 	})
 	return err
 }
@@ -235,7 +233,7 @@ func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Meta
 		Bucket:            aws.String(s.bucket),
 		Key:               aws.String(key),
 		CopySource:        aws.String(path.Join(s.bucket, key)),
-		Metadata:          metadata.ToMap(),
+		Metadata:          metadata,
 		MetadataDirective: s3types.MetadataDirectiveReplace,
 	})
 	return err
@@ -248,13 +246,6 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 		CopySource: aws.String(path.Join(s.bucket, s.prefix, src)),
 	})
 	return err
-}
-
-func (s *storage) Move(ctx context.Context, src, dst string) error {
-	if err := s.Copy(ctx, src, dst); err != nil {
-		return err
-	}
-	return s.Delete(ctx, src)
 }
 
 func (s *storage) Delete(ctx context.Context, name string) error {
@@ -299,7 +290,14 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 	return nil
 }
 
-func (s *storage) SignedURL(ctx context.Context, name string, ttl time.Duration) (string, error) {
+func (s *storage) SignedURL(ctx context.Context, opts s2.SignedURLOptions) (string, error) {
+	method := opts.Method
+	if method == "" {
+		method = s2.SignedURLGet
+	}
+	if method != s2.SignedURLGet && method != s2.SignedURLPut {
+		return "", fmt.Errorf("s3 storage: unsupported signed URL method %q", method)
+	}
 	if s.presignClient == nil {
 		s3Client, ok := s.client.(*s3.Client)
 		if !ok {
@@ -307,17 +305,29 @@ func (s *storage) SignedURL(ctx context.Context, name string, ttl time.Duration)
 		}
 		s.presignClient = s3.NewPresignClient(s3Client)
 	}
-	input := &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(path.Join(s.prefix, name)),
-	}
-	req, err := s.presignClient.PresignGetObject(ctx, input, s3.WithPresignExpires(ttl))
-	if err != nil {
-		var noSuchKeyErr *s3types.NoSuchKey
-		if errors.As(err, &noSuchKeyErr) {
-			return "", &s2.ErrNotExist{Name: name}
+	key := aws.String(path.Join(s.prefix, opts.Name))
+	switch method {
+	case s2.SignedURLPut:
+		req, err := s.presignClient.PresignPutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    key,
+		}, s3.WithPresignExpires(opts.TTL))
+		if err != nil {
+			return "", fmt.Errorf("failed to presign put object: %w", err)
 		}
-		return "", fmt.Errorf("failed to presign get object: %w", err)
+		return req.URL, nil
+	default: // SignedURLGet
+		req, err := s.presignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    key,
+		}, s3.WithPresignExpires(opts.TTL))
+		if err != nil {
+			var noSuchKeyErr *s3types.NoSuchKey
+			if errors.As(err, &noSuchKeyErr) {
+				return "", fmt.Errorf("%w: %s", s2.ErrNotExist, opts.Name)
+			}
+			return "", fmt.Errorf("failed to presign get object: %w", err)
+		}
+		return req.URL, nil
 	}
-	return req.URL, nil
 }

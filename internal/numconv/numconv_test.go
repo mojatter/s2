@@ -1,4 +1,4 @@
-package s2
+package numconv
 
 import (
 	"math"

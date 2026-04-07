@@ -2,27 +2,25 @@ package s2test
 
 import (
 	"context"
-	"time"
 
 	"github.com/mojatter/s2"
 )
 
+// StorageDelegator is a test double for s2.Storage. Each method delegates to
+// the corresponding *Func field, returning a zero value when the field is nil.
 type StorageDelegator struct {
-	TypeFunc               func() s2.Type
-	SubFunc                func(ctx context.Context, prefix string) (s2.Storage, error)
-	ListFunc               func(ctx context.Context, prefix string, limit int) ([]s2.Object, []string, error)
-	ListAfterFunc          func(ctx context.Context, prefix string, limit int, after string) ([]s2.Object, []string, error)
-	ListRecursiveFunc      func(ctx context.Context, prefix string, limit int) ([]s2.Object, error)
-	ListRecursiveAfterFunc func(ctx context.Context, prefix string, limit int, after string) ([]s2.Object, error)
-	GetFunc                func(ctx context.Context, name string) (s2.Object, error)
-	ExistsFunc             func(ctx context.Context, name string) (bool, error)
-	PutFunc                func(ctx context.Context, obj s2.Object) error
-	PutMetadataFunc        func(ctx context.Context, name string, metadata s2.Metadata) error
-	CopyFunc               func(ctx context.Context, src, dst string) error
-	MoveFunc               func(ctx context.Context, src, dst string) error
-	DeleteFunc             func(ctx context.Context, name string) error
-	DeleteRecursiveFunc    func(ctx context.Context, prefix string) error
-	SignedURLFunc          func(ctx context.Context, name string, ttl time.Duration) (string, error)
+	TypeFunc            func() s2.Type
+	SubFunc             func(ctx context.Context, prefix string) (s2.Storage, error)
+	ListFunc            func(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error)
+	GetFunc             func(ctx context.Context, name string) (s2.Object, error)
+	ExistsFunc          func(ctx context.Context, name string) (bool, error)
+	PutFunc             func(ctx context.Context, obj s2.Object) error
+	PutMetadataFunc     func(ctx context.Context, name string, metadata s2.Metadata) error
+	CopyFunc            func(ctx context.Context, src, dst string) error
+	MoveFunc            func(ctx context.Context, src, dst string) error // optional Mover hook
+	DeleteFunc          func(ctx context.Context, name string) error
+	DeleteRecursiveFunc func(ctx context.Context, prefix string) error
+	SignedURLFunc       func(ctx context.Context, opts s2.SignedURLOptions) (string, error)
 }
 
 var _ s2.Storage = (*StorageDelegator)(nil)
@@ -41,32 +39,11 @@ func (d *StorageDelegator) Sub(ctx context.Context, prefix string) (s2.Storage, 
 	return nil, nil
 }
 
-func (d *StorageDelegator) List(ctx context.Context, prefix string, limit int) ([]s2.Object, []string, error) {
+func (d *StorageDelegator) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
 	if d.ListFunc != nil {
-		return d.ListFunc(ctx, prefix, limit)
+		return d.ListFunc(ctx, opts)
 	}
-	return nil, nil, nil
-}
-
-func (d *StorageDelegator) ListAfter(ctx context.Context, prefix string, limit int, after string) ([]s2.Object, []string, error) {
-	if d.ListAfterFunc != nil {
-		return d.ListAfterFunc(ctx, prefix, limit, after)
-	}
-	return nil, nil, nil
-}
-
-func (d *StorageDelegator) ListRecursive(ctx context.Context, prefix string, limit int) ([]s2.Object, error) {
-	if d.ListRecursiveFunc != nil {
-		return d.ListRecursiveFunc(ctx, prefix, limit)
-	}
-	return nil, nil
-}
-
-func (d *StorageDelegator) ListRecursiveAfter(ctx context.Context, prefix string, limit int, after string) ([]s2.Object, error) {
-	if d.ListRecursiveAfterFunc != nil {
-		return d.ListRecursiveAfterFunc(ctx, prefix, limit, after)
-	}
-	return nil, nil
+	return s2.ListResult{}, nil
 }
 
 func (d *StorageDelegator) Get(ctx context.Context, name string) (s2.Object, error) {
@@ -104,13 +81,14 @@ func (d *StorageDelegator) Copy(ctx context.Context, src, dst string) error {
 	return nil
 }
 
+// Move makes StorageDelegator satisfy the optional s2.Mover interface so that
+// tests can exercise the Mover code path of s2.Move.
 func (d *StorageDelegator) Move(ctx context.Context, src, dst string) error {
 	if d.MoveFunc != nil {
 		return d.MoveFunc(ctx, src, dst)
 	}
 	return nil
 }
-
 
 func (d *StorageDelegator) Delete(ctx context.Context, name string) error {
 	if d.DeleteFunc != nil {
@@ -126,9 +104,9 @@ func (d *StorageDelegator) DeleteRecursive(ctx context.Context, prefix string) e
 	return nil
 }
 
-func (d *StorageDelegator) SignedURL(ctx context.Context, name string, ttl time.Duration) (string, error) {
+func (d *StorageDelegator) SignedURL(ctx context.Context, opts s2.SignedURLOptions) (string, error) {
 	if d.SignedURLFunc != nil {
-		return d.SignedURLFunc(ctx, name, ttl)
+		return d.SignedURLFunc(ctx, opts)
 	}
 	return "", nil
 }

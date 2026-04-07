@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"time"
+
+	"github.com/mojatter/s2/internal/numconv"
 )
 
 // Object is an interface that represents an object in a storage.
@@ -49,21 +52,28 @@ func WithLastModified(t time.Time) ObjectOption {
 	}
 }
 
-// NewObject creates new object from local file system.
-func NewObject(ctx context.Context, name string, opts ...ObjectOption) (Object, error) {
+// NewObjectFromFile creates a new Object backed by a file on the local
+// filesystem. The file at name must exist and not be a directory; otherwise
+// the returned error wraps ErrNotExist. The Object's Length and
+// LastModified are populated from os.Stat; metadata can be supplied via
+// WithMetadata.
+//
+// Reads via Open are performed lazily by re-opening the underlying file.
+// The supplied ctx is currently unused but reserved for future cancellation.
+func NewObjectFromFile(ctx context.Context, name string, opts ...ObjectOption) (Object, error) {
 	info, err := os.Stat(name)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, &ErrNotExist{Name: name}
+			return nil, fmt.Errorf("%w: %s", ErrNotExist, name)
 		}
 		return nil, err
 	}
 	if info.IsDir() {
-		return nil, &ErrNotExist{Name: name}
+		return nil, fmt.Errorf("%w: %s", ErrNotExist, name)
 	}
 	o := &object{
 		name:         name,
-		length:       MustUint64(info.Size()),
+		length:       numconv.MustUint64(info.Size()),
 		lastModified: info.ModTime(),
 	}
 	for _, opt := range opts {
@@ -119,22 +129,22 @@ func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
 		return rc, nil
 	}
 	if seeker, ok := rc.(io.ReadSeeker); ok {
-		if _, err := seeker.Seek(MustInt64(offset), io.SeekStart); err != nil {
+		if _, err := seeker.Seek(numconv.MustInt64(offset), io.SeekStart); err != nil {
 			_ = rc.Close()
 			return nil, err
 		}
 		return &limitReadCloser{
-			Reader: io.LimitReader(seeker, MustInt64(length)),
+			Reader: io.LimitReader(seeker, numconv.MustInt64(length)),
 			Closer: rc,
 		}, nil
 	}
 	// Fallback for non-seeker
-	if _, err := io.CopyN(io.Discard, rc, MustInt64(offset)); err != nil {
+	if _, err := io.CopyN(io.Discard, rc, numconv.MustInt64(offset)); err != nil {
 		_ = rc.Close()
 		return nil, err
 	}
 	return &limitReadCloser{
-		Reader: io.LimitReader(rc, MustInt64(length)),
+		Reader: io.LimitReader(rc, numconv.MustInt64(length)),
 		Closer: rc,
 	}, nil
 }
@@ -154,7 +164,7 @@ func (o *object) LastModified() time.Time {
 
 func (o *object) Metadata() Metadata {
 	if o.metadata == nil {
-		o.metadata = make(MetadataMap)
+		o.metadata = make(Metadata)
 	}
 	return o.metadata
 }

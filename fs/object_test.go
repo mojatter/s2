@@ -148,14 +148,14 @@ func (s *ObjectTestSuite) TestMetadata() {
 		{
 			caseName: "typical",
 			obj: &object{
-				metadata: s2.MetadataMap{"contentType": "text/plain"},
+				metadata: s2.Metadata{"contentType": "text/plain"},
 			},
-			want: s2.MetadataMap{"contentType": "text/plain"},
+			want: s2.Metadata{"contentType": "text/plain"},
 		},
 		{
 			caseName: "no meta",
 			obj:      &object{},
-			want:     s2.MetadataMap{},
+			want:     s2.Metadata{},
 		},
 	}
 	for _, tc := range testCases {
