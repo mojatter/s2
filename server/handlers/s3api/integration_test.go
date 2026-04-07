@@ -3,9 +3,12 @@ package s3api
 import (
 	"bytes"
 	"context"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -511,6 +514,96 @@ func (s *IntegrationSuite) TestGetObject_NoSuchKey() {
 		Key:    aws.String("missing.txt"),
 	})
 	s.Error(err)
+}
+
+// --- Presigned URL ---
+
+func (s *IntegrationSuite) TestPresignedGetObject() {
+	ctx := context.Background()
+	bucket := "presign-get-bucket"
+	s.createTestBucket(bucket)
+
+	body := "presigned download"
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("file.txt"),
+		Body:   strings.NewReader(body),
+	})
+	s.Require().NoError(err)
+
+	presigner := s3.NewPresignClient(s.client)
+	req, err := presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("file.txt"),
+	}, s3.WithPresignExpires(5*time.Minute))
+	s.Require().NoError(err)
+
+	resp, err := http.Get(req.URL)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusOK, resp.StatusCode)
+	got, err := io.ReadAll(resp.Body)
+	s.Require().NoError(err)
+	s.Equal(body, string(got))
+}
+
+func (s *IntegrationSuite) TestPresignedPutObject() {
+	ctx := context.Background()
+	bucket := "presign-put-bucket"
+	s.createTestBucket(bucket)
+
+	presigner := s3.NewPresignClient(s.client)
+	req, err := presigner.PresignPutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("uploaded.txt"),
+	}, s3.WithPresignExpires(5*time.Minute))
+	s.Require().NoError(err)
+
+	body := "uploaded via presigned URL"
+	httpReq, err := http.NewRequest(http.MethodPut, req.URL, strings.NewReader(body))
+	s.Require().NoError(err)
+	resp, err := http.DefaultClient.Do(httpReq)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusOK, resp.StatusCode)
+
+	// Verify via the SDK client
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("uploaded.txt"),
+	})
+	s.Require().NoError(err)
+	defer out.Body.Close()
+	got, err := io.ReadAll(out.Body)
+	s.Require().NoError(err)
+	s.Equal(body, string(got))
+}
+
+func (s *IntegrationSuite) TestPresignedGetObject_TamperedSignatureRejected() {
+	ctx := context.Background()
+	bucket := "presign-tamper-bucket"
+	s.createTestBucket(bucket)
+
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("file.txt"),
+		Body:   strings.NewReader("secret"),
+	})
+	s.Require().NoError(err)
+
+	presigner := s3.NewPresignClient(s.client)
+	req, err := presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("file.txt"),
+	}, s3.WithPresignExpires(5*time.Minute))
+	s.Require().NoError(err)
+
+	// Tamper: replace the signature with an obvious bad value.
+	tampered := strings.Replace(req.URL, "X-Amz-Signature=", "X-Amz-Signature=deadbeef&_=", 1)
+	resp, err := http.Get(tampered)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Equal(http.StatusForbidden, resp.StatusCode)
 }
 
 // --- Helpers ---
