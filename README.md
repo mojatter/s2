@@ -449,6 +449,18 @@ s2-server -f config.json
 
 Custom metadata is supported via `x-amz-meta-*` headers on PutObject/CopyObject and returned on GetObject/HeadObject.
 
+## S3 Compatibility
+
+S2 Server is designed to drop-in replace MinIO for:
+
+- ✅ Local development against `aws-sdk-go`, `boto3`, `@aws-sdk/client-s3`, and other S3 SDKs
+- ✅ CI/test environments using S3 via testcontainers or docker-compose
+- ✅ Small-scale production for static assets, uploads, and backups
+- ✅ Presigned URL workflows (browser uploads/downloads)
+- ✅ Multipart uploads for large objects
+
+It is **not** a replacement for AWS S3 in scenarios requiring versioning, server-side encryption, IAM policies, lifecycle management, or multi-node replication. See [Limitations](#limitations) for details.
+
 ## Limitations
 
 S2 aims to cover the parts of the S3 API that matter for local development and lightweight production use. Some features are intentionally **not** implemented:
