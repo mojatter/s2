@@ -274,10 +274,106 @@ Non-breaking improvements bundled in the same release:
 
 ---
 
+## Server CLI (`cmd/s2-server`)
+
+**Scope note.** The rest of this document audits the library import
+surface. This section is a deliberate scope expansion to record the
+`s2-server` CLI UX decisions that also ship in v0.2.0.
+
+### Precedence
+
+Configuration sources are applied in this order, each overriding the
+previous one:
+
+```
+default  <  -f config file  <  env var  <  flag
+```
+
+- **default**: built into the binary (see `DefaultRoot` below).
+- **-f config file**: JSON file loaded via `-f` or `S2_SERVER_CONFIG`.
+- **env var**: `S2_SERVER_*` variables read on startup.
+- **flag**: explicit command-line flags; the most recent, most
+  explicit intent wins, matching kubectl / Viper / Terraform /
+  AWS CLI.
+
+Rejected alternative: `env < file`. Today's code already loads file
+first and env second, and `env > file` means a single
+`S2_SERVER_ROOT=...` in a shell rc can override a committed config
+without the user editing the file — the usual 12-factor expectation.
+
+### Command-line flags
+
+Three new flags cover the settings users most often want to tweak for
+a one-off run:
+
+| Flag | Equivalent env / file field |
+|---|---|
+| `-listen <addr>` | `S2_SERVER_LISTEN` / `listen` |
+| `-root <path>` | `S2_SERVER_ROOT` / `root` |
+| `-buckets <a,b,c>` | `S2_SERVER_BUCKETS` / `buckets` |
+
+Only flags the user actually passed override the underlying layer
+(tracked as pointer-typed fields in `server.Flags`). Omitting a flag
+leaves the value from file/env/default untouched — the flags are
+additive, not a reset.
+
+### DefaultRoot
+
+`server.DefaultConfig().Root` previously hardcoded `/var/lib/s2`,
+which made sense inside the Docker image but broke the
+"`go install && s2-server`" first-run experience: new users had no
+write access to `/var/lib/s2` and had to discover `S2_SERVER_ROOT` or
+`-f` before anything worked.
+
+The default is now `"data"` (relative to the current working
+directory, same idiom as Prometheus / etcd). The Docker image keeps
+`/var/lib/s2` via a linker flag:
+
+```sh
+go build \
+    -ldflags "-X github.com/mojatter/s2/server.DefaultRoot=/var/lib/s2" \
+    ./cmd/s2-server
+```
+
+This uses the same ldflags-injection idiom already in place for
+`server.version`. No runtime branching, no new env var, no special
+Docker-detection heuristics.
+
+Rejected alternatives:
+
+- **Interactive prompt on first run.** Server tools rarely prompt;
+  they break under non-interactive contexts (CI, systemd, Docker,
+  k8s) and conflict with daemon use cases. Neither Prometheus, etcd,
+  MinIO, InfluxDB, MongoDB, Redis, nor Docker prompt for their data
+  directory. `aws configure`-style prompting belongs to one-shot
+  clients, not long-running servers.
+- **`S2_SERVER_ROOT_DEFAULT` env var.** Adds a new precedence layer
+  and a new env var whose only purpose is to differ from
+  `S2_SERVER_ROOT`. ldflags injection accomplishes the same goal with
+  zero runtime surface.
+- **Runtime Docker detection (`/.dockerenv`).** Fragile and
+  surprising.
+
+### `-help` output
+
+`-help` now prints an Examples section after the flag list, covering:
+
+1. Bare defaults run.
+2. One-off override of `-listen` and `-root`.
+3. Initial bucket creation via flag and via env var.
+4. Layering a config file under a single one-off flag.
+5. Printing the version.
+
+This is the cheapest available nudge toward correct usage for new
+users and documents the precedence chain implicitly ("here is `-f`
+and `-listen` together, and the flag wins").
+
+---
+
 ## Out of scope for v0.2 audit
 
 - Server packages (`server/`, `server/handlers/`, `server/middleware/`) —
-  these are not part of the library import surface.
-- CLI flag/env names — covered by separate user-facing compatibility.
+  these are not part of the library import surface, except for the
+  CLI UX decisions captured above.
 - Web console templates and assets.
 - v1.0.0 release planning (deferred until v0.2 has lived in use).

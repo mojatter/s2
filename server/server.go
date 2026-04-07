@@ -21,6 +21,27 @@ const (
 	usage = cmd + " [flags]"
 )
 
+// helpExamples is appended verbatim to the -help output so new users can see
+// a few complete command lines instead of having to synthesize one from the
+// flag list alone.
+const helpExamples = `Examples:
+  # Run with defaults: stores data in ./data, listens on :9000.
+  s2-server
+
+  # Override the listen address and storage root for a one-off run.
+  s2-server -listen :8080 -root /tmp/s2
+
+  # Create initial buckets on startup (both flag and env var work).
+  s2-server -buckets assets,uploads
+  S2_SERVER_BUCKETS=assets,uploads s2-server
+
+  # Load persistent settings from a config file, then override one field.
+  s2-server -f ./s2.json -listen :9001
+
+  # Print the version and exit.
+  s2-server -v
+`
+
 // version is set at build time via -ldflags.
 // Falls back to the module version embedded by go install.
 var version = "dev"
@@ -38,21 +59,47 @@ var (
 	handlers    = map[string]HandlerFunc{}
 )
 
+// Flags holds the parsed command-line arguments for s2-server. Pointer-typed
+// fields distinguish "explicitly set" from "left at default"; only explicitly
+// set flags override values loaded from file/env.
 type Flags struct {
 	isVersion  bool
 	isHelp     bool
 	configFile string
+	listen     *string
+	root       *string
+	buckets    *string
 }
 
 func initFlags(args []string) (*Flags, error) {
-	var f Flags
+	var (
+		f       Flags
+		listen  string
+		root    string
+		buckets string
+	)
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	fs.BoolVar(&f.isVersion, "v", false, "print version")
 	fs.BoolVar(&f.isHelp, "h", false, "help for "+cmd)
-	fs.StringVar(&f.configFile, "f", os.Getenv(EnvS2ServerConfig), "configuration file")
+	fs.StringVar(&f.configFile, "f", os.Getenv(EnvS2ServerConfig), "configuration file (also "+EnvS2ServerConfig+")")
+	fs.StringVar(&listen, "listen", "", "listen address, e.g. :9000 (overrides config file and "+EnvS2ServerListen+")")
+	fs.StringVar(&root, "root", "", "storage root path (overrides config file and "+EnvS2ServerRoot+")")
+	fs.StringVar(&buckets, "buckets", "", "comma-separated list of buckets to create on startup (overrides config file and "+EnvS2ServerBuckets+")")
 	if err := fs.Parse(args[1:]); err != nil {
 		return nil, fmt.Errorf("failed to parse flags: %w", err)
 	}
+	// Record only flags that were explicitly set so Run can apply them with
+	// the correct precedence (default < file < env < flag).
+	fs.Visit(func(fl *flag.Flag) {
+		switch fl.Name {
+		case "listen":
+			f.listen = &listen
+		case "root":
+			f.root = &root
+		case "buckets":
+			f.buckets = &buckets
+		}
+	})
 	if f.isVersion {
 		fmt.Println(version)
 	}
@@ -60,6 +107,7 @@ func initFlags(args []string) (*Flags, error) {
 		fmt.Fprintf(os.Stderr, "%s\n\nUsage:\n  %s\n\n", desc, usage)
 		fmt.Fprintln(os.Stderr, "Flags:")
 		fs.PrintDefaults()
+		fmt.Fprint(os.Stderr, "\n", helpExamples)
 	}
 	return &f, nil
 }
@@ -81,6 +129,16 @@ func Run(args []string) error {
 	}
 	if err := cfg.LoadEnv(); err != nil {
 		return err
+	}
+	// Flags have the highest precedence: default < file < env < flag.
+	if f.listen != nil {
+		cfg.Listen = *f.listen
+	}
+	if f.root != nil {
+		cfg.Root = *f.root
+	}
+	if f.buckets != nil {
+		cfg.Buckets = splitBucketList(*f.buckets)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

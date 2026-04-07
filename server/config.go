@@ -11,6 +11,24 @@ import (
 	"github.com/mojatter/s2"
 )
 
+// splitBucketList parses a comma-separated bucket list (used by both the
+// S2_SERVER_BUCKETS env var and the -buckets flag). Whitespace around each
+// entry is trimmed; empty entries are dropped so "a,,b" becomes ["a","b"]
+// and the zero-value "" becomes a nil slice rather than [""].
+func splitBucketList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
 const (
 	EnvS2ServerConfig         = "S2_SERVER_CONFIG"
 	EnvS2ServerListen         = "S2_SERVER_LISTEN"
@@ -51,6 +69,21 @@ const (
 	DefaultMaxPreviewSize     = 10 << 20 // 10 MiB
 )
 
+// DefaultRoot is the default storage root path used by DefaultConfig when
+// the user does not supply one via -root, -f, or S2_SERVER_ROOT.
+//
+// It is intentionally a var (not a const) so that binaries can be built with
+// a different default via linker flags, matching the same idiom used for
+// version injection:
+//
+//	go build -ldflags "-X github.com/mojatter/s2/server.DefaultRoot=/var/lib/s2" ./cmd/s2-server
+//
+// This lets the stock "go install" binary default to a relative "data"
+// directory (so a new user can run s2-server in any directory and
+// immediately see where data lands) while the Docker image is built with
+// /var/lib/s2 baked in.
+var DefaultRoot = "data"
+
 // EffectiveMaxUploadSize returns the upload size limit to enforce for this
 // configuration. When MaxUploadSize is explicitly set (> 0) it is returned
 // as-is; otherwise a backend-specific default is chosen so that switching
@@ -69,7 +102,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		Config: s2.Config{
 			Type: s2.TypeOSFS,
-			Root: "/var/lib/s2",
+			Root: DefaultRoot,
 		},
 		Listen: ":9000",
 		// MaxUploadSize intentionally left 0 — EffectiveMaxUploadSize resolves
@@ -120,7 +153,7 @@ func (cfg *Config) LoadEnv() error {
 		cfg.Password = v
 	}
 	if v := os.Getenv(EnvS2ServerBuckets); v != "" {
-		cfg.Buckets = strings.Split(v, ",")
+		cfg.Buckets = splitBucketList(v)
 	}
 	return nil
 }
