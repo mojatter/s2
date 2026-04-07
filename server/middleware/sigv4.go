@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,7 +33,15 @@ func SigV4(next server.HandlerFunc) server.HandlerFunc {
 			next(srv, w, r)
 			return
 		}
-		if err := verifySignatureV4(r, srv.Config.User, srv.Config.Password); err != nil {
+		// AWS prefers the Authorization header when both are present.
+		// Fall back to query-string (presigned URL) verification when the header is absent.
+		var err error
+		if r.Header.Get("Authorization") == "" && r.URL.Query().Get("X-Amz-Algorithm") != "" {
+			err = verifyPresignedV4(r, srv.Config.User, srv.Config.Password, time.Now().UTC())
+		} else {
+			err = verifySignatureV4(r, srv.Config.User, srv.Config.Password)
+		}
+		if err != nil {
 			writeS3AuthError(w, r, err.Error())
 			return
 		}
@@ -124,6 +133,84 @@ func verifySignatureV4(r *http.Request, accessKeyID, secretAccessKey string) err
 		return fmt.Errorf("signature mismatch")
 	}
 	return nil
+}
+
+// verifyPresignedV4 verifies an AWS Signature Version 4 presigned URL request.
+// The signature is carried in query parameters (X-Amz-*) instead of the Authorization header,
+// and the body is treated as UNSIGNED-PAYLOAD per the presigned-URL spec.
+func verifyPresignedV4(r *http.Request, accessKeyID, secretAccessKey string, now time.Time) error {
+	q := r.URL.Query()
+	if algo := q.Get("X-Amz-Algorithm"); algo != "AWS4-HMAC-SHA256" {
+		return fmt.Errorf("unsupported X-Amz-Algorithm: %q", algo)
+	}
+	credential := q.Get("X-Amz-Credential")
+	datetime := q.Get("X-Amz-Date")
+	expiresStr := q.Get("X-Amz-Expires")
+	signedHeadersStr := q.Get("X-Amz-SignedHeaders")
+	signature := q.Get("X-Amz-Signature")
+	if credential == "" || datetime == "" || expiresStr == "" || signedHeadersStr == "" || signature == "" {
+		return fmt.Errorf("missing presigned query parameters")
+	}
+
+	// Credential = <access-key>/<date>/<region>/<service>/aws4_request
+	credParts := strings.SplitN(credential, "/", 5)
+	if len(credParts) != 5 {
+		return fmt.Errorf("malformed Credential")
+	}
+	reqAccessKey := credParts[0]
+	date := credParts[1]
+	region := credParts[2]
+	service := credParts[3]
+
+	if subtle.ConstantTimeCompare([]byte(reqAccessKey), []byte(accessKeyID)) != 1 {
+		return fmt.Errorf("invalid access key")
+	}
+
+	reqTime, err := time.Parse("20060102T150405Z", datetime)
+	if err != nil {
+		return fmt.Errorf("invalid X-Amz-Date: %w", err)
+	}
+	expires, err := strconv.Atoi(expiresStr)
+	if err != nil || expires <= 0 {
+		return fmt.Errorf("invalid X-Amz-Expires: %q", expiresStr)
+	}
+	if now.After(reqTime.Add(time.Duration(expires) * time.Second)) {
+		return fmt.Errorf("presigned URL expired")
+	}
+
+	signedHeaders := strings.Split(signedHeadersStr, ";")
+	// X-Amz-Signature must be excluded from the canonical query string.
+	filteredQuery := stripQueryParam(r.URL.RawQuery, "X-Amz-Signature")
+	canonReq := buildCanonicalRequest(r, signedHeaders, filteredQuery, "UNSIGNED-PAYLOAD")
+
+	scope := date + "/" + region + "/" + service + "/aws4_request"
+	stringToSign := "AWS4-HMAC-SHA256\n" + datetime + "\n" + scope + "\n" + hashSHA256(canonReq)
+
+	signingKey := buildSigningKey(secretAccessKey, date, region, service)
+	expected := hex.EncodeToString(hmacSHA256(signingKey, []byte(stringToSign)))
+
+	if subtle.ConstantTimeCompare([]byte(expected), []byte(signature)) != 1 {
+		return fmt.Errorf("signature mismatch")
+	}
+	return nil
+}
+
+// stripQueryParam removes all occurrences of name from a raw (unparsed) query string,
+// preserving the order and exact encoding of the remaining parameters.
+func stripQueryParam(rawQuery, name string) string {
+	if rawQuery == "" {
+		return ""
+	}
+	prefix := name + "="
+	parts := strings.Split(rawQuery, "&")
+	out := parts[:0]
+	for _, p := range parts {
+		if p == name || strings.HasPrefix(p, prefix) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return strings.Join(out, "&")
 }
 
 func parseAuthHeader(s string) map[string]string {
