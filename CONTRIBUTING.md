@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Go 1.26+
+- Go 1.24+
 - Docker (for E2E tests)
 
 ## Build

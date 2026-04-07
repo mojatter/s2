@@ -1,4 +1,4 @@
-FROM golang:1.26-alpine AS builder
+FROM golang:1.24-alpine AS builder
 WORKDIR /app
 # DefaultRoot is overridden via -ldflags so the Docker image defaults to
 # /var/lib/s2 while a bare "go install" binary keeps the friendlier

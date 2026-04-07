@@ -28,12 +28,6 @@ jobs:
         run: |
           go mod tidy
           go test -v ./...
-      # NOTE: We keep staticcheck and gosec invoked individually here instead
-      # of via golangci-lint because the latest released golangci-lint (v2.1.6)
-      # is built against go1.24 and refuses to load this module's go.mod
-      # ('go 1.26'). Once a golangci-lint release built against go1.26+ is
-      # available, switch to golangci/golangci-lint-action@v7 with the
-      # .golangci.yml in the repo root.
       -
         name: Run staticcheck
         run: |
