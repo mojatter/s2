@@ -2,6 +2,7 @@
 set -eu
 
 ENDPOINT="http://s2:9000/s3api"
+ENDPOINT_MEM="http://s2-mem:9000/s3api"
 
 aws_s3() {
   aws s3 --endpoint-url "$ENDPOINT" "$@"
@@ -11,21 +12,25 @@ aws_s3api() {
   aws s3api --endpoint-url "$ENDPOINT" "$@"
 }
 
-# Wait for s2-server to be ready
-echo "==> Waiting for s2-server..."
-i=0
-while [ "$i" -lt 30 ]; do
-  if aws_s3api list-buckets >/dev/null 2>&1; then
-    break
-  fi
-  i=$((i + 1))
-  sleep 1
-done
-if [ "$i" -eq 30 ]; then
-  echo "FAIL: s2-server did not become ready"
+wait_for_server() {
+  name="$1"
+  ep="$2"
+  echo "==> Waiting for $name..."
+  i=0
+  while [ "$i" -lt 30 ]; do
+    if aws s3api --endpoint-url "$ep" list-buckets >/dev/null 2>&1; then
+      echo "    $name is ready."
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  echo "FAIL: $name did not become ready"
   exit 1
-fi
-echo "    s2-server is ready."
+}
+
+wait_for_server "s2 (osfs)" "$ENDPOINT"
+wait_for_server "s2-mem" "$ENDPOINT_MEM"
 
 passed=0
 failed=0
@@ -167,6 +172,42 @@ run_test "PresignedGetObject_TamperedSignatureRejected" sh -c '
   tampered=$(echo "$url" | sed "s/X-Amz-Signature=[0-9a-f]*/X-Amz-Signature=deadbeef/")
   status=$(curl -sS -o /dev/null -w "%{http_code}" "$tampered")
   [ "$status" = "403" ]
+'
+
+# === Memfs backend ===
+# Verify that the memfs default upload cap (16 MiB) is enforced end-to-end,
+# and that the streaming CompleteMultipartUpload assembly works on the
+# in-memory backend.
+
+run_test "Memfs_CreateBucket" sh -c '
+  aws s3api --endpoint-url "'"$ENDPOINT_MEM"'" create-bucket --bucket mem-bucket
+'
+
+run_test "Memfs_SmallUploadSucceeds" sh -c '
+  dd if=/dev/zero of=/tmp/small.bin bs=1024 count=1024 2>/dev/null
+  aws s3api --endpoint-url "'"$ENDPOINT_MEM"'" put-object \
+    --bucket mem-bucket --key small.bin --body /tmp/small.bin
+'
+
+run_test "Memfs_LargeUploadRejected" sh -c '
+  dd if=/dev/zero of=/tmp/large.bin bs=1048576 count=17 2>/dev/null
+  # Expect the put-object call to fail because 17 MiB > 16 MiB default cap.
+  ! aws s3api --endpoint-url "'"$ENDPOINT_MEM"'" put-object \
+    --bucket mem-bucket --key large.bin --body /tmp/large.bin
+'
+
+run_test "Memfs_MultipartUploadStreams" sh -c '
+  EP="'"$ENDPOINT_MEM"'"
+  set -e
+  # 10 MiB stays under the 16 MiB memfs cap while still exceeding the AWS CLI
+  # multipart_threshold (8 MiB), so this exercises the streaming
+  # CompleteMultipartUpload assembly on the in-memory backend.
+  dd if=/dev/urandom of=/tmp/mp.bin bs=1048576 count=10 2>/dev/null
+  aws s3 --endpoint-url "$EP" cp /tmp/mp.bin s3://mem-bucket/mp.bin
+  aws s3 --endpoint-url "$EP" cp s3://mem-bucket/mp.bin /tmp/mp.out
+  src=$(sha256sum /tmp/mp.bin | cut -d" " -f1)
+  dst=$(sha256sum /tmp/mp.out | cut -d" " -f1)
+  [ "$src" = "$dst" ]
 '
 
 # Cleanup
