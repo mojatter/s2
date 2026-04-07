@@ -1,13 +1,13 @@
 package s3api
 
 import (
-	"bytes"
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible multipart ETag
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"sort"
@@ -148,40 +148,37 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 		return req.Parts[i].PartNumber < req.Parts[j].PartNumber
 	})
 
-	// Assemble parts into a buffer, computing the multipart ETag as we go.
-	// The multipart ETag is MD5(concat of each part's raw MD5 bytes) + "-" + partCount.
-	var buf bytes.Buffer
-	var partMD5s []byte
-	for _, p := range req.Parts {
+	// Stat each part once up front: verify existence and compute the total
+	// length required by NewObjectReader. We intentionally do NOT read part
+	// bodies here — they are streamed lazily by partsReader below.
+	partObjs := make([]s2.Object, len(req.Parts))
+	var totalLen uint64
+	for i, p := range req.Parts {
 		obj, err := strg.Get(ctx, partKey(uploadID, p.PartNumber))
 		if err != nil {
 			writeError(w, r, "InvalidPart", fmt.Sprintf("Part %d not found", p.PartNumber), http.StatusBadRequest)
 			return
 		}
-		rc, err := obj.Open()
-		if err != nil {
-			code, msg, status := s2ErrorToS3Error(err)
-			writeError(w, r, code, msg, status)
-			return
-		}
-		h := md5.New() // #nosec G401 -- MD5 is required for S3-compatible multipart ETag
-		if _, err := io.Copy(io.MultiWriter(&buf, h), rc); err != nil {
-			_ = rc.Close()
-			writeError(w, r, "InternalError", "Failed to assemble parts", http.StatusInternalServerError)
-			return
-		}
-		_ = rc.Close()
-		partMD5s = append(partMD5s, h.Sum(nil)...)
+		partObjs[i] = obj
+		totalLen += obj.Length()
 	}
 
-	finalObj := s2.NewObjectBytes(key, buf.Bytes())
+	// Stream all parts through a single reader, tee-ing each part into its own
+	// MD5 hash as it flows by. This avoids buffering the assembled object in
+	// memory — critical for the memfs backend, and a peak-memory win for all
+	// backends. The multipart ETag is MD5(concat of each part's raw MD5 bytes)
+	// + "-" + partCount; we collect the per-part MD5s after Put has drained
+	// the reader.
+	pr := &partsReader{parts: partObjs}
+	finalObj := s2.NewObjectReader(key, pr, totalLen)
 	if err := strg.Put(ctx, finalObj); err != nil {
+		_ = pr.Close()
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
 	}
 
-	combined := md5.Sum(partMD5s) // #nosec G401 -- MD5 is required for S3-compatible multipart ETag
+	combined := md5.Sum(pr.partMD5s) // #nosec G401 -- MD5 is required for S3-compatible multipart ETag
 	etag := `"` + hex.EncodeToString(combined[:]) + `-` + strconv.Itoa(len(req.Parts)) + `"`
 	_ = strg.PutMetadata(ctx, key, s2.MetadataMap{etagMetadataKey: etag})
 
@@ -217,6 +214,60 @@ func handleAbortMultipartUpload(s *server.Server, w http.ResponseWriter, r *http
 
 	_ = strg.DeleteRecursive(ctx, multipartPrefix+uploadID+"/")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// partsReader is an io.ReadCloser that concatenates the bodies of a slice of
+// s2.Object parts, opening each one lazily. As each part's body flows through
+// Read, it is also hashed into a per-part MD5; after the reader is fully
+// drained, partMD5s holds the concatenation of those digests in part order —
+// exactly what the S3 multipart ETag formula requires.
+type partsReader struct {
+	parts    []s2.Object
+	idx      int
+	current  io.ReadCloser
+	currentH hash.Hash
+	partMD5s []byte
+}
+
+func (p *partsReader) Read(buf []byte) (int, error) {
+	for {
+		if p.current == nil {
+			if p.idx >= len(p.parts) {
+				return 0, io.EOF
+			}
+			rc, err := p.parts[p.idx].Open()
+			if err != nil {
+				return 0, err
+			}
+			p.current = rc
+			p.currentH = md5.New() // #nosec G401 -- MD5 is required for S3-compatible multipart ETag
+		}
+		n, err := p.current.Read(buf)
+		if n > 0 {
+			_, _ = p.currentH.Write(buf[:n])
+		}
+		if err == io.EOF {
+			p.partMD5s = append(p.partMD5s, p.currentH.Sum(nil)...)
+			_ = p.current.Close()
+			p.current = nil
+			p.currentH = nil
+			p.idx++
+			if n > 0 {
+				return n, nil
+			}
+			continue
+		}
+		return n, err
+	}
+}
+
+func (p *partsReader) Close() error {
+	if p.current != nil {
+		err := p.current.Close()
+		p.current = nil
+		return err
+	}
+	return nil
 }
 
 func handleObjectPOST(s *server.Server, w http.ResponseWriter, r *http.Request) {
