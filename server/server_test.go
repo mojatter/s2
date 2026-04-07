@@ -13,33 +13,55 @@ import (
 
 func TestInitFlags(t *testing.T) {
 	testCases := []struct {
-		caseName   string
-		args       []string
+		caseName    string
+		args        []string
 		wantVersion bool
 		wantHelp    bool
 		wantConfig  string
+		wantListen  *string
+		wantRoot    *string
+		wantBuckets *string
 	}{
 		{
-			caseName:   "no flags",
-			args:       []string{"s2-server"},
-			wantVersion: false,
-			wantHelp:    false,
-			wantConfig:  "",
+			caseName: "no flags",
+			args:     []string{"s2-server"},
 		},
 		{
-			caseName:   "version flag",
-			args:       []string{"s2-server", "-v"},
+			caseName:    "version flag",
+			args:        []string{"s2-server", "-v"},
 			wantVersion: true,
 		},
 		{
-			caseName:   "help flag",
-			args:       []string{"s2-server", "-h"},
-			wantHelp:   true,
+			caseName: "help flag",
+			args:     []string{"s2-server", "-h"},
+			wantHelp: true,
 		},
 		{
 			caseName:   "config file flag",
 			args:       []string{"s2-server", "-f", "config.json"},
 			wantConfig: "config.json",
+		},
+		{
+			caseName:   "listen flag",
+			args:       []string{"s2-server", "-listen", ":8080"},
+			wantListen: strPtr(":8080"),
+		},
+		{
+			caseName: "root flag",
+			args:     []string{"s2-server", "-root", "/tmp/s2"},
+			wantRoot: strPtr("/tmp/s2"),
+		},
+		{
+			caseName:    "buckets flag",
+			args:        []string{"s2-server", "-buckets", "a,b,c"},
+			wantBuckets: strPtr("a,b,c"),
+		},
+		{
+			caseName:    "all config flags at once",
+			args:        []string{"s2-server", "-listen", ":1", "-root", "r", "-buckets", "x"},
+			wantListen:  strPtr(":1"),
+			wantRoot:    strPtr("r"),
+			wantBuckets: strPtr("x"),
 		},
 	}
 	for _, tc := range testCases {
@@ -49,9 +71,14 @@ func TestInitFlags(t *testing.T) {
 			assert.Equal(t, tc.wantVersion, f.isVersion)
 			assert.Equal(t, tc.wantHelp, f.isHelp)
 			assert.Equal(t, tc.wantConfig, f.configFile)
+			assert.Equal(t, tc.wantListen, f.listen)
+			assert.Equal(t, tc.wantRoot, f.root)
+			assert.Equal(t, tc.wantBuckets, f.buckets)
 		})
 	}
 }
+
+func strPtr(s string) *string { return &s }
 
 func TestNewServer(t *testing.T) {
 	t.Run("sets StartedAt", func(t *testing.T) {

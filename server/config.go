@@ -11,6 +11,24 @@ import (
 	"github.com/mojatter/s2"
 )
 
+// splitBucketList parses a comma-separated bucket list (used by both the
+// S2_SERVER_BUCKETS env var and the -buckets flag). Whitespace around each
+// entry is trimmed; empty entries are dropped so "a,,b" becomes ["a","b"]
+// and the zero-value "" becomes a nil slice rather than [""].
+func splitBucketList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
 const (
 	EnvS2ServerConfig         = "S2_SERVER_CONFIG"
 	EnvS2ServerListen         = "S2_SERVER_LISTEN"
@@ -120,7 +138,7 @@ func (cfg *Config) LoadEnv() error {
 		cfg.Password = v
 	}
 	if v := os.Getenv(EnvS2ServerBuckets); v != "" {
-		cfg.Buckets = strings.Split(v, ",")
+		cfg.Buckets = splitBucketList(v)
 	}
 	return nil
 }
