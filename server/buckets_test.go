@@ -127,14 +127,14 @@ func (s *BucketsTestSuite) TestCreateFolder() {
 	s.Require().NoError(err)
 
 	// sub/dir/.keep should exist under the bucket
-	objs, err := strg.ListRecursive(ctx, "sub/", -1)
+	res, err := strg.List(ctx, s2.ListOptions{Prefix: "sub/", Recursive: true})
 	s.Require().NoError(err)
-	s.NotEmpty(objs)
+	s.NotEmpty(res.Objects)
 
 	// "sub" should appear as a prefix in directory listing
-	_, prefixes, err := strg.List(ctx, "", -1)
+	res, err = strg.List(ctx, s2.ListOptions{})
 	s.Require().NoError(err)
-	s.Contains(prefixes, "sub")
+	s.Contains(res.CommonPrefixes, "sub")
 }
 
 func (s *BucketsTestSuite) TestCreatedAt() {
@@ -210,10 +210,10 @@ func (s *BucketsTestSuite) TestKeepFileNotVisibleInList() {
 
 	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("real.txt", []byte("data"))))
 
-	objs, _, err := strg.List(ctx, "", -1)
+	res, err := strg.List(ctx, s2.ListOptions{})
 	s.Require().NoError(err)
 
-	objs = FilterKeep(objs)
+	objs := FilterKeep(res.Objects)
 	s.Len(objs, 1)
 	s.Equal("real.txt", objs[0].Name())
 }

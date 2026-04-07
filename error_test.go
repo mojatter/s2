@@ -2,30 +2,36 @@ package s2
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
-func TestErrNotExist_Error(t *testing.T) {
-	err := &ErrNotExist{Name: "test-object"}
-	assert.Equal(t, "not exist: test-object", err.Error())
+func TestErrNotExistMessage(t *testing.T) {
+	err := fmt.Errorf("%w: test-object", ErrNotExist)
+	assert.Equal(t, "s2: object not exist: test-object", err.Error())
 }
 
-func TestIsNotExist(t *testing.T) {
+func TestErrNotExist_Is(t *testing.T) {
 	testCases := []struct {
 		caseName string
 		err      error
 		want     bool
 	}{
 		{
-			caseName: "not exist",
-			err:      &ErrNotExist{Name: "test"},
+			caseName: "wrapped",
+			err:      fmt.Errorf("%w: test", ErrNotExist),
 			want:     true,
 		},
 		{
-			caseName: "wrapped not exist",
-			err:      errors.Join(errors.New("wrap"), &ErrNotExist{Name: "test"}),
+			caseName: "double wrapped",
+			err:      fmt.Errorf("outer: %w", fmt.Errorf("%w: test", ErrNotExist)),
+			want:     true,
+		},
+		{
+			caseName: "direct sentinel",
+			err:      ErrNotExist,
 			want:     true,
 		},
 		{
@@ -41,7 +47,7 @@ func TestIsNotExist(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
-			assert.Equal(t, tc.want, IsNotExist(tc.err))
+			assert.Equal(t, tc.want, errors.Is(tc.err, ErrNotExist))
 		})
 	}
 }

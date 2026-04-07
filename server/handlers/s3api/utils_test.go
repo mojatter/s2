@@ -26,7 +26,7 @@ func (s *UtilsTestSuite) TestS2ErrorToS3Error() {
 	}{
 		{
 			caseName:   "not exist",
-			err:        &s2.ErrNotExist{Name: "key"},
+			err:        fmt.Errorf("%w: key", s2.ErrNotExist),
 			wantCode:   "NoSuchKey",
 			wantStatus: http.StatusNotFound,
 		},
@@ -38,7 +38,7 @@ func (s *UtilsTestSuite) TestS2ErrorToS3Error() {
 		},
 		{
 			caseName:   "wrapped not exist",
-			err:        fmt.Errorf("wrap: %w", &s2.ErrNotExist{Name: "key"}),
+			err:        fmt.Errorf("wrap: %w", fmt.Errorf("%w: key", s2.ErrNotExist)),
 			wantCode:   "NoSuchKey",
 			wantStatus: http.StatusNotFound,
 		},
@@ -74,12 +74,12 @@ func (s *UtilsTestSuite) TestParseMetadataHeaders() {
 	testCases := []struct {
 		caseName string
 		headers  map[string]string
-		want     s2.MetadataMap
+		want     s2.Metadata
 	}{
 		{
 			caseName: "typical",
 			headers:  map[string]string{"X-Amz-Meta-Key": "val"},
-			want:     s2.MetadataMap{"key": "val"},
+			want:     s2.Metadata{"key": "val"},
 		},
 		{
 			caseName: "multiple",
@@ -87,7 +87,7 @@ func (s *UtilsTestSuite) TestParseMetadataHeaders() {
 				"X-Amz-Meta-A": "1",
 				"X-Amz-Meta-B": "2",
 			},
-			want: s2.MetadataMap{"a": "1", "b": "2"},
+			want: s2.Metadata{"a": "1", "b": "2"},
 		},
 		{
 			caseName: "non-meta headers ignored",
@@ -95,12 +95,12 @@ func (s *UtilsTestSuite) TestParseMetadataHeaders() {
 				"Content-Type":  "text/plain",
 				"X-Amz-Meta-Ok": "yes",
 			},
-			want: s2.MetadataMap{"ok": "yes"},
+			want: s2.Metadata{"ok": "yes"},
 		},
 		{
 			caseName: "empty",
 			headers:  map[string]string{},
-			want:     s2.MetadataMap{},
+			want:     s2.Metadata{},
 		},
 	}
 	for _, tc := range testCases {

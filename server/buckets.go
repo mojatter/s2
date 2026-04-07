@@ -50,11 +50,11 @@ func newBuckets(ctx context.Context, cfg *Config) (*Buckets, error) {
 
 func (bs *Buckets) Names() ([]string, error) {
 	ctx := context.Background()
-	_, prefixes, err := bs.strg.List(ctx, "", -1)
+	res, err := bs.strg.List(ctx, s2.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
-	return prefixes, nil
+	return res.CommonPrefixes, nil
 }
 
 func (bs *Buckets) Get(ctx context.Context, name string) (s2.Storage, error) {

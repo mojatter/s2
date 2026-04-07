@@ -8,7 +8,14 @@ const (
 	TypeS3    Type = "s3"
 )
 
-var Types = []Type{TypeOSFS, TypeMemFS, TypeS3}
+// KnownTypes returns the list of storage Types that are known to s2.
+// The returned slice is a fresh copy; mutating it does not affect future
+// calls. Note that this only enumerates compiled-in types; whether a given
+// type is *registered* depends on whether the corresponding backend
+// package has been imported (e.g. _ "github.com/mojatter/s2/fs").
+func KnownTypes() []Type {
+	return []Type{TypeOSFS, TypeMemFS, TypeS3}
+}
 
 // S3Config holds S3-specific configuration.
 // When fields are empty, the AWS SDK defaults (environment variables, shared

@@ -36,7 +36,7 @@ func (o *object) Open() (io.ReadCloser, error) {
 	if err != nil {
 		var noSuchKeyErr *s3types.NoSuchKey
 		if errors.As(err, &noSuchKeyErr) {
-			return nil, &s2.ErrNotExist{Name: path.Join(o.prefix, o.name)}
+			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, path.Join(o.prefix, o.name))
 		}
 		return nil, fmt.Errorf("failed to get object: %w", err)
 	}
@@ -53,7 +53,7 @@ func (o *object) LastModified() time.Time {
 
 func (o *object) Metadata() s2.Metadata {
 	if o.metadata == nil {
-		o.metadata = make(s2.MetadataMap)
+		o.metadata = make(s2.Metadata)
 	}
 	return o.metadata
 }
@@ -67,7 +67,7 @@ func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
 	if err != nil {
 		var noSuchKeyErr *s3types.NoSuchKey
 		if errors.As(err, &noSuchKeyErr) {
-			return nil, &s2.ErrNotExist{Name: path.Join(o.prefix, o.name)}
+			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, path.Join(o.prefix, o.name))
 		}
 		return nil, fmt.Errorf("failed to get object range: %w", err)
 	}

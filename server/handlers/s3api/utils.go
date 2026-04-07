@@ -114,7 +114,7 @@ func (r *awsChunkedReader) Read(p []byte) (int, error) {
 }
 
 func s2ErrorToS3Error(err error) (string, string, int) {
-	if s2.IsNotExist(err) {
+	if errors.Is(err, s2.ErrNotExist) {
 		return "NoSuchKey", err.Error(), http.StatusNotFound
 	}
 	var bucketErr *ErrNoSuchBucket

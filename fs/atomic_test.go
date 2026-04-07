@@ -81,15 +81,14 @@ func TestAtomicWrite_TempHiddenFromList(t *testing.T) {
 	require.NoError(t, strg.Put(ctx, s2.NewObjectBytes("real.txt", []byte("ok"))))
 
 	// Flat list must not include the temp file.
-	objs, _, err := strg.List(ctx, "", 100)
+	res, err := strg.List(ctx, s2.ListOptions{Limit: 100})
 	require.NoError(t, err)
-	names := objectNames(objs)
-	require.ElementsMatch(t, []string{"real.txt"}, names)
+	require.ElementsMatch(t, []string{"real.txt"}, objectNames(res.Objects))
 
 	// Recursive list must also hide it.
-	objs, err = strg.ListRecursive(ctx, "", 100)
+	res, err = strg.List(ctx, s2.ListOptions{Limit: 100, Recursive: true})
 	require.NoError(t, err)
-	require.ElementsMatch(t, []string{"real.txt"}, objectNames(objs))
+	require.ElementsMatch(t, []string{"real.txt"}, objectNames(res.Objects))
 }
 
 func TestAtomicWrite_NestedDir(t *testing.T) {
