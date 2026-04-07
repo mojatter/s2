@@ -17,7 +17,11 @@ import (
 	"github.com/mojatter/s2/server"
 )
 
-const sigV4MaxClockSkew = 15 * time.Minute
+const (
+	sigV4MaxClockSkew = 15 * time.Minute
+	// emptyStringSHA256 is the hex SHA-256 of the empty string.
+	emptyStringSHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+)
 
 // SigV4 returns a handler that enforces AWS Signature Version 4 authentication for S3 API routes.
 // Authentication is skipped when User is not configured.
@@ -104,7 +108,11 @@ func verifySignatureV4(r *http.Request, accessKeyID, secretAccessKey string) err
 	}
 
 	signedHeaders := strings.Split(signedHeadersStr, ";")
-	canonReq := buildCanonicalRequest(r, signedHeaders)
+	payloadHash := r.Header.Get("X-Amz-Content-Sha256")
+	if payloadHash == "" {
+		payloadHash = emptyStringSHA256
+	}
+	canonReq := buildCanonicalRequest(r, signedHeaders, r.URL.RawQuery, payloadHash)
 
 	scope := date + "/" + region + "/" + service + "/aws4_request"
 	stringToSign := "AWS4-HMAC-SHA256\n" + datetime + "\n" + scope + "\n" + hashSHA256(canonReq)
@@ -130,7 +138,11 @@ func parseAuthHeader(s string) map[string]string {
 	return result
 }
 
-func buildCanonicalRequest(r *http.Request, signedHeaders []string) string {
+// buildCanonicalRequest builds the AWS SigV4 canonical request string.
+// rawQuery is the unprocessed query string (it will be canonicalized internally);
+// callers in presigned-URL mode should pre-strip X-Amz-Signature before passing it.
+// payloadHash is the hex SHA-256 of the body, or "UNSIGNED-PAYLOAD" for presigned URLs.
+func buildCanonicalRequest(r *http.Request, signedHeaders []string, rawQuery, payloadHash string) string {
 	sorted := make([]string, len(signedHeaders))
 	copy(sorted, signedHeaders)
 	sort.Strings(sorted)
@@ -140,7 +152,7 @@ func buildCanonicalRequest(r *http.Request, signedHeaders []string) string {
 	b.WriteByte('\n')
 	b.WriteString(canonicalURI(r))
 	b.WriteByte('\n')
-	b.WriteString(canonicalQueryString(r.URL.RawQuery))
+	b.WriteString(canonicalQueryString(rawQuery))
 	b.WriteByte('\n')
 	for _, name := range sorted {
 		b.WriteString(name)
@@ -151,11 +163,6 @@ func buildCanonicalRequest(r *http.Request, signedHeaders []string) string {
 	b.WriteByte('\n')
 	b.WriteString(strings.Join(sorted, ";"))
 	b.WriteByte('\n')
-	payloadHash := r.Header.Get("X-Amz-Content-Sha256")
-	if payloadHash == "" {
-		// SHA256 of empty string
-		payloadHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-	}
 	b.WriteString(payloadHash)
 	return b.String()
 }

@@ -32,7 +32,7 @@ func signRequestAt(r *http.Request, accessKey, secretKey string, now time.Time) 
 
 	signedHeaders := []string{"host", "x-amz-content-sha256", "x-amz-date"}
 
-	canonReq := buildCanonicalRequest(r, signedHeaders)
+	canonReq := buildCanonicalRequest(r, signedHeaders, r.URL.RawQuery, emptyStringSHA256)
 	scope := date + "/" + region + "/" + service + "/aws4_request"
 	stringToSign := "AWS4-HMAC-SHA256\n" + datetime + "\n" + scope + "\n" + hashSHA256(canonReq)
 	signingKey := buildSigningKey(secretKey, date, region, service)
