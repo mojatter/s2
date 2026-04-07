@@ -10,10 +10,22 @@ services:
     tmpfs:
       - /var/lib/s2
 
+  s2-mem:
+    build:
+      context: ../..
+      dockerfile: server/Dockerfile
+    environment:
+      S2_SERVER_LISTEN: ":9000"
+      S2_SERVER_TYPE: "memfs"
+      S2_SERVER_USER: "testkey"
+      S2_SERVER_PASSWORD: "testsecret"
+
   test:
     image: amazon/aws-cli
     depends_on:
       s2:
+        condition: service_started
+      s2-mem:
         condition: service_started
     environment:
       AWS_ACCESS_KEY_ID: "testkey"
