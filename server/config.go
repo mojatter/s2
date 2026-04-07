@@ -28,7 +28,11 @@ type Config struct {
 	s2.Config
 	// Listen is the address to listen on.
 	Listen string `json:"listen"`
-	// MaxUploadSize is the maximum upload size in bytes (0 = default 5GB).
+	// MaxUploadSize is the maximum upload size in bytes. When 0, a backend-specific
+	// default is used (see EffectiveMaxUploadSize): 5 GiB for osfs/s3, 16 MiB for
+	// memfs. The conservative memfs default protects the host from accidental
+	// OOM when a large upload targets the in-memory backend; set an explicit
+	// value here to override.
 	MaxUploadSize int64 `json:"max_upload_size"`
 	// MaxPreviewSize is the maximum file size for text preview in bytes (0 = default 10MB).
 	MaxPreviewSize int64 `json:"max_preview_size"`
@@ -42,9 +46,24 @@ type Config struct {
 }
 
 const (
-	DefaultMaxUploadSize  = 5 << 30  // 5GB
-	DefaultMaxPreviewSize = 10 << 20 // 10MB
+	DefaultMaxUploadSize      = 5 << 30  // 5 GiB — default for osfs/s3 backends.
+	DefaultMemfsMaxUploadSize = 16 << 20 // 16 MiB — conservative default for the in-memory backend.
+	DefaultMaxPreviewSize     = 10 << 20 // 10 MiB
 )
+
+// EffectiveMaxUploadSize returns the upload size limit to enforce for this
+// configuration. When MaxUploadSize is explicitly set (> 0) it is returned
+// as-is; otherwise a backend-specific default is chosen so that switching
+// Type to memfs does not silently inherit the 5 GiB default.
+func (cfg *Config) EffectiveMaxUploadSize() int64 {
+	if cfg.MaxUploadSize > 0 {
+		return cfg.MaxUploadSize
+	}
+	if cfg.Type == s2.TypeMemFS {
+		return DefaultMemfsMaxUploadSize
+	}
+	return DefaultMaxUploadSize
+}
 
 func DefaultConfig() *Config {
 	return &Config{
@@ -52,8 +71,9 @@ func DefaultConfig() *Config {
 			Type: s2.TypeOSFS,
 			Root: "/var/lib/s2",
 		},
-		Listen:         ":9000",
-		MaxUploadSize:  DefaultMaxUploadSize,
+		Listen: ":9000",
+		// MaxUploadSize intentionally left 0 — EffectiveMaxUploadSize resolves
+		// a backend-appropriate default at request time.
 		MaxPreviewSize: DefaultMaxPreviewSize,
 	}
 }

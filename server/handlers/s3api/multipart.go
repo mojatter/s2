@@ -96,7 +96,7 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	maxSize := s.Config.MaxUploadSize
+	maxSize := s.Config.EffectiveMaxUploadSize()
 	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 
 	data, err := io.ReadAll(unwrapAWSChunkedBody(r))

@@ -139,7 +139,7 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	prefix := r.FormValue("prefix")
 
 	// Enforce upload size limit
-	maxSize := s.Config.MaxUploadSize
+	maxSize := s.Config.EffectiveMaxUploadSize()
 	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 
 	file, header, err := r.FormFile("file")
