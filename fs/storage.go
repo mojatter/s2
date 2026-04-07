@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"path"
 	"strings"
-	"time"
 
 	"github.com/mojatter/s2"
 	"github.com/mojatter/wfs"
@@ -85,14 +84,22 @@ func isMetaDir(name string) bool {
 	return name == ".meta"
 }
 
-func (s *storage) List(ctx context.Context, prefix string, limit int) ([]s2.Object, []string, error) {
-	return s.ListAfter(ctx, prefix, limit, "")
+// defaultListLimit caps a List call when ListOptions.Limit is unset (0).
+// It mirrors S3's default ListObjectsV2 page size.
+const defaultListLimit = 1000
+
+func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = defaultListLimit
+	}
+	if opts.Recursive {
+		return s.listRecursive(opts.Prefix, opts.After, limit)
+	}
+	return s.listFlat(opts.Prefix, opts.After, limit)
 }
 
-func (s *storage) ListAfter(ctx context.Context, prefix string, limit int, after string) ([]s2.Object, []string, error) {
-	if limit <= 0 {
-		limit = 1000
-	}
+func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, error) {
 	// Normalize prefix into a directory path acceptable to fs.ReadDir.
 	// S3 callers commonly pass a trailing slash (e.g. "dir/"), which fs.ValidPath rejects.
 	dir := strings.TrimSuffix(prefix, "/")
@@ -103,12 +110,14 @@ func (s *storage) ListAfter(ctx context.Context, prefix string, limit int, after
 	if err != nil {
 		// A non-existent prefix is not an error in S3 semantics; return an empty result.
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil, nil
+			return s2.ListResult{}, nil
 		}
-		return nil, nil, fmt.Errorf("failed to read dir: %w", err)
+		return s2.ListResult{}, fmt.Errorf("failed to read dir: %w", err)
 	}
-	prefixes := make([]string, 0)
-	objs := make([]s2.Object, 0, len(entries))
+	res := s2.ListResult{
+		Objects:        make([]s2.Object, 0, len(entries)),
+		CommonPrefixes: make([]string, 0),
+	}
 	for _, entry := range entries {
 		name := entry.Name()
 		if dir != "." {
@@ -122,30 +131,23 @@ func (s *storage) ListAfter(ctx context.Context, prefix string, limit int, after
 		}
 		info, err := entry.Info()
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to get info: %w", err)
+			return s2.ListResult{}, fmt.Errorf("failed to get info: %w", err)
 		}
 		if info.IsDir() {
-			prefixes = append(prefixes, name)
+			res.CommonPrefixes = append(res.CommonPrefixes, name)
 			continue
 		}
-		objs = append(objs, newObjectFileInfo(s.fsys, name, info))
+		res.Objects = append(res.Objects, newObjectFileInfo(s.fsys, name, info))
 		limit--
 		if limit <= 0 {
 			break
 		}
 	}
-	return objs, prefixes, nil
+	return res, nil
 }
 
-func (s *storage) ListRecursive(ctx context.Context, prefix string, limit int) ([]s2.Object, error) {
-	return s.ListRecursiveAfter(ctx, prefix, limit, "")
-}
-
-func (s *storage) ListRecursiveAfter(ctx context.Context, prefix string, limit int, after string) ([]s2.Object, error) {
-	if limit <= 0 {
-		limit = 1000
-	}
-	objs := make([]s2.Object, 0, limit)
+func (s *storage) listRecursive(prefix, after string, limit int) (s2.ListResult, error) {
+	res := s2.ListResult{Objects: make([]s2.Object, 0, limit)}
 	err := fs.WalkDir(s.fsys, ".", func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -169,7 +171,7 @@ func (s *storage) ListRecursiveAfter(ctx context.Context, prefix string, limit i
 		if isTempFile(d.Name()) {
 			return nil
 		}
-		objs = append(objs, newObjectFileInfo(s.fsys, name, info))
+		res.Objects = append(res.Objects, newObjectFileInfo(s.fsys, name, info))
 		limit--
 		if limit <= 0 {
 			return fs.SkipDir
@@ -177,21 +179,21 @@ func (s *storage) ListRecursiveAfter(ctx context.Context, prefix string, limit i
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return s2.ListResult{}, err
 	}
-	return objs, nil
+	return res, nil
 }
 
 func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 	info, err := fs.Stat(s.fsys, name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return nil, &s2.ErrNotExist{Name: name}
+			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, name)
 		}
 		return nil, fmt.Errorf("failed to stat: %w", err)
 	}
 	if info.IsDir() {
-		return nil, &s2.ErrNotExist{Name: name}
+		return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, name)
 	}
 	obj := newObjectFileInfo(s.fsys, name, info)
 	if err := obj.loadMetadata(); err != nil {
@@ -310,9 +312,12 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 	return nil
 }
 
-func (s *storage) SignedURL(ctx context.Context, name string, ttl time.Duration) (string, error) {
-	if _, err := s.Get(ctx, name); err != nil {
+func (s *storage) SignedURL(ctx context.Context, opts s2.SignedURLOptions) (string, error) {
+	if opts.Method != "" && opts.Method != s2.SignedURLGet {
+		return "", fmt.Errorf("fs storage: unsupported signed URL method %q", opts.Method)
+	}
+	if _, err := s.Get(ctx, opts.Name); err != nil {
 		return "", err
 	}
-	return url.JoinPath(s.cfg.SignedURL, name)
+	return url.JoinPath(s.cfg.SignedURL, opts.Name)
 }

@@ -114,7 +114,7 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 
 	h := md5.Sum(data) // #nosec G401 -- MD5 is required for S3-compatible ETag
 	etag := `"` + hex.EncodeToString(h[:]) + `"`
-	_ = strg.PutMetadata(ctx, partKey(uploadID, partNumber), s2.MetadataMap{etagMetadataKey: etag})
+	_ = strg.PutMetadata(ctx, partKey(uploadID, partNumber), s2.Metadata{etagMetadataKey: etag})
 
 	w.Header().Set("ETag", etag)
 	w.WriteHeader(http.StatusOK)
@@ -180,7 +180,7 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 
 	combined := md5.Sum(pr.partMD5s) // #nosec G401 -- MD5 is required for S3-compatible multipart ETag
 	etag := `"` + hex.EncodeToString(combined[:]) + `-` + strconv.Itoa(len(req.Parts)) + `"`
-	_ = strg.PutMetadata(ctx, key, s2.MetadataMap{etagMetadataKey: etag})
+	_ = strg.PutMetadata(ctx, key, s2.Metadata{etagMetadataKey: etag})
 
 	// Clean up part objects
 	for _, p := range req.Parts {

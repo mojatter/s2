@@ -3,7 +3,6 @@ package s3
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -193,6 +192,11 @@ func (m *mockS3Client) PresignGetObject(ctx context.Context, params *s3.GetObjec
 		return nil, &s3types.NoSuchKey{}
 	}
 	url := fmt.Sprintf("https://s3mock/%s/%s", aws.ToString(params.Bucket), aws.ToString(params.Key))
+	return &v4.PresignedHTTPRequest{URL: url}, nil
+}
+
+func (m *mockS3Client) PresignPutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.PresignOptions)) (*v4.PresignedHTTPRequest, error) {
+	url := fmt.Sprintf("https://s3mock/%s/%s?PUT", aws.ToString(params.Bucket), aws.ToString(params.Key))
 	return &v4.PresignedHTTPRequest{URL: url}, nil
 }
 
@@ -444,8 +448,7 @@ func (s *StorageTestSuite) TestGet() {
 		}
 		_, err := obj.Open()
 		s.Error(err)
-		var s2ErrNotExist *s2.ErrNotExist
-		s.True(errors.As(err, &s2ErrNotExist))
+		s.ErrorIs(err, s2.ErrNotExist)
 	})
 }
 
@@ -459,7 +462,7 @@ func (s *StorageTestSuite) TestPut() {
 			caseName: "new-file",
 			obj: func() s2.Object {
 				o := s2.NewObjectBytes("new.txt", []byte("new content"))
-				o.Metadata().Put("key", "val")
+				o.Metadata().Set("key", "val")
 				return o
 			}(),
 		},
@@ -535,8 +538,9 @@ func (s *StorageTestSuite) TestDeleteRecursive() {
 			}
 			s.Require().NoError(err)
 
-			objs, err := strg.ListRecursive(tc.ctx, "", 10)
+			res, err := strg.List(tc.ctx, s2.ListOptions{Limit: 10, Recursive: true})
 			s.Require().NoError(err)
+			objs := res.Objects
 			s.Equal(len(tc.wantLeft), len(objs))
 			for i, w := range tc.wantLeft {
 				s.Equal(w, objs[i].Name())
@@ -562,9 +566,9 @@ func (s *StorageTestSuite) TestSub() {
 	s.Require().NoError(err)
 	s.Equal(s2.TypeS3, sub.Type())
 
-	objs, err := sub.ListRecursive(ctx, "", 10)
+	res, err := sub.List(ctx, s2.ListOptions{Limit: 10, Recursive: true})
 	s.Require().NoError(err)
-	s.Len(objs, 2)
+	s.Len(res.Objects, 2)
 }
 
 func (s *StorageTestSuite) TestExists() {
@@ -590,7 +594,7 @@ func (s *StorageTestSuite) TestPutMetadata() {
 	_, strg := s.testMockClient()
 	ctx := context.Background()
 
-	err := strg.PutMetadata(ctx, "a.txt", s2.MetadataMap{"new-key": "new-val"})
+	err := strg.PutMetadata(ctx, "a.txt", s2.Metadata{"new-key": "new-val"})
 	s.Require().NoError(err)
 
 	obj, err := strg.Get(ctx, "a.txt")
@@ -628,7 +632,7 @@ func (s *StorageTestSuite) TestMove() {
 	_, strg := s.testMockClient()
 	ctx := context.Background()
 
-	err := strg.Move(ctx, "a.txt", "moved.txt")
+	err := s2.Move(ctx, strg, "a.txt", "moved.txt")
 	s.Require().NoError(err)
 
 	_, err = strg.Get(ctx, "a.txt")
@@ -669,7 +673,7 @@ func (s *StorageTestSuite) TestSignedURL() {
 		s.Run(tc.caseName, func() {
 			_, strg := s.testMockClient()
 
-			got, err := strg.SignedURL(tc.ctx, tc.name, tc.ttl)
+			got, err := strg.SignedURL(tc.ctx, s2.SignedURLOptions{Name: tc.name, TTL: tc.ttl})
 			if tc.wantErr != "" {
 				s.ErrorContains(err, tc.wantErr)
 				return
@@ -682,7 +686,7 @@ func (s *StorageTestSuite) TestSignedURL() {
 		strg := &storage{
 			client: &mockS3Client{}, // Not a *s3.Client
 		}
-		_, err := strg.SignedURL(context.Background(), "a.txt", time.Hour)
+		_, err := strg.SignedURL(context.Background(), s2.SignedURLOptions{Name: "a.txt", TTL: time.Hour})
 		s.Error(err)
 		s.ErrorContains(err, "unknown client type")
 	})

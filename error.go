@@ -2,32 +2,19 @@ package s2
 
 import "errors"
 
-// ErrUnknownType represents an error that the storage type is unknown.
-type ErrUnknownType struct {
-	Type Type
-}
+// ErrNotExist is returned when an operation targets an object that does not
+// exist. Backends wrap this with the missing object's name via fmt.Errorf, so
+// callers should detect it with errors.Is rather than direct equality:
+//
+//	if errors.Is(err, s2.ErrNotExist) {
+//	    // handle missing object
+//	}
+var ErrNotExist = errors.New("s2: object not exist")
 
-func (e *ErrUnknownType) Error() string {
-	return "unknown type: " + string(e.Type)
-}
-
-// IsUnknownType returns true if the error is a unknown type error.
-func IsUnknownType(err error) bool {
-	var e *ErrUnknownType
-	return errors.As(err, &e)
-}
-
-// ErrNotExist represents an error that the object does not exist.
-type ErrNotExist struct {
-	Name string
-}
-
-func (e *ErrNotExist) Error() string {
-	return "not exist: " + e.Name
-}
-
-// IsNotExist returns true if the error is a not exist error.
-func IsNotExist(err error) bool {
-	var e *ErrNotExist
-	return errors.As(err, &e)
-}
+// ErrUnknownType is returned by NewStorage when no plugin is registered for
+// the requested Type. Detect with errors.Is:
+//
+//	if errors.Is(err, s2.ErrUnknownType) {
+//	    // unknown backend
+//	}
+var ErrUnknownType = errors.New("s2: unknown storage type")

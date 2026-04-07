@@ -1,6 +1,9 @@
 package server
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,7 +28,7 @@ func TestDefaultConfig(t *testing.T) {
 	}{
 		{caseName: "listen", field: "Listen", got: DefaultConfig().Listen, want: ":9000"},
 		{caseName: "type", field: "Type", got: string(DefaultConfig().Type), want: "osfs"},
-		{caseName: "root", field: "Root", got: DefaultConfig().Root, want: "/var/lib/s2"},
+		{caseName: "root", field: "Root", got: DefaultConfig().Root, want: DefaultRoot},
 		// MaxUploadSize is intentionally 0 in DefaultConfig; EffectiveMaxUploadSize resolves a backend-specific default.
 		{caseName: "max upload size", field: "MaxUploadSize", got: DefaultConfig().MaxUploadSize, want: int64(0)},
 		{caseName: "effective max upload size (osfs)", field: "EffectiveMaxUploadSize", got: DefaultConfig().EffectiveMaxUploadSize(), want: int64(5 << 30)},
@@ -81,6 +84,77 @@ func TestEffectiveMaxUploadSize(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
 			assert.Equal(t, tc.want, tc.cfg.EffectiveMaxUploadSize())
+		})
+	}
+}
+
+// TestConfigPrecedence verifies that configuration sources are applied in
+// the documented order: default < file < env < flag. The test exercises the
+// same load sequence Run uses (DefaultConfig -> LoadFile -> LoadEnv -> flag
+// override) without actually starting an HTTP server.
+func TestConfigPrecedence(t *testing.T) {
+	// Write a small config file with a root value we can later see being
+	// overridden.
+	dir := t.TempDir()
+	fileRoot := filepath.Join(dir, "from-file")
+	cfgPath := filepath.Join(dir, "config.json")
+	body, err := json.Marshal(map[string]any{
+		"root":   fileRoot,
+		"listen": ":7001",
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath, body, 0o600))
+
+	testCases := []struct {
+		caseName string
+		envRoot  string
+		flagRoot *string
+		wantRoot string
+	}{
+		{
+			caseName: "default only (no file, no env, no flag)",
+			wantRoot: DefaultConfig().Root,
+		},
+		{
+			caseName: "file beats default",
+			wantRoot: fileRoot,
+		},
+		{
+			caseName: "env beats file",
+			envRoot:  "/from-env",
+			wantRoot: "/from-env",
+		},
+		{
+			caseName: "flag beats env",
+			envRoot:  "/from-env",
+			flagRoot: strPtr("/from-flag"),
+			wantRoot: "/from-flag",
+		},
+		{
+			caseName: "flag beats file (no env)",
+			flagRoot: strPtr("/from-flag"),
+			wantRoot: "/from-flag",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			if tc.envRoot != "" {
+				t.Setenv(EnvS2ServerRoot, tc.envRoot)
+			} else {
+				t.Setenv(EnvS2ServerRoot, "")
+			}
+
+			cfg := DefaultConfig()
+			// "default only" uses no file; every other case loads the file.
+			if tc.caseName != "default only (no file, no env, no flag)" {
+				require.NoError(t, cfg.LoadFile(cfgPath))
+			}
+			require.NoError(t, cfg.LoadEnv())
+			if tc.flagRoot != nil {
+				cfg.Root = *tc.flagRoot
+			}
+
+			assert.Equal(t, tc.wantRoot, cfg.Root)
 		})
 	}
 }
