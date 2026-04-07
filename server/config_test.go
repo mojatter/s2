@@ -28,7 +28,7 @@ func TestDefaultConfig(t *testing.T) {
 	}{
 		{caseName: "listen", field: "Listen", got: DefaultConfig().Listen, want: ":9000"},
 		{caseName: "type", field: "Type", got: string(DefaultConfig().Type), want: "osfs"},
-		{caseName: "root", field: "Root", got: DefaultConfig().Root, want: "/var/lib/s2"},
+		{caseName: "root", field: "Root", got: DefaultConfig().Root, want: DefaultRoot},
 		// MaxUploadSize is intentionally 0 in DefaultConfig; EffectiveMaxUploadSize resolves a backend-specific default.
 		{caseName: "max upload size", field: "MaxUploadSize", got: DefaultConfig().MaxUploadSize, want: int64(0)},
 		{caseName: "effective max upload size (osfs)", field: "EffectiveMaxUploadSize", got: DefaultConfig().EffectiveMaxUploadSize(), want: int64(5 << 30)},
