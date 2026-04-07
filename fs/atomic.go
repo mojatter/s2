@@ -15,7 +15,7 @@ import (
 
 // tmpPrefix is the basename prefix used for in-flight atomic-write files.
 // Entries with this prefix are hidden from listings so partial writes are
-// never observable through List/ListRecursive.
+// never observable through Storage.List (in either flat or recursive mode).
 const tmpPrefix = ".s2tmp-"
 
 // atomicWrite writes src into name using a temp-file + Sync + Rename pattern

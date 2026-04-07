@@ -143,11 +143,11 @@ func main() {
 	}
 
 	// List objects
-	objects, _, err := assets.List(ctx, "", 100)
+	res, err := assets.List(ctx, s2.ListOptions{Limit: 100})
 	if err != nil {
 		panic(err)
 	}
-	for _, o := range objects {
+	for _, o := range res.Objects {
 		fmt.Println(o.Name())
 	}
 }
@@ -192,11 +192,11 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	objects, _, err := strg.List(ctx, "", 1000)
+	res, err := strg.List(ctx, s2.ListOptions{Limit: 1000})
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("%v\n", objects)
+	fmt.Printf("%v\n", res.Objects)
 }
 ```
 
@@ -310,19 +310,51 @@ When `S3Config` is nil or all fields are empty, the standard AWS SDK credential 
 type Storage interface {
 	Type() Type
 	Sub(ctx context.Context, prefix string) (Storage, error)
-	List(ctx context.Context, prefix string, limit int) ([]Object, []string, error)
-	ListAfter(ctx context.Context, prefix string, limit int, after string) ([]Object, []string, error)
-	ListRecursive(ctx context.Context, prefix string, limit int) ([]Object, error)
-	ListRecursiveAfter(ctx context.Context, prefix string, limit int, after string) ([]Object, error)
+	List(ctx context.Context, opts ListOptions) (ListResult, error)
 	Get(ctx context.Context, name string) (Object, error)
 	Exists(ctx context.Context, name string) (bool, error)
 	Put(ctx context.Context, obj Object) error
 	PutMetadata(ctx context.Context, name string, metadata Metadata) error
 	Copy(ctx context.Context, src, dst string) error
-	Move(ctx context.Context, src, dst string) error
 	Delete(ctx context.Context, name string) error
 	DeleteRecursive(ctx context.Context, prefix string) error
-	SignedURL(ctx context.Context, name string, ttl time.Duration) (string, error)
+	SignedURL(ctx context.Context, opts SignedURLOptions) (string, error)
+}
+
+// One List method covers flat and recursive listings, with explicit
+// pagination via continuation token.
+type ListOptions struct {
+	Prefix    string
+	After     string // continuation token; empty = first page
+	Limit     int    // 0 = backend default
+	Recursive bool
+}
+
+type ListResult struct {
+	Objects        []Object
+	CommonPrefixes []string // empty when Recursive == true
+	NextAfter      string   // empty when exhausted
+}
+
+// SignedURL is method-aware so backends can issue both download and upload URLs.
+type SignedURLOptions struct {
+	Name   string
+	Method SignedURLMethod // SignedURLGet (default) or SignedURLPut
+	TTL    time.Duration
+}
+```
+
+Move is a free function rather than a method so backends do not have to implement two near-identical operations. Backends that can do better than `Copy + Delete` (e.g. `osfs` via filesystem rename) satisfy the optional `s2.Mover` interface, which `s2.Move` discovers via type assertion:
+
+```go
+err := s2.Move(ctx, strg, "src.txt", "dst.txt")
+```
+
+Errors that report a missing object wrap [`s2.ErrNotExist`](https://pkg.go.dev/github.com/mojatter/s2#pkg-variables); detect them with `errors.Is`:
+
+```go
+if _, err := strg.Get(ctx, "missing.txt"); errors.Is(err, s2.ErrNotExist) {
+	// handle not found
 }
 ```
 

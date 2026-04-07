@@ -12,8 +12,9 @@ import (
 )
 
 // TestStorageList is a test helper for validating s2.Storage list operations.
-// It tests the List and ListAfter methods of an s2.Storage implementation
-// for a particular prefix against the expected direct object names.
+// It exercises the flat-listing path of Storage.List (Recursive: false) for a
+// particular prefix against the expected direct object names, including a
+// pagination round-trip via the After continuation token.
 // The expected array should only contain names of objects immediately beneath the prefix.
 // expectedPrefixes is an optional list of expected common prefixes (subdirectories).
 func TestStorageList(ctx context.Context, strg s2.Storage, prefix string, expected ...string) error {
@@ -93,8 +94,9 @@ func TestStorageListWithPrefixes(ctx context.Context, strg s2.Storage, prefix st
 }
 
 // TestStorageListRecursive is a test helper for validating s2.Storage recursive list operations.
-// It tests the ListRecursive and ListRecursiveAfter methods
-// of an s2.Storage implementation against the expected object names.
+// It exercises the recursive path of Storage.List (Recursive: true) — including
+// a prefix-filter case and a pagination round-trip via the After continuation
+// token — against the expected object names.
 // The provided expected array must be the comprehensive list of object names in the storage.
 func TestStorageListRecursive(ctx context.Context, strg s2.Storage, expected ...string) error {
 	sort.Strings(expected)
