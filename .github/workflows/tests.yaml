@@ -1,4 +1,4 @@
-name: Go
+name: Tests
 
 on:
   push:
@@ -29,12 +29,7 @@ jobs:
           go mod tidy
           go test -v ./...
       -
-        name: Run staticcheck
-        run: |
-          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
-          staticcheck ./...
-      -
-        name: Run gosec
-        run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.24.7
-          gosec ./...
+        name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.11.4
