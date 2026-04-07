@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./docs/s2-gopher-gemini.png" alt="S2 — Simple Storage" width="480">
+  <img src="./docs/s2-gopher-gemini.png" alt="S2 — Simple Storage" width="100%">
 </p>
 
 # S2 — Simple Storage
