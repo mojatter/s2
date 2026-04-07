@@ -25,3 +25,9 @@ make test-e2e
 ```
 
 `make test` uses `-short` to skip integration tests. Running `go test ./...` without `-short` includes them.
+
+## Design notes
+
+Past API design decisions and audits live under [`docs/`](docs/). They are not user-facing documentation, but they record *why* certain shapes were chosen and are useful when proposing changes:
+
+- [`docs/api-audit.md`](docs/api-audit.md) — public API audit and verdicts heading into the v0.2 stabilization.
