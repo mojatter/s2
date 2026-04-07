@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la /Users/uz/src/mojatter/s2/server/handlers/s3api/*.go)",
+      "Bash(grep -n \"func Handler\\\\|func Register\" /Users/uz/src/mojatter/s2/server/handlers/s3api/*.go)",
+      "Bash(grep -n \"RegisterHandleFunc\\\\|HandlerFunc\" /Users/uz/src/mojatter/s2/server/*.go)",
+      "Bash(grep -l \"httptest.NewServer\\\\|http.Serve\\\\|RoundTrip\\\\|aws-sdk-go-v2\" /Users/uz/src/mojatter/s2/server/handlers/s3api/*.go)",
+      "Bash(docker run:*)",
+      "Bash(docker compose:*)",
+      "Bash(go list:*)",
+      "Bash(grep -n \"etagMetadataKey\\\\|GetMetadata\\\\|PutMetadata\" /Users/uz/src/mojatter/s2/server/handlers/s3api/*.go /Users/uz/src/mojatter/s2/storage.go /Users/uz/src/mojatter/s2/metadata.go)",
+      "Bash(ls server/handlers/s3api/multipart*)",
+      "Bash(grep -n \"ErrNotExist\\\\|IsNotExist\\\\|ErrUnknownType\\\\|IsUnknownType\" /Users/uz/src/mojatter/s2/*.go /Users/uz/src/mojatter/s2/s2test/*.go)",
+      "Bash(grep -n \"func newOSFSStorage\" /Users/uz/src/mojatter/s2/fs/*.go)",
+      "Bash(grep -n \"/var/lib/s2\\\\|DefaultRoot\" /Users/uz/src/mojatter/s2/server/*_test.go)",
+      "Bash(lsof -iTCP:9000 -sTCP:LISTEN -n -P)",
+      "Bash(go get:*)"
+    ]
+  }
+}
