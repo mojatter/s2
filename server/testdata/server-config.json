@@ -1,5 +1,0 @@
-{
-    "listen": "localhost:9000",
-    "type": "osfs",
-    "buckets_root": "./buckets-root"
-}

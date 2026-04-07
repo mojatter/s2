@@ -26,7 +26,7 @@ For most local-development use cases, replacing MinIO with S2 is a one-line chan
 
 ```yaml
 services:
-  s3:
+  s2:
     image: mojatter/s2-server
     ports:
       - "9000:9000"

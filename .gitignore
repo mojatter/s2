@@ -36,3 +36,6 @@ dist/
 
 # build output
 bin/
+
+# default data directory
+data/
