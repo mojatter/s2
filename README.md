@@ -243,7 +243,7 @@ The `s2test` package provides reusable assertion helpers (e.g. `s2test.TestStora
 | Type | Import | Description |
 |------|--------|-------------|
 | `osfs` | `github.com/mojatter/s2/fs` | Local filesystem storage |
-| `memfs` | `github.com/mojatter/s2/fs` | In-memory filesystem (great for testing) |
+| `memfs` | `github.com/mojatter/s2/fs` | In-memory filesystem (great for testing; see notes below) |
 | `s3` | `github.com/mojatter/s2/s3` | AWS S3 (and any S3-compatible service) |
 
 Backends are registered via blank imports. Import only what you need:
@@ -428,6 +428,16 @@ S2 aims to cover the parts of the S3 API that matter for local development and l
 - **Replication, lifecycle rules, object lock** — Not implemented.
 
 If your use case needs any of the above, S2 is probably not the right tool — consider AWS S3, Ceph RGW, or SeaweedFS.
+
+### memfs backend
+
+The `memfs` backend holds every object body in process memory. It is designed for **tests and local development**, not production workloads:
+
+- All objects live in RAM for the lifetime of the process; nothing is persisted.
+- The default upload limit is **16 MiB** (vs. 5 GiB for `osfs`/`s3`) to protect the host from accidental OOM. Set `S2_SERVER_MAX_UPLOAD_SIZE` (or `Config.MaxUploadSize`) to raise it if you genuinely need larger uploads against memfs.
+- There is no total-memory budget or backpressure across concurrent uploads.
+
+If you need to handle large files, use the `osfs` or `s3` backend instead.
 
 ## License
 

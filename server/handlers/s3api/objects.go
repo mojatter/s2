@@ -321,7 +321,7 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 
 	// Enforce upload size limit
-	maxSize := s.Config.MaxUploadSize
+	maxSize := s.Config.EffectiveMaxUploadSize()
 	if r.ContentLength > maxSize {
 		writeError(w, r, "EntityTooLarge", fmt.Sprintf("Your proposed upload exceeds the maximum allowed size (%d bytes)", maxSize), http.StatusBadRequest)
 		return
