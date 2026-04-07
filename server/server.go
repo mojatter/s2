@@ -21,6 +21,27 @@ const (
 	usage = cmd + " [flags]"
 )
 
+// helpExamples is appended verbatim to the -help output so new users can see
+// a few complete command lines instead of having to synthesize one from the
+// flag list alone.
+const helpExamples = `Examples:
+  # Run with defaults: stores data in ./data, listens on :9000.
+  s2-server
+
+  # Override the listen address and storage root for a one-off run.
+  s2-server -listen :8080 -root /tmp/s2
+
+  # Create initial buckets on startup (both flag and env var work).
+  s2-server -buckets assets,uploads
+  S2_SERVER_BUCKETS=assets,uploads s2-server
+
+  # Load persistent settings from a config file, then override one field.
+  s2-server -f ./s2.json -listen :9001
+
+  # Print the version and exit.
+  s2-server -v
+`
+
 // version is set at build time via -ldflags.
 // Falls back to the module version embedded by go install.
 var version = "dev"
@@ -86,6 +107,7 @@ func initFlags(args []string) (*Flags, error) {
 		fmt.Fprintf(os.Stderr, "%s\n\nUsage:\n  %s\n\n", desc, usage)
 		fmt.Fprintln(os.Stderr, "Flags:")
 		fs.PrintDefaults()
+		fmt.Fprint(os.Stderr, "\n", helpExamples)
 	}
 	return &f, nil
 }
