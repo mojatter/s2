@@ -376,6 +376,8 @@ aws --profile s2 s3 ls
 
 When `S2_SERVER_USER` is empty (the default), authentication is disabled.
 
+**Presigned URLs** — S2 verifies AWS SigV4 signatures passed in the query string (`X-Amz-Algorithm=AWS4-HMAC-SHA256`, `X-Amz-Signature`, …), so URLs produced by `s3.NewPresignClient` (Go) or `s3.getSignedUrl` (JavaScript) work for GET and PUT. The body of a presigned PUT is treated as `UNSIGNED-PAYLOAD`.
+
 ### Config File
 
 ```json
