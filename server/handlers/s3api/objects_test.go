@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -546,6 +547,111 @@ func (s *ObjectsTestSuite) TestETag_RoundTrip() {
 		}
 	}
 	s.True(found, "rt.txt should be in list results")
+}
+
+// --- PutObject aws-chunked streaming body ---
+
+// buildAWSChunkedBody encodes payload as an AWS SigV4 streaming body:
+//
+//	<hex-size>;chunk-signature=<64 hex>\r\n
+//	<data>\r\n
+//	...
+//	0;chunk-signature=<64 hex>\r\n
+//	\r\n
+//
+// The chunk signatures are not validated by the parser, so we use a fixed
+// placeholder here.
+func buildAWSChunkedBody(payload []byte, chunkSize int) []byte {
+	fakeSig := strings.Repeat("0", 64)
+	var buf strings.Builder
+	for i := 0; i < len(payload); i += chunkSize {
+		end := min(i+chunkSize, len(payload))
+		chunk := payload[i:end]
+		buf.WriteString(strconv.FormatInt(int64(len(chunk)), 16))
+		buf.WriteString(";chunk-signature=")
+		buf.WriteString(fakeSig)
+		buf.WriteString("\r\n")
+		buf.Write(chunk)
+		buf.WriteString("\r\n")
+	}
+	buf.WriteString("0;chunk-signature=")
+	buf.WriteString(fakeSig)
+	buf.WriteString("\r\n\r\n")
+	return []byte(buf.String())
+}
+
+func (s *ObjectsTestSuite) TestPutObject_AWSChunked() {
+	s.createBucket("chunked")
+
+	payload := make([]byte, 1024*1024) // 1 MiB
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+	const chunkSize = 64 * 1024
+
+	testCases := []struct {
+		caseName    string
+		setHeaders  func(r *http.Request)
+		key         string
+	}{
+		{
+			caseName: "Content-Encoding aws-chunked",
+			key:      "ce.bin",
+			setHeaders: func(r *http.Request) {
+				r.Header.Set("Content-Encoding", "aws-chunked")
+			},
+		},
+		{
+			// Reproduces the warp/minio-go behavior: streaming signed payload
+			// is signaled via X-Amz-Content-Sha256 alone, without
+			// Content-Encoding: aws-chunked.
+			caseName: "X-Amz-Content-Sha256 STREAMING only",
+			key:      "streaming.bin",
+			setHeaders: func(r *http.Request) {
+				r.Header.Set("X-Amz-Content-Sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
+			},
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			chunked := buildAWSChunkedBody(payload, chunkSize)
+			req := httptest.NewRequest("PUT", "/s3api/chunked/"+tc.key, strings.NewReader(string(chunked)))
+			req.SetPathValue("bucket", "chunked")
+			req.SetPathValue("key", tc.key)
+			req.ContentLength = int64(len(chunked))
+			req.Header.Set("X-Amz-Decoded-Content-Length", strconv.Itoa(len(payload)))
+			tc.setHeaders(req)
+			w := httptest.NewRecorder()
+			handlePutObject(s.server, w, req)
+			s.Require().Equal(http.StatusOK, w.Code)
+
+			// Storage layer should see exactly the decoded payload.
+			strg, err := s.server.Buckets.Get(context.Background(), "chunked")
+			s.Require().NoError(err)
+			obj, err := strg.Get(context.Background(), tc.key)
+			s.Require().NoError(err)
+			s.Equal(uint64(len(payload)), obj.Length(), "object length should match decoded payload size")
+			rc, err := obj.Open()
+			s.Require().NoError(err)
+			defer rc.Close()
+
+			data, err := io.ReadAll(rc)
+			s.Require().NoError(err)
+			s.Equal(len(payload), len(data), "stored size should match decoded payload size")
+			s.Equal(payload, data, "stored bytes should match decoded payload")
+
+			// GET via handler should return the same bytes and advertise the
+			// correct Content-Length (this is what warp's minio-go validates).
+			getReq := httptest.NewRequest("GET", "/s3api/chunked/"+tc.key, nil)
+			getReq.SetPathValue("bucket", "chunked")
+			getReq.SetPathValue("key", tc.key)
+			getW := httptest.NewRecorder()
+			handleGetObject(s.server, getW, getReq)
+			s.Require().Equal(http.StatusOK, getW.Code)
+			s.Equal(strconv.Itoa(len(payload)), getW.Header().Get("Content-Length"))
+			s.Equal(len(payload), getW.Body.Len())
+		})
+	}
 }
 
 // --- Metadata ---

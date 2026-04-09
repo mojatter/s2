@@ -62,12 +62,32 @@ func (e *ErrNoSuchBucket) Error() string {
 //	...
 //	0;chunk-signature=<sig>\r\n
 //	\r\n
+//
+// Different SDKs signal streaming-signed uploads differently: some set
+// Content-Encoding: aws-chunked explicitly, while others (including
+// minio-go, used by warp) rely solely on X-Amz-Content-Sha256 being set
+// to one of the STREAMING-* payload markers. We accept both so the raw
+// chunk framing never leaks into stored object bodies.
 func unwrapAWSChunkedBody(r *http.Request) io.ReadCloser {
-	ce := r.Header.Get("Content-Encoding")
-	if ce != "aws-chunked" {
+	if !isAWSChunkedRequest(r) {
 		return r.Body
 	}
 	return io.NopCloser(&awsChunkedReader{br: bufio.NewReader(r.Body)})
+}
+
+func isAWSChunkedRequest(r *http.Request) bool {
+	if strings.EqualFold(r.Header.Get("Content-Encoding"), "aws-chunked") {
+		return true
+	}
+	// X-Amz-Content-Sha256 values that indicate a chunked body:
+	//   STREAMING-AWS4-HMAC-SHA256-PAYLOAD
+	//   STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER
+	//   STREAMING-UNSIGNED-PAYLOAD-TRAILER
+	//   STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD (SigV4a)
+	if sha := r.Header.Get("X-Amz-Content-Sha256"); strings.HasPrefix(sha, "STREAMING-") {
+		return true
+	}
+	return false
 }
 
 type awsChunkedReader struct {
