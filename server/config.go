@@ -32,6 +32,8 @@ func splitBucketList(s string) []string {
 const (
 	EnvS2ServerConfig         = "S2_SERVER_CONFIG"
 	EnvS2ServerListen         = "S2_SERVER_LISTEN"
+	EnvS2ServerConsoleListen  = "S2_SERVER_CONSOLE_LISTEN"
+	EnvS2ServerHealthPath     = "S2_SERVER_HEALTH_PATH"
 	EnvS2ServerType           = "S2_SERVER_TYPE"
 	EnvS2ServerRoot           = "S2_SERVER_ROOT"
 	EnvS2ServerMaxUploadSize  = "S2_SERVER_MAX_UPLOAD_SIZE"
@@ -44,8 +46,19 @@ const (
 // Config is a configuration for the server.
 type Config struct {
 	s2.Config
-	// Listen is the address to listen on.
+	// Listen is the address the S3-compatible API listens on.
 	Listen string `json:"listen"`
+	// ConsoleListen is the address a dedicated Web Console listener will
+	// bind to in a future release. It is reserved here so forward-looking
+	// configurations can be written today; the current server still
+	// serves the console from the same listener as the S3 API when this
+	// value is empty (the default).
+	ConsoleListen string `json:"console_listen"`
+	// HealthPath reserves a future location for the health check endpoint
+	// on the S3 listener. It is read and validated today but not yet
+	// mounted; the existing "/healthz" handler remains untouched in this
+	// release so that operators with probes pointing at it keep working.
+	HealthPath string `json:"health_path"`
 	// MaxUploadSize is the maximum upload size in bytes. When 0, a backend-specific
 	// default is used (see EffectiveMaxUploadSize): 5 GiB for osfs/s3, 16 MiB for
 	// memfs. The conservative memfs default protects the host from accidental
@@ -125,6 +138,14 @@ func (cfg *Config) LoadFile(filename string) error {
 func (cfg *Config) LoadEnv() error {
 	if listen := os.Getenv(EnvS2ServerListen); listen != "" {
 		cfg.Listen = listen
+	}
+	if v, ok := os.LookupEnv(EnvS2ServerConsoleListen); ok {
+		// LookupEnv so the operator can explicitly disable the console
+		// listener with an empty value, distinct from "unset".
+		cfg.ConsoleListen = v
+	}
+	if v, ok := os.LookupEnv(EnvS2ServerHealthPath); ok {
+		cfg.HealthPath = v
 	}
 	if typ := os.Getenv(EnvS2ServerType); typ != "" {
 		cfg.Type = s2.Type(typ)

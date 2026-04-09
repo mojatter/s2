@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -122,25 +123,136 @@ func TestNewServer(t *testing.T) {
 }
 
 func TestRegisterHandleFunc(t *testing.T) {
-	t.Run("duplicate panics", func(t *testing.T) {
-		// Save and restore global state
-		handlersMux.Lock()
-		original := handlers
-		handlers = map[string]HandlerFunc{}
-		handlersMux.Unlock()
-		defer func() {
+	noop := func(_ *Server, _ http.ResponseWriter, _ *http.Request) {}
+
+	testCases := []struct {
+		caseName     string
+		registry     *map[string]HandlerFunc
+		register     func(string, HandlerFunc)
+		wantPanicMsg string
+	}{
+		{
+			caseName:     "legacy duplicate panics",
+			registry:     &handlers,
+			register:     RegisterHandleFunc,
+			wantPanicMsg: "s2: handler already registered for GET /test",
+		},
+		{
+			caseName:     "S3 duplicate panics",
+			registry:     &s3Handlers,
+			register:     RegisterS3HandleFunc,
+			wantPanicMsg: "s2: S3 handler already registered for GET /test",
+		},
+		{
+			caseName:     "console duplicate panics",
+			registry:     &consoleHandlers,
+			register:     RegisterConsoleHandleFunc,
+			wantPanicMsg: "s2: console handler already registered for GET /test",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			// Save and restore the specific registry under test so we
+			// don't stomp on routes that real init() calls registered.
 			handlersMux.Lock()
-			handlers = original
+			original := *tc.registry
+			*tc.registry = map[string]HandlerFunc{}
 			handlersMux.Unlock()
-		}()
+			defer func() {
+				handlersMux.Lock()
+				*tc.registry = original
+				handlersMux.Unlock()
+			}()
 
-		noop := func(_ *Server, _ http.ResponseWriter, _ *http.Request) {}
-		RegisterHandleFunc("GET /test", noop)
-
-		assert.PanicsWithValue(t, "s2: handler already registered for GET /test", func() {
-			RegisterHandleFunc("GET /test", noop)
+			tc.register("GET /test", noop)
+			assert.PanicsWithValue(t, tc.wantPanicMsg, func() {
+				tc.register("GET /test", noop)
+			})
 		})
+	}
+}
+
+func TestS3HandlerAndConsoleHandler(t *testing.T) {
+	// Snapshot and reset both split registries so the test doesn't leak
+	// into (or get polluted by) real init-time registrations.
+	handlersMux.Lock()
+	origS3 := s3Handlers
+	origConsole := consoleHandlers
+	s3Handlers = map[string]HandlerFunc{}
+	consoleHandlers = map[string]HandlerFunc{}
+	handlersMux.Unlock()
+	defer func() {
+		handlersMux.Lock()
+		s3Handlers = origS3
+		consoleHandlers = origConsole
+		handlersMux.Unlock()
+	}()
+
+	RegisterS3HandleFunc("GET /s3-only", func(_ *Server, w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("s3"))
 	})
+	RegisterConsoleHandleFunc("GET /console-only", func(_ *Server, w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("console"))
+	})
+
+	cfg := DefaultConfig()
+	cfg.Root = t.TempDir()
+	srv, err := NewServer(context.Background(), cfg)
+	require.NoError(t, err)
+
+	t.Run("S3Handler serves only S3 routes", func(t *testing.T) {
+		h := srv.S3Handler()
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", "/s3-only", nil))
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "s3", w.Body.String())
+
+		// Console routes are not served here.
+		w = httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", "/console-only", nil))
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	t.Run("ConsoleHandler serves only console routes", func(t *testing.T) {
+		h := srv.ConsoleHandler()
+		require.NotNil(t, h)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", "/console-only", nil))
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "console", w.Body.String())
+
+		w = httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", "/s3-only", nil))
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	t.Run("Handler merges both registries", func(t *testing.T) {
+		h := srv.Handler()
+		for _, path := range []string{"/s3-only", "/console-only"} {
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+			assert.Equal(t, http.StatusOK, w.Code, path)
+		}
+	})
+}
+
+func TestConsoleHandlerNilWhenEmpty(t *testing.T) {
+	handlersMux.Lock()
+	origConsole := consoleHandlers
+	consoleHandlers = map[string]HandlerFunc{}
+	handlersMux.Unlock()
+	defer func() {
+		handlersMux.Lock()
+		consoleHandlers = origConsole
+		handlersMux.Unlock()
+	}()
+
+	cfg := DefaultConfig()
+	cfg.Root = t.TempDir()
+	srv, err := NewServer(context.Background(), cfg)
+	require.NoError(t, err)
+
+	assert.Nil(t, srv.ConsoleHandler(), "ConsoleHandler should be nil when no console routes are registered")
 }
 
 func TestStart(t *testing.T) {

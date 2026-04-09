@@ -56,7 +56,18 @@ func init() {
 
 var (
 	handlersMux sync.Mutex
-	handlers    = map[string]HandlerFunc{}
+	// handlers holds every route registered via the legacy
+	// RegisterHandleFunc API. These still back the single listener
+	// returned by Handler().
+	handlers = map[string]HandlerFunc{}
+	// s3Handlers and consoleHandlers hold routes registered via the
+	// RegisterS3HandleFunc and RegisterConsoleHandleFunc APIs respectively.
+	// They are served by S3Handler() and ConsoleHandler() so that a future
+	// version can bind each set of routes to its own listener. In this
+	// release both registries are empty by default, so Handler() and the
+	// existing single-listener Start() keep the same behavior.
+	s3Handlers      = map[string]HandlerFunc{}
+	consoleHandlers = map[string]HandlerFunc{}
 )
 
 // Flags holds the parsed command-line arguments for s2-server. Pointer-typed
@@ -189,12 +200,50 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 }
 
 // Handler builds and returns the HTTP handler without starting a listener.
+//
+// It serves every route from the legacy RegisterHandleFunc registry plus
+// every route from both the S3 and Console registries, so that existing
+// callers keep working while new code migrates to the split APIs. This is
+// also what the single-listener Start() uses.
 func (s *Server) Handler() http.Handler {
+	return s.buildMux(handlers, s3Handlers, consoleHandlers)
+}
+
+// S3Handler builds an HTTP handler that serves only the routes registered
+// via RegisterS3HandleFunc. It is exposed so that a future release can
+// bind it to a dedicated S3 listener; today it is unused when callers
+// still register via the legacy API.
+func (s *Server) S3Handler() http.Handler {
+	return s.buildMux(s3Handlers)
+}
+
+// ConsoleHandler builds an HTTP handler that serves only the routes
+// registered via RegisterConsoleHandleFunc. Returns nil when no console
+// routes have been registered, which lets the caller decide whether to
+// start a second listener at all.
+func (s *Server) ConsoleHandler() http.Handler {
+	if len(consoleHandlers) == 0 {
+		return nil
+	}
+	return s.buildMux(consoleHandlers)
+}
+
+// buildMux composes the given registries into a single ServeMux. A pattern
+// registered in more than one registry panics, same as the registration
+// APIs themselves.
+func (s *Server) buildMux(registries ...map[string]HandlerFunc) http.Handler {
 	mux := http.NewServeMux()
-	for pattern, handler := range handlers {
-		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			handler(s, w, r)
-		})
+	seen := map[string]struct{}{}
+	for _, reg := range registries {
+		for pattern, handler := range reg {
+			if _, dup := seen[pattern]; dup {
+				panic("s2: handler already registered for " + pattern)
+			}
+			seen[pattern] = struct{}{}
+			mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+				handler(s, w, r)
+			})
+		}
 	}
 	return mux
 }
@@ -229,12 +278,33 @@ func (s *Server) Start(ctx context.Context) error {
 
 type HandlerFunc func(srv *Server, w http.ResponseWriter, r *http.Request)
 
+// RegisterHandleFunc registers a handler into the legacy single-listener
+// registry. New code should prefer RegisterS3HandleFunc or
+// RegisterConsoleHandleFunc so that a future release can bind the S3 API
+// and the Web Console to separate listeners; the legacy registry is kept
+// so existing callers continue to work without change.
 func RegisterHandleFunc(pattern string, handler HandlerFunc) {
+	registerInto(handlers, "", pattern, handler)
+}
+
+// RegisterS3HandleFunc registers a handler that will be served by
+// S3Handler(). Patterns use Go 1.22 ServeMux syntax.
+func RegisterS3HandleFunc(pattern string, handler HandlerFunc) {
+	registerInto(s3Handlers, "S3 ", pattern, handler)
+}
+
+// RegisterConsoleHandleFunc registers a handler that will be served by
+// ConsoleHandler(). Patterns use Go 1.22 ServeMux syntax.
+func RegisterConsoleHandleFunc(pattern string, handler HandlerFunc) {
+	registerInto(consoleHandlers, "console ", pattern, handler)
+}
+
+func registerInto(reg map[string]HandlerFunc, label, pattern string, handler HandlerFunc) {
 	handlersMux.Lock()
 	defer handlersMux.Unlock()
 
-	if _, exists := handlers[pattern]; exists {
-		panic("s2: handler already registered for " + pattern)
+	if _, exists := reg[pattern]; exists {
+		panic("s2: " + label + "handler already registered for " + pattern)
 	}
-	handlers[pattern] = handler
+	reg[pattern] = handler
 }
