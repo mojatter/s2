@@ -59,8 +59,8 @@
     </main>
   </div>
 
-  <div id="preview-modal" class="modal-overlay" onclick="if(event.target===this)closePreview()">
-  </div>
+  <dialog id="preview-dialog" onclick="if(event.target===this)this.close()">
+  </dialog>
 
   <div hx-get="/scripts" hx-trigger="load" hx-swap="innerHTML" style="display:none;"></div>
 </body>
