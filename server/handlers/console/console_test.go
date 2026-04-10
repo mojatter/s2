@@ -73,7 +73,9 @@ func (s *IndexTestSuite) TestHandleCreateBucket() {
 		w := httptest.NewRecorder()
 		handleCreateBucket(s.server, w, req)
 
-		s.Equal(http.StatusFound, w.Code)
+		s.Equal(http.StatusOK, w.Code)
+		s.Contains(w.Body.String(), "new-bucket")
+
 		exists, err := s.server.Buckets.Exists("new-bucket")
 		s.Require().NoError(err)
 		s.True(exists)
@@ -102,7 +104,8 @@ func (s *IndexTestSuite) TestHandleDeleteBucket() {
 		handleDeleteBucket(s.server, w, req)
 
 		s.Equal(http.StatusOK, w.Code)
-		s.Equal("/", w.Header().Get("HX-Redirect"))
+		s.Equal("/", w.Header().Get("HX-Push-Url"))
+		s.Contains(w.Body.String(), "bucket-list")
 
 		exists, err := s.server.Buckets.Exists("to-delete")
 		s.Require().NoError(err)

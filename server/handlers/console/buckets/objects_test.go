@@ -101,7 +101,7 @@ func (s *ObjectsTestSuite) TestHandleObjects() {
 		s.Equal(http.StatusNotFound, w.Code)
 	})
 
-	s.Run("full page without HX-Request", func() {
+	s.Run("full page without HX-Request redirects to index", func() {
 		s.createBucket("full")
 
 		req := httptest.NewRequest("GET", "/buckets/full", nil)
@@ -109,8 +109,8 @@ func (s *ObjectsTestSuite) TestHandleObjects() {
 		w := httptest.NewRecorder()
 		handleObjects(s.server, w, req)
 
-		s.Equal(http.StatusOK, w.Code)
-		s.Contains(w.Body.String(), "<!DOCTYPE html>")
+		s.Equal(http.StatusFound, w.Code)
+		s.Equal("/", w.Header().Get("Location"))
 	})
 }
 
