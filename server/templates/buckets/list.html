@@ -1,0 +1,30 @@
+<ul class="bucket-list">
+  {{range .Buckets}}
+  <li>
+    <div class="bucket-item-wrap">
+      <a hx-get="/buckets/{{.}}" hx-target="#main-content" hx-push-url="true" class="bucket-item"
+        onclick="document.querySelectorAll('.bucket-item').forEach(el => el.classList.remove('active')); this.classList.add('active')">
+        <span class="obj-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          </svg>
+        </span>
+        {{.}}
+      </a>
+      <button class="btn-delete-sm"
+        hx-delete="/buckets/{{.}}"
+        hx-confirm="Are you sure you want to delete bucket '{{.}}' and all its contents?"
+        hx-target="closest .bucket-list"
+        hx-swap="outerHTML"
+        title="Delete Bucket">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+        </svg>
+      </button>
+    </div>
+  </li>
+  {{else}}
+  <li style="padding: 1rem; color: var(--text-muted); font-size: 0.875rem;">No buckets found</li>
+  {{end}}
+</ul>

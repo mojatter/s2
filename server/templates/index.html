@@ -38,62 +38,19 @@
           </button>
         </div>
 
-        <form class="new-bucket-form" hx-post="/buckets" hx-target="body" hx-push-url="false">
+        <form class="new-bucket-form" hx-post="/buckets" hx-target=".bucket-list" hx-swap="outerHTML"
+          hx-on::after-request="if(event.detail.successful){this.reset();this.classList.remove('active')}">
           <input type="text" name="name" placeholder="New bucket name..." required>
           <button type="submit">Create</button>
         </form>
 
-        <ul class="bucket-list">
-          {{range .Buckets}}
-          <li>
-            <div class="bucket-item-wrap">
-              <a hx-get="/buckets/{{.}}" hx-target="#main-content" hx-push-url="true" class="bucket-item"
-                onclick="document.querySelectorAll('.bucket-item').forEach(el => el.classList.remove('active')); this.classList.add('active')">
-                <span class="obj-icon">
-                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"
-                    stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-                  </svg>
-                </span>
-                {{.}}
-              </a>
-              <button class="btn-delete-sm" hx-delete="/buckets/{{.}}" hx-confirm="Are you sure you want to delete bucket '{{.}}' and all its contents?" title="Delete Bucket">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                </svg>
-              </button>
-            </div>
-          </li>
-          {{else}}
-          <li style="padding: 1rem; color: var(--text-muted); font-size: 0.875rem;">No buckets found</li>
-          {{end}}
-        </ul>
+        {{template "buckets/list.html" .}}
       </div>
     </aside>
 
     <main class="content">
       <div id="main-content">
-        <div class="header">
-          <div class="welcome-msg">
-            <h1>Storage Overview</h1>
-            <p>Select a bucket from the sidebar to view its objects.</p>
-          </div>
-        </div>
-
-        <div class="main-view">
-          <div class="empty-state">
-            <div class="empty-icon">
-              <svg viewBox="0 0 24 24" width="80" height="80" fill="none" stroke="currentColor" stroke-width="1.5"
-                stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="12" y1="8" x2="12" y2="12"></line>
-                <line x1="12" y1="16" x2="12.01" y2="16"></line>
-              </svg>
-            </div>
-            <h2>No Bucket Selected</h2>
-            <p>Navigate through your cloud storage buckets using the sidebar on the left.</p>
-          </div>
-        </div>
+        {{template "empty.html" .}}
       </div>
 
       <div id="loading" class="htmx-indicator">
@@ -105,88 +62,7 @@
   <div id="preview-modal" class="modal-overlay" onclick="if(event.target===this)closePreview()">
   </div>
 
-  <script>
-    function openPreview(previewUrl) {
-      var modal = document.getElementById('preview-modal');
-      htmx.ajax('GET', previewUrl, {target: '#preview-modal', swap: 'innerHTML'}).then(function() {
-        modal.classList.add('active');
-        document.addEventListener('keydown', previewKeyHandler);
-      });
-    }
-
-    function closePreview() {
-      var modal = document.getElementById('preview-modal');
-      modal.classList.remove('active');
-      modal.innerHTML = '';
-      document.removeEventListener('keydown', previewKeyHandler);
-    }
-
-    function previewKeyHandler(e) {
-      if (e.key === 'Escape') closePreview();
-    }
-
-    function setViewMode(mode, btn) {
-      var listView = document.getElementById('list-view');
-      var galleryView = document.getElementById('gallery-view');
-      if (!listView || !galleryView) return;
-
-      var btns = document.querySelectorAll('.view-toggle-btn');
-      btns.forEach(function(b) { b.classList.remove('active'); });
-      if (btn) {
-        btn.classList.add('active');
-      } else {
-        // Find the correct button by index
-        var idx = mode === 'gallery' ? 1 : 0;
-        if (btns[idx]) btns[idx].classList.add('active');
-      }
-
-      if (mode === 'gallery') {
-        listView.style.display = 'none';
-        galleryView.style.display = '';
-      } else {
-        listView.style.display = '';
-        galleryView.style.display = 'none';
-      }
-      localStorage.setItem('s2-view-mode', mode);
-    }
-
-    function initGalleryView() {
-      // Set up Intersection Observer for lazy-loading thumbnails
-      var thumbs = document.querySelectorAll('.gallery-thumb[data-src]');
-      if (thumbs.length > 0) {
-        var observer = new IntersectionObserver(function(entries) {
-          entries.forEach(function(entry) {
-            if (!entry.isIntersecting) return;
-            var el = entry.target;
-            var src = el.getAttribute('data-src');
-            if (!src) return;
-            var img = new Image();
-            img.onload = function() {
-              el.innerHTML = '';
-              el.appendChild(img);
-            };
-            img.src = src;
-            img.alt = '';
-            el.removeAttribute('data-src');
-            observer.unobserve(el);
-          });
-        }, {rootMargin: '200px'});
-
-        thumbs.forEach(function(el) { observer.observe(el); });
-      }
-
-      // Restore view mode from localStorage
-      var mode = localStorage.getItem('s2-view-mode') || 'list';
-      setViewMode(mode);
-    }
-
-    // Re-initialize gallery after HTMX content settles into the DOM
-    document.addEventListener('htmx:afterSettle', function(evt) {
-      if (evt.detail.target.id === 'main-content') {
-        initGalleryView();
-      }
-    });
-  </script>
+  <div hx-get="/scripts" hx-trigger="load" hx-swap="innerHTML" style="display:none;"></div>
 </body>
 
 </html>

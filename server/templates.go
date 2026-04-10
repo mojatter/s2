@@ -20,9 +20,11 @@ var templatesFS embed.FS
 var (
 	templatesMux  sync.Mutex
 	templateNames = []string{
-		"index.html",
+		"empty.html",
+		"buckets/list.html",
 		"buckets/objects.html",
 		"buckets/preview.html",
+		"index.html",
 	}
 )
 

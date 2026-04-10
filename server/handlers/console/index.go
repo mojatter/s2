@@ -42,8 +42,7 @@ func handleCreateBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// For HTMX, just redirect or re-render (usually redirect to index is fine)
-	http.Redirect(w, r, "/", http.StatusFound)
+	renderBucketList(s, w)
 }
 
 func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request) {
@@ -57,11 +56,52 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// For HTMX DELETE request, redirect to index
-	w.Header().Set("HX-Redirect", "/")
-	w.WriteHeader(http.StatusOK)
+	names, err := s.Buckets.Names()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	data := struct{ Buckets []string }{Buckets: names}
+
+	var buf bytes.Buffer
+	if err := s.Template.ExecuteTemplate(&buf, "buckets/list.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// OOB swap to reset main content to empty state
+	buf.WriteString(`<div id="main-content" hx-swap-oob="innerHTML">`)
+
+	if err := s.Template.ExecuteTemplate(&buf, "empty.html", nil); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	buf.WriteString(`</div>`)
+
+	w.Header().Set("HX-Push-Url", "/")
+	_, _ = buf.WriteTo(w)
 }
 
+// renderBucketList renders the sidebar bucket list fragment.
+func renderBucketList(s *server.Server, w http.ResponseWriter) {
+	names, err := s.Buckets.Names()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	data := struct{ Buckets []string }{Buckets: names}
+
+	var buf bytes.Buffer
+	if err := s.Template.ExecuteTemplate(&buf, "buckets/list.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_, _ = buf.WriteTo(w)
+}
 
 func init() {
 	server.RegisterConsoleHandleFunc("GET /{$}", middleware.BasicAuth(handleIndex))

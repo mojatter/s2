@@ -10,6 +10,7 @@ import (
 	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/internal/numconv"
 	"github.com/mojatter/s2/server"
+	"github.com/mojatter/s2/server/handlers/console"
 	"github.com/mojatter/s2/server/middleware"
 )
 
@@ -63,8 +64,14 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		parentPrefix = ""
 	}
 
+	// Non-HTMX requests get redirected to the index page where the
+	// sidebar navigation triggers the htmx load.
+	if r.Header.Get("HX-Request") != "true" {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+
 	data := struct {
-		Buckets       []string
 		BucketName    string
 		Objects       []s2.Object
 		Prefixes      []string
@@ -82,27 +89,8 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		HasParent:     prefix != "" && prefix != "/",
 	}
 
-	// Use a partial template for HTMX requests
-	if r.Header.Get("HX-Request") == "true" {
-		var buf bytes.Buffer
-		if err := s.Template.ExecuteTemplate(&buf, "buckets/objects.html", data); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		_, _ = buf.WriteTo(w)
-		return
-	}
-
-	// Fallback to full page if accessed directly
-	bucketNames, err := s.Buckets.Names()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	data.Buckets = bucketNames
-
 	var buf bytes.Buffer
-	if err := s.Template.ExecuteTemplate(&buf, "index.html", data); err != nil {
+	if err := s.Template.ExecuteTemplate(&buf, "buckets/objects.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -220,6 +208,6 @@ func init() {
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/folders", middleware.BasicAuth(handleCreateFolder))
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/upload", middleware.BasicAuth(handleUploadFile))
 	server.RegisterConsoleHandleFunc("DELETE /buckets/{name}/objects", middleware.BasicAuth(handleDeleteObject))
-	server.RegisterTemplate("buckets/objects.html")
+	console.RegisterTemplateWithScripts("buckets/objects.html")
 }
 
