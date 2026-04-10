@@ -106,9 +106,8 @@ func handleGetBucketLocation(s *server.Server, w http.ResponseWriter, r *http.Re
 }
 
 func init() {
-	server.RegisterHandleFunc("GET /s3api", middleware.SigV4(HandleListBuckets))
-	server.RegisterHandleFunc("GET /s3api/", middleware.SigV4(HandleListBuckets))
-	server.RegisterHandleFunc("PUT /s3api/{bucket}", middleware.SigV4(handleCreateBucket))
-	server.RegisterHandleFunc("DELETE /s3api/{bucket}", middleware.SigV4(handleDeleteBucket))
-	server.RegisterHandleFunc("HEAD /s3api/{bucket}", middleware.SigV4(handleHeadBucket))
+	server.RegisterS3HandleFunc("GET /{$}", middleware.SigV4(HandleListBuckets))
+	server.RegisterS3HandleFunc("PUT /{bucket}", middleware.SigV4(handleCreateBucket))
+	server.RegisterS3HandleFunc("DELETE /{bucket}", middleware.SigV4(handleDeleteBucket))
+	server.RegisterS3HandleFunc("HEAD /{bucket}", middleware.SigV4(handleHeadBucket))
 }

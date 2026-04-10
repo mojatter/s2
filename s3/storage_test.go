@@ -351,7 +351,7 @@ func (s *StorageTestSuite) TestNewStorage() {
 				Type: s2.TypeS3,
 				Root: "my-bucket",
 				S3: &s2.S3Config{
-					EndpointURL: "http://localhost:9000/s3api",
+					EndpointURL: "http://localhost:9000",
 				},
 			},
 			wantBucket: "my-bucket",
@@ -363,7 +363,7 @@ func (s *StorageTestSuite) TestNewStorage() {
 				Type: s2.TypeS3,
 				Root: "my-bucket/data",
 				S3: &s2.S3Config{
-					EndpointURL:     "http://localhost:9000/s3api",
+					EndpointURL:     "http://localhost:9000",
 					Region:          "ap-northeast-1",
 					AccessKeyID:     "minioadmin",
 					SecretAccessKey: "minioadmin",

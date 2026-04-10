@@ -147,7 +147,7 @@ func TestSigV4(t *testing.T) {
 			srv := &server.Server{Config: &server.Config{User: tc.user, Password: tc.password}}
 			handler := SigV4(noopHandler)
 
-			r := httptest.NewRequest(http.MethodGet, "/s3api", nil)
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
 			if tc.signFunc != nil {
 				tc.signFunc(r)
 			}
@@ -257,7 +257,7 @@ func TestSigV4Presigned(t *testing.T) {
 			srv := &server.Server{Config: &server.Config{User: user, Password: pass}}
 			handler := SigV4(noopHandler)
 
-			r := httptest.NewRequest(tc.method, "/s3api/bucket/key", nil)
+			r := httptest.NewRequest(tc.method, "/bucket/key", nil)
 			tc.setup(r)
 			w := httptest.NewRecorder()
 			handler(srv, w, r)
@@ -310,8 +310,8 @@ func TestCanonicalURI(t *testing.T) {
 		url      string
 		want     string
 	}{
-		{caseName: "simple path", url: "/s3api/my-bucket/path/to/key", want: "/s3api/my-bucket/path/to/key"},
-		{caseName: "encoded spaces", url: "/s3api/my-bucket/key%20with%20spaces", want: "/s3api/my-bucket/key%20with%20spaces"},
+		{caseName: "simple path", url: "/my-bucket/path/to/key", want: "/my-bucket/path/to/key"},
+		{caseName: "encoded spaces", url: "/my-bucket/key%20with%20spaces", want: "/my-bucket/key%20with%20spaces"},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {

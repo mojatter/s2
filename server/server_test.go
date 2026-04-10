@@ -132,12 +132,6 @@ func TestRegisterHandleFunc(t *testing.T) {
 		wantPanicMsg string
 	}{
 		{
-			caseName:     "legacy duplicate panics",
-			registry:     &handlers,
-			register:     RegisterHandleFunc,
-			wantPanicMsg: "s2: handler already registered for GET /test",
-		},
-		{
 			caseName:     "S3 duplicate panics",
 			registry:     &s3Handlers,
 			register:     RegisterS3HandleFunc,
@@ -225,15 +219,6 @@ func TestS3HandlerAndConsoleHandler(t *testing.T) {
 		h.ServeHTTP(w, httptest.NewRequest("GET", "/s3-only", nil))
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
-
-	t.Run("Handler merges both registries", func(t *testing.T) {
-		h := srv.Handler()
-		for _, path := range []string{"/s3-only", "/console-only"} {
-			w := httptest.NewRecorder()
-			h.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
-			assert.Equal(t, http.StatusOK, w.Code, path)
-		}
-	})
 }
 
 func TestConsoleHandlerNilWhenEmpty(t *testing.T) {
@@ -266,6 +251,7 @@ func TestStart(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.Root = t.TempDir()
 		cfg.Listen = addr
+		cfg.ConsoleListen = "" // keep the test focused on the S3 listener
 
 		srv, err := NewServer(context.Background(), cfg)
 		require.NoError(t, err)
@@ -306,12 +292,97 @@ func TestStart(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.Root = t.TempDir()
 		cfg.Listen = ln.Addr().String()
+		cfg.ConsoleListen = ""
 
 		srv, err := NewServer(context.Background(), cfg)
 		require.NoError(t, err)
 
 		err = srv.Start(context.Background())
 		assert.Error(t, err)
+	})
+
+	t.Run("starts both S3 and console listeners when configured", func(t *testing.T) {
+		// Pick two free ports upfront.
+		freePort := func() string {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			addr := ln.Addr().String()
+			require.NoError(t, ln.Close())
+			return addr
+		}
+		s3Addr := freePort()
+		consoleAddr := freePort()
+
+		// Register a minimal console route so ConsoleHandler is non-nil
+		// for this test, and restore the registry afterwards so we don't
+		// leak into other tests.
+		handlersMux.Lock()
+		origConsole := consoleHandlers
+		consoleHandlers = map[string]HandlerFunc{}
+		handlersMux.Unlock()
+		defer func() {
+			handlersMux.Lock()
+			consoleHandlers = origConsole
+			handlersMux.Unlock()
+		}()
+		RegisterConsoleHandleFunc("GET /console-probe", func(_ *Server, w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("console"))
+		})
+
+		cfg := DefaultConfig()
+		cfg.Root = t.TempDir()
+		cfg.Listen = s3Addr
+		cfg.ConsoleListen = consoleAddr
+
+		srv, err := NewServer(context.Background(), cfg)
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- srv.Start(ctx)
+		}()
+
+		// Wait for both listeners.
+		for _, addr := range []string{s3Addr, consoleAddr} {
+			require.Eventuallyf(t, func() bool {
+				conn, dialErr := net.Dial("tcp", addr)
+				if dialErr != nil {
+					return false
+				}
+				conn.Close()
+				return true
+			}, 3*time.Second, 10*time.Millisecond, "listener %s did not come up", addr)
+		}
+
+		// Health endpoint should answer on the S3 listener.
+		resp, err := http.Get("http://" + s3Addr + cfg.HealthPath)
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		_ = resp.Body.Close()
+
+		// Console probe should answer on the console listener, not on the S3 one.
+		resp, err = http.Get("http://" + consoleAddr + "/console-probe")
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		_ = resp.Body.Close()
+
+		resp, err = http.Get("http://" + s3Addr + "/console-probe")
+		require.NoError(t, err)
+		// S3 listener routes "/console-probe" as a bucket operation: the
+		// bucket does not exist, so the SigV4-wrapped handler returns a
+		// 403/404-class S3 error. We only need to confirm the console
+		// handler itself is *not* served here.
+		assert.NotEqual(t, http.StatusOK, resp.StatusCode)
+		_ = resp.Body.Close()
+
+		cancel()
+		select {
+		case err := <-errCh:
+			assert.NoError(t, err)
+		case <-time.After(15 * time.Second):
+			t.Fatal("Start did not return after context cancel")
+		}
 	})
 }
 

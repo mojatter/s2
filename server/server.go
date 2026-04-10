@@ -56,16 +56,10 @@ func init() {
 
 var (
 	handlersMux sync.Mutex
-	// handlers holds every route registered via the legacy
-	// RegisterHandleFunc API. These still back the single listener
-	// returned by Handler().
-	handlers = map[string]HandlerFunc{}
-	// s3Handlers and consoleHandlers hold routes registered via the
-	// RegisterS3HandleFunc and RegisterConsoleHandleFunc APIs respectively.
-	// They are served by S3Handler() and ConsoleHandler() so that a future
-	// version can bind each set of routes to its own listener. In this
-	// release both registries are empty by default, so Handler() and the
-	// existing single-listener Start() keep the same behavior.
+	// s3Handlers and consoleHandlers hold the routes registered via
+	// RegisterS3HandleFunc and RegisterConsoleHandleFunc respectively.
+	// They are served by S3Handler() and ConsoleHandler() on dedicated
+	// listeners so the S3 API can own the root path cleanly.
 	s3Handlers      = map[string]HandlerFunc{}
 	consoleHandlers = map[string]HandlerFunc{}
 )
@@ -183,6 +177,9 @@ type Server struct {
 
 // NewServer creates a new server with the specified configuration.
 func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	tmpl, err := loadTemplates(cfg)
 	if err != nil {
 		return nil, err
@@ -199,28 +196,16 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 	}, nil
 }
 
-// Handler builds and returns the HTTP handler without starting a listener.
-//
-// It serves every route from the legacy RegisterHandleFunc registry plus
-// every route from both the S3 and Console registries, so that existing
-// callers keep working while new code migrates to the split APIs. This is
-// also what the single-listener Start() uses.
-func (s *Server) Handler() http.Handler {
-	return s.buildMux(handlers, s3Handlers, consoleHandlers)
-}
-
-// S3Handler builds an HTTP handler that serves only the routes registered
-// via RegisterS3HandleFunc. It is exposed so that a future release can
-// bind it to a dedicated S3 listener; today it is unused when callers
-// still register via the legacy API.
+// S3Handler builds an HTTP handler that serves the S3-compatible API.
+// It includes routes registered via RegisterS3HandleFunc and, when
+// cfg.HealthPath is non-empty, a health endpoint at that path.
 func (s *Server) S3Handler() http.Handler {
 	return s.buildMux(s3Handlers)
 }
 
-// ConsoleHandler builds an HTTP handler that serves only the routes
-// registered via RegisterConsoleHandleFunc. Returns nil when no console
-// routes have been registered, which lets the caller decide whether to
-// start a second listener at all.
+// ConsoleHandler builds an HTTP handler that serves the Web Console.
+// Returns nil when no console routes have been registered, which lets
+// the caller decide whether to start a second listener at all.
 func (s *Server) ConsoleHandler() http.Handler {
 	if len(consoleHandlers) == 0 {
 		return nil
@@ -228,9 +213,19 @@ func (s *Server) ConsoleHandler() http.Handler {
 	return s.buildMux(consoleHandlers)
 }
 
-// buildMux composes the given registries into a single ServeMux. A pattern
-// registered in more than one registry panics, same as the registration
-// APIs themselves.
+// buildMux composes the given registries into a single ServeMux and
+// prepends a health-check short-circuit at cfg.HealthPath when set.
+//
+// The health endpoint is intentionally *not* registered as a pattern in
+// the mux: a literal path like "/healthz" and the broader
+// "{METHOD} /{bucket}/{key...}" wildcards overlap in ways Go 1.22's
+// conflict detector refuses to accept, even when bucket creation would
+// otherwise reject the colliding name. Wrapping the mux with an
+// explicit path check sidesteps the conflict and keeps the routing
+// decisions straightforward to reason about.
+//
+// A pattern registered in more than one registry panics, same as the
+// registration APIs themselves.
 func (s *Server) buildMux(registries ...map[string]HandlerFunc) http.Handler {
 	mux := http.NewServeMux()
 	seen := map[string]struct{}{}
@@ -245,47 +240,82 @@ func (s *Server) buildMux(registries ...map[string]HandlerFunc) http.Handler {
 			})
 		}
 	}
-	return mux
+	if s.Config.HealthPath == "" {
+		return mux
+	}
+	healthPath := s.Config.HealthPath
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == healthPath && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			handleHealthz(s, w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
-// Start starts the server and shuts it down gracefully when ctx is cancelled.
+// handleHealthz is mounted at cfg.HealthPath by S3Handler (and by the
+// merged Handler). It is intentionally minimal so that probes stay cheap.
+func handleHealthz(_ *Server, w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
+}
+
+// Start starts the S3 API listener and, when cfg.ConsoleListen is set and
+// there are console routes registered, the Web Console listener. Both
+// are shut down gracefully when ctx is cancelled or either listener dies.
 func (s *Server) Start(ctx context.Context) error {
-	srv := &http.Server{
+	s3srv := &http.Server{
 		Addr:              s.Config.Listen,
-		Handler:           s.Handler(),
+		Handler:           s.S3Handler(),
 		ReadHeaderTimeout: 30 * time.Second,
 	}
-	slog.Info("Server listening", "addr", s.Config.Listen)
+	servers := []*http.Server{s3srv}
+	slog.Info("S3 API listening", "addr", s.Config.Listen)
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- srv.ListenAndServe()
-	}()
+	if s.Config.ConsoleListen != "" {
+		if h := s.ConsoleHandler(); h != nil {
+			consoleSrv := &http.Server{
+				Addr:              s.Config.ConsoleListen,
+				Handler:           h,
+				ReadHeaderTimeout: 30 * time.Second,
+			}
+			servers = append(servers, consoleSrv)
+			slog.Info("Web Console listening", "addr", s.Config.ConsoleListen)
+		}
+	}
 
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
+	errCh := make(chan error, len(servers))
+	for _, srv := range servers {
+		go func() {
+			errCh <- srv.ListenAndServe()
+		}()
+	}
+
+	shutdownAll := func() error {
 		slog.Info("Shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown: %w", err)
+
+		var firstErr error
+		for _, srv := range servers {
+			if err := srv.Shutdown(shutdownCtx); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("shutdown %s: %w", srv.Addr, err)
+			}
 		}
-		return nil
+		return firstErr
+	}
+
+	select {
+	case err := <-errCh:
+		_ = shutdownAll()
+		return err
+	case <-ctx.Done():
+		return shutdownAll()
 	}
 }
 
 type HandlerFunc func(srv *Server, w http.ResponseWriter, r *http.Request)
-
-// RegisterHandleFunc registers a handler into the legacy single-listener
-// registry. New code should prefer RegisterS3HandleFunc or
-// RegisterConsoleHandleFunc so that a future release can bind the S3 API
-// and the Web Console to separate listeners; the legacy registry is kept
-// so existing callers continue to work without change.
-func RegisterHandleFunc(pattern string, handler HandlerFunc) {
-	registerInto(handlers, "", pattern, handler)
-}
 
 // RegisterS3HandleFunc registers a handler that will be served by
 // S3Handler(). Patterns use Go 1.22 ServeMux syntax.

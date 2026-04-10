@@ -20,7 +20,7 @@ func TestBucketsTestSuite(t *testing.T) {
 
 func (s *BucketsTestSuite) TestListBuckets() {
 	s.Run("empty", func() {
-		req := httptest.NewRequest("GET", "/s3api", nil)
+		req := httptest.NewRequest("GET", "/", nil)
 		w := httptest.NewRecorder()
 		HandleListBuckets(s.server, w, req)
 
@@ -35,7 +35,7 @@ func (s *BucketsTestSuite) TestListBuckets() {
 		s.createBucket("alpha")
 		s.createBucket("beta")
 
-		req := httptest.NewRequest("GET", "/s3api", nil)
+		req := httptest.NewRequest("GET", "/", nil)
 		w := httptest.NewRecorder()
 		HandleListBuckets(s.server, w, req)
 
@@ -58,7 +58,7 @@ func (s *BucketsTestSuite) TestListBuckets() {
 // --- CreateBucket ---
 
 func (s *BucketsTestSuite) TestCreateBucket() {
-	req := httptest.NewRequest("PUT", "/s3api/new-bucket", nil)
+	req := httptest.NewRequest("PUT", "/new-bucket", nil)
 	req.SetPathValue("bucket", "new-bucket")
 	w := httptest.NewRecorder()
 	handleCreateBucket(s.server, w, req)
@@ -76,7 +76,7 @@ func (s *BucketsTestSuite) TestDeleteBucket() {
 	s.Run("existing", func() {
 		s.createBucket("to-delete")
 
-		req := httptest.NewRequest("DELETE", "/s3api/to-delete", nil)
+		req := httptest.NewRequest("DELETE", "/to-delete", nil)
 		req.SetPathValue("bucket", "to-delete")
 		w := httptest.NewRecorder()
 		handleDeleteBucket(s.server, w, req)
@@ -89,7 +89,7 @@ func (s *BucketsTestSuite) TestDeleteBucket() {
 	})
 
 	s.Run("not found", func() {
-		req := httptest.NewRequest("DELETE", "/s3api/nonexistent", nil)
+		req := httptest.NewRequest("DELETE", "/nonexistent", nil)
 		req.SetPathValue("bucket", "nonexistent")
 		w := httptest.NewRecorder()
 		handleDeleteBucket(s.server, w, req)
@@ -142,7 +142,7 @@ func (s *BucketsTestSuite) TestGetBucketLocation() {
 			if tc.createBucket {
 				s.createBucket(tc.bucket)
 			}
-			req := httptest.NewRequest("GET", "/s3api/"+tc.bucket+"?location", nil)
+			req := httptest.NewRequest("GET", "/"+tc.bucket+"?location", nil)
 			req.SetPathValue("bucket", tc.bucket)
 			w := httptest.NewRecorder()
 			tc.handler(s.server, w, req)
@@ -188,7 +188,7 @@ func (s *BucketsTestSuite) TestHeadBucket() {
 			if tc.createBucket {
 				s.createBucket(tc.bucket)
 			}
-			req := httptest.NewRequest("HEAD", "/s3api/"+tc.bucket, nil)
+			req := httptest.NewRequest("HEAD", "/"+tc.bucket, nil)
 			req.SetPathValue("bucket", tc.bucket)
 			w := httptest.NewRecorder()
 			handleHeadBucket(s.server, w, req)

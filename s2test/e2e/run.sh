@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-ENDPOINT="http://s2:9000/s3api"
-ENDPOINT_MEM="http://s2-mem:9000/s3api"
+ENDPOINT="http://s2:9000"
+ENDPOINT_MEM="http://s2-mem:9000"
 
 aws_s3() {
   aws s3 --endpoint-url "$ENDPOINT" "$@"

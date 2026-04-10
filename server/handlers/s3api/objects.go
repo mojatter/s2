@@ -189,6 +189,22 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	bucketName := r.PathValue("bucket")
 	key := r.PathValue("key")
 
+	// A trailing-slash request (e.g. "GET /my-bucket/?location") routes
+	// to the "{key...}" pattern with an empty key because Go 1.22's
+	// ServeMux matches that wildcard against zero-or-more segments.
+	// Delegate to the bucket-level handlers so GetBucketLocation /
+	// ListObjectsV2 / HeadBucket continue to work for SDKs (notably
+	// minio-go / warp) that always emit a trailing slash on bucket
+	// operations.
+	if key == "" {
+		if r.Method == http.MethodHead {
+			handleHeadBucket(s, w, r)
+			return
+		}
+		handleBucketGET(s, w, r)
+		return
+	}
+
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
@@ -538,10 +554,10 @@ func handleBucketGET(s *server.Server, w http.ResponseWriter, r *http.Request) {
 }
 
 func init() {
-	server.RegisterHandleFunc("GET /s3api/{bucket}", middleware.SigV4(handleBucketGET))
-	server.RegisterHandleFunc("POST /s3api/{bucket}", middleware.SigV4(handleBucketPOST))
-	server.RegisterHandleFunc("GET /s3api/{bucket}/{key...}", middleware.SigV4(handleGetObject))
-	server.RegisterHandleFunc("HEAD /s3api/{bucket}/{key...}", middleware.SigV4(handleGetObject))
-	server.RegisterHandleFunc("PUT /s3api/{bucket}/{key...}", middleware.SigV4(handlePutObject))
-	server.RegisterHandleFunc("DELETE /s3api/{bucket}/{key...}", middleware.SigV4(handleDeleteObject))
+	server.RegisterS3HandleFunc("GET /{bucket}", middleware.SigV4(handleBucketGET))
+	server.RegisterS3HandleFunc("POST /{bucket}", middleware.SigV4(handleBucketPOST))
+	server.RegisterS3HandleFunc("GET /{bucket}/{key...}", middleware.SigV4(handleGetObject))
+	server.RegisterS3HandleFunc("HEAD /{bucket}/{key...}", middleware.SigV4(handleGetObject))
+	server.RegisterS3HandleFunc("PUT /{bucket}/{key...}", middleware.SigV4(handlePutObject))
+	server.RegisterS3HandleFunc("DELETE /{bucket}/{key...}", middleware.SigV4(handleDeleteObject))
 }

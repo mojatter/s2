@@ -48,16 +48,17 @@ type Config struct {
 	s2.Config
 	// Listen is the address the S3-compatible API listens on.
 	Listen string `json:"listen"`
-	// ConsoleListen is the address a dedicated Web Console listener will
-	// bind to in a future release. It is reserved here so forward-looking
-	// configurations can be written today; the current server still
-	// serves the console from the same listener as the S3 API when this
-	// value is empty (the default).
+	// ConsoleListen is the address the Web Console listens on. The
+	// console runs on a dedicated listener so the S3 API can own the
+	// root path without any prefix. Set to an empty string to disable
+	// the console entirely.
 	ConsoleListen string `json:"console_listen"`
-	// HealthPath reserves a future location for the health check endpoint
-	// on the S3 listener. It is read and validated today but not yet
-	// mounted; the existing "/healthz" handler remains untouched in this
-	// release so that operators with probes pointing at it keep working.
+	// HealthPath is the path the health check endpoint is mounted at on
+	// the S3 listener. Its first path segment is reserved and cannot be
+	// used as a bucket name (Buckets.Create returns ErrReservedBucketName
+	// for that name). The default "/healthz" reserves the bucket name
+	// "healthz". Must start with "/" and have at least one segment after
+	// it. Set to an empty string to disable the health endpoint entirely.
 	HealthPath string `json:"health_path"`
 	// MaxUploadSize is the maximum upload size in bytes. When 0, a backend-specific
 	// default is used (see EffectiveMaxUploadSize): 5 GiB for osfs/s3, 16 MiB for
@@ -111,13 +112,31 @@ func (cfg *Config) EffectiveMaxUploadSize() int64 {
 	return DefaultMaxUploadSize
 }
 
+// Validate checks the configuration for obvious mistakes that would
+// otherwise surface as confusing runtime errors. It is called by
+// NewServer; callers that build a Config by hand can invoke it
+// themselves before passing it in.
+func (cfg *Config) Validate() error {
+	if cfg.HealthPath != "" {
+		if !strings.HasPrefix(cfg.HealthPath, "/") {
+			return fmt.Errorf("server: HealthPath %q must start with %q", cfg.HealthPath, "/")
+		}
+		if cfg.HealthPath == "/" {
+			return fmt.Errorf("server: HealthPath %q must have at least one path segment", cfg.HealthPath)
+		}
+	}
+	return nil
+}
+
 func DefaultConfig() *Config {
 	return &Config{
 		Config: s2.Config{
 			Type: s2.TypeOSFS,
 			Root: DefaultRoot,
 		},
-		Listen: ":9000",
+		Listen:        ":9000",
+		ConsoleListen: ":9001",
+		HealthPath:    "/healthz",
 		// MaxUploadSize intentionally left 0 — EffectiveMaxUploadSize resolves
 		// a backend-appropriate default at request time.
 		MaxPreviewSize: DefaultMaxPreviewSize,

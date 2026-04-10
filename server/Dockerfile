@@ -15,5 +15,5 @@ FROM scratch
 COPY --from=builder /s2-server /usr/sbin/s2-server
 COPY --from=init /var/lib/s2 /var/lib/s2
 VOLUME /var/lib/s2
-EXPOSE 9000
+EXPOSE 9000 9001
 ENTRYPOINT ["/usr/sbin/s2-server"]

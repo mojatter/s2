@@ -74,5 +74,5 @@ func handleView(s *server.Server, w http.ResponseWriter, r *http.Request) {
 }
 
 func init() {
-	server.RegisterHandleFunc("GET /buckets/{name}/view/{object...}", middleware.BasicAuth(handleView))
+	server.RegisterConsoleHandleFunc("GET /buckets/{name}/view/{object...}", middleware.BasicAuth(handleView))
 }

@@ -58,6 +58,44 @@ func (s *BucketsTestSuite) TestNewBuckets() {
 	})
 }
 
+func (s *BucketsTestSuite) TestHealthPathReservedBucket() {
+	testCases := []struct {
+		caseName   string
+		healthPath string
+		want       string
+	}{
+		{caseName: "default reserves healthz", healthPath: "/healthz", want: "healthz"},
+		{caseName: "dash-prefixed reserves nothing", healthPath: "/-/healthz", want: ""},
+		{caseName: "disabled", healthPath: "", want: ""},
+		{caseName: "nested under valid name", healthPath: "/ping/now", want: "ping"},
+		{caseName: "leading dot is invalid bucket", healthPath: "/.internal/healthz", want: ""},
+		{caseName: "uppercase is invalid bucket", healthPath: "/Health/ok", want: ""},
+		{caseName: "short is invalid bucket", healthPath: "/hi", want: ""},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.Equal(tc.want, healthPathReservedBucket(tc.healthPath))
+		})
+	}
+}
+
+func (s *BucketsTestSuite) TestCreateRejectsReservedName() {
+	ctx := context.Background()
+	cfg := DefaultConfig()
+	cfg.Type = s2.TypeOSFS
+	cfg.Root = s.T().TempDir()
+	// Default HealthPath is "/healthz" which reserves the bucket name "healthz".
+	bs, err := newBuckets(ctx, cfg)
+	s.Require().NoError(err)
+
+	err = bs.Create(ctx, "healthz")
+	s.Require().Error(err)
+	s.True(errors.Is(err, ErrReservedBucketName), "expected ErrReservedBucketName, got %v", err)
+
+	// Neighboring names are still allowed.
+	s.NoError(bs.Create(ctx, "healthz-sibling"))
+}
+
 func (s *BucketsTestSuite) TestCreateAndNames() {
 	ctx := context.Background()
 

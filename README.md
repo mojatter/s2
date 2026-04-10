@@ -20,7 +20,7 @@ MinIO was the go-to S3-compatible server for local development, but it entered m
 
 ## Migrating from MinIO
 
-For most local-development use cases, replacing MinIO with S2 is a one-line change in `docker-compose.yml`. S2 listens on the same `:9000` port and serves the S3 API under `/s3api`.
+For most local-development use cases, replacing MinIO with S2 is a one-line change in `docker-compose.yml`. S2 serves the S3 API at the root path on `:9000` — the same endpoint layout MinIO uses — so existing S3 clients need no changes. The Web Console runs on a dedicated port (`:9001` by default) so that the S3 API owns the root path cleanly.
 
 **docker-compose.yml**
 
@@ -29,7 +29,8 @@ services:
   s2:
     image: mojatter/s2-server
     ports:
-      - "9000:9000"
+      - "9000:9000" # S3 API
+      - "9001:9001" # Web Console
     environment:
       S2_SERVER_USER: myuser
       S2_SERVER_PASSWORD: mypassword
@@ -41,8 +42,6 @@ volumes:
   s2-data:
 ```
 
-**Endpoint difference** — MinIO serves the S3 API at the root (`http://localhost:9000`), while S2 serves it under `/s3api` (`http://localhost:9000/s3api`). Update your S3 client's endpoint URL accordingly. The path under `/s3api` is reserved for the Web Console.
-
 **Environment variable mapping**
 
 | MinIO | S2 |
@@ -51,13 +50,14 @@ volumes:
 | `MINIO_ROOT_PASSWORD` | `S2_SERVER_PASSWORD` |
 | `MINIO_VOLUMES` | `S2_SERVER_ROOT` (default `/var/lib/s2`) |
 | `MINIO_DEFAULT_BUCKETS` | `S2_SERVER_BUCKETS` |
+| (console UI) | `S2_SERVER_CONSOLE_LISTEN` (default `:9001`; empty disables) |
 
 **Migrating existing data** — S2's `osfs` backend stores objects as plain files on disk (no proprietary format), so any S3 client can copy data over:
 
 ```sh
 # Mirror an existing MinIO instance into a fresh S2 instance
 aws --endpoint-url http://old-minio:9000 s3 sync s3://my-bucket /tmp/dump
-aws --endpoint-url http://localhost:9000/s3api s3 sync /tmp/dump s3://my-bucket
+aws --endpoint-url http://localhost:9000 s3 sync /tmp/dump s3://my-bucket
 ```
 
 Or use `mc mirror` directly between the two endpoints.
@@ -89,7 +89,7 @@ go install github.com/mojatter/s2/cmd/s2-server@latest
 Or run with Docker:
 
 ```sh
-docker run -p 9000:9000 mojatter/s2-server
+docker run -p 9000:9000 -p 9001:9001 mojatter/s2-server
 ```
 
 ## Quick Start
@@ -164,7 +164,7 @@ Start the server:
 s2-server
 
 # via Docker
-docker run -p 9000:9000 -v /your/data:/var/lib/s2 mojatter/s2-server
+docker run -p 9000:9000 -p 9001:9001 -v /your/data:/var/lib/s2 mojatter/s2-server
 ```
 
 Then access it with any S3 client:
@@ -186,7 +186,7 @@ func main() {
 		Type: s2.TypeS3,
 		Root: "my-bucket",
 		S3: &s2.S3Config{
-			EndpointURL: "http://localhost:9000/s3api",
+			EndpointURL: "http://localhost:9000",
 		},
 	})
 	if err != nil {
@@ -203,8 +203,8 @@ func main() {
 Or use the AWS CLI:
 
 ```sh
-aws --endpoint-url http://localhost:9000/s3api s3 ls
-aws --endpoint-url http://localhost:9000/s3api s3 cp ./file.txt s3://my-bucket/file.txt
+aws --endpoint-url http://localhost:9000 s3 ls
+aws --endpoint-url http://localhost:9000 s3 cp ./file.txt s3://my-bucket/file.txt
 ```
 
 ### In Tests
@@ -264,7 +264,7 @@ strg, err := s2.NewStorage(ctx, s2.Config{
     Type: s2.TypeS3,
     Root: "my-bucket/optional-prefix",
     S3: &s2.S3Config{
-        EndpointURL:    "http://localhost:9000/s3api",
+        EndpointURL:    "http://localhost:9000",
         Region:         "ap-northeast-1",
         AccessKeyID:    "s2user",
         SecretAccessKey: "s2password",
@@ -280,7 +280,7 @@ With `s2env`, use the `"s3"` key in JSON:
     "type": "s3",
     "root": "dev-bucket",
     "s3": {
-      "endpoint_url": "http://localhost:9000/s3api",
+      "endpoint_url": "http://localhost:9000",
       "access_key_id": "myuser",
       "secret_access_key": "mypassword"
     }
@@ -365,7 +365,9 @@ if _, err := strg.Get(ctx, "missing.txt"); errors.Is(err, s2.ErrNotExist) {
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `S2_SERVER_CONFIG` | — | Path to JSON config file |
-| `S2_SERVER_LISTEN` | `:9000` | Listen address |
+| `S2_SERVER_LISTEN` | `:9000` | S3 API listen address |
+| `S2_SERVER_CONSOLE_LISTEN` | `:9001` | Web Console listen address (set empty to disable the console listener) |
+| `S2_SERVER_HEALTH_PATH` | `/healthz` | Health check path served on the S3 listener (set empty to disable) |
 | `S2_SERVER_TYPE` | `osfs` | Storage backend type |
 | `S2_SERVER_ROOT` | `/var/lib/s2` | Root directory for bucket data |
 | `S2_SERVER_USER` | — | Username for authentication (disables auth if empty) |
@@ -390,14 +392,14 @@ Using the AWS CLI:
 
 ```sh
 AWS_ACCESS_KEY_ID=myuser AWS_SECRET_ACCESS_KEY=mypassword \
-  aws --endpoint-url http://localhost:9000/s3api s3 ls
+  aws --endpoint-url http://localhost:9000 s3 ls
 ```
 
 Or via a named profile in `~/.aws/config`:
 
 ```ini
 [profile s2]
-endpoint_url = http://localhost:9000/s3api
+endpoint_url = http://localhost:9000
 aws_access_key_id = myuser
 aws_secret_access_key = mypassword
 ```
@@ -415,6 +417,8 @@ When `S2_SERVER_USER` is empty (the default), authentication is disabled.
 ```json
 {
   "listen": ":9000",
+  "console_listen": ":9001",
+  "health_path": "/healthz",
   "type": "osfs",
   "root": "/var/lib/s2",
   "user": "myuser",
@@ -431,23 +435,50 @@ s2-server -f config.json
 
 | Method | Path | Operation |
 |--------|------|-----------|
-| GET | `/s3api` | ListBuckets |
-| PUT | `/s3api/{bucket}` | CreateBucket |
-| HEAD | `/s3api/{bucket}` | HeadBucket |
-| DELETE | `/s3api/{bucket}` | DeleteBucket |
-| GET | `/s3api/{bucket}?location` | GetBucketLocation |
-| GET | `/s3api/{bucket}` | ListObjectsV2 |
-| GET | `/s3api/{bucket}/{key...}` | GetObject (Range supported) |
-| HEAD | `/s3api/{bucket}/{key...}` | HeadObject |
-| PUT | `/s3api/{bucket}/{key...}` | PutObject / CopyObject |
-| DELETE | `/s3api/{bucket}/{key...}` | DeleteObject |
-| POST | `/s3api/{bucket}?delete` | DeleteObjects |
-| POST | `/s3api/{bucket}/{key...}?uploads` | CreateMultipartUpload |
-| PUT | `/s3api/{bucket}/{key...}?uploadId&partNumber` | UploadPart |
-| POST | `/s3api/{bucket}/{key...}?uploadId` | CompleteMultipartUpload |
-| DELETE | `/s3api/{bucket}/{key...}?uploadId` | AbortMultipartUpload |
+| GET | `/` | ListBuckets |
+| PUT | `/{bucket}` | CreateBucket |
+| HEAD | `/{bucket}` | HeadBucket |
+| DELETE | `/{bucket}` | DeleteBucket |
+| GET | `/{bucket}?location` | GetBucketLocation |
+| GET | `/{bucket}` | ListObjectsV2 |
+| GET | `/{bucket}/{key...}` | GetObject (Range supported) |
+| HEAD | `/{bucket}/{key...}` | HeadObject |
+| PUT | `/{bucket}/{key...}` | PutObject / CopyObject |
+| DELETE | `/{bucket}/{key...}` | DeleteObject |
+| POST | `/{bucket}?delete` | DeleteObjects |
+| POST | `/{bucket}/{key...}?uploads` | CreateMultipartUpload |
+| PUT | `/{bucket}/{key...}?uploadId&partNumber` | UploadPart |
+| POST | `/{bucket}/{key...}?uploadId` | CompleteMultipartUpload |
+| DELETE | `/{bucket}/{key...}?uploadId` | AbortMultipartUpload |
+| GET, HEAD | `/healthz` | Health check (configurable via `S2_SERVER_HEALTH_PATH`) |
 
 Custom metadata is supported via `x-amz-meta-*` headers on PutObject/CopyObject and returned on GetObject/HeadObject.
+
+## Benchmarks
+
+S2 ships a `make bench-warp` target that drives a fresh in-process s2-server with [`minio/warp`](https://github.com/minio/warp). Install warp first with `go install github.com/minio/warp@latest`, then:
+
+```sh
+make bench-warp
+```
+
+The numbers below are from a local run on an Apple Silicon laptop (`darwin/arm64`, `osfs` backend, single-process server), captured with the default `make bench-warp` settings (1 MiB objects, 8 concurrent clients, 30 seconds, `warp mixed`). They are intended as a sanity check, not a competitive ranking — the most useful number is the one you get on your own hardware.
+
+| Operation | Throughput | p50 latency | p99 latency |
+|---|---|---|---|
+| **PUT** | 132.71 MiB/s (132.71 obj/s) | 55.4 ms | 75.0 ms |
+| **GET** | 398.59 MiB/s (398.59 obj/s) | 0.6 ms | 4.8 ms |
+| **STAT** | 265.58 obj/s | 0.4 ms | 3.3 ms |
+| **DELETE** | 88.70 obj/s | 4.5 ms | 12.8 ms |
+| **Total** | **531.30 MiB/s, 885.58 obj/s** | — | — |
+
+PUT throughput is bounded by `osfs`'s atomic write (rename after `Sync`); switching to `memfs` removes the disk barrier when you only need a fast in-process target for tests.
+
+You can run any other warp workload by overriding the Makefile variables, e.g. larger objects:
+
+```sh
+make bench-warp BENCH_OBJSIZE=10MiB BENCH_OBJECTS=50 BENCH_CONC=16 BENCH_TIME=60s
+```
 
 ## S3 Compatibility
 

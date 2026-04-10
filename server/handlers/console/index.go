@@ -1,4 +1,4 @@
-package handlers
+package console
 
 import (
 	"bytes"
@@ -64,9 +64,9 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 
 
 func init() {
-	server.RegisterHandleFunc("GET /", middleware.BasicAuth(handleIndex))
-	server.RegisterHandleFunc("POST /buckets", middleware.BasicAuth(handleCreateBucket))
-	server.RegisterHandleFunc("DELETE /buckets/{name}", middleware.BasicAuth(handleDeleteBucket))
+	server.RegisterConsoleHandleFunc("GET /{$}", middleware.BasicAuth(handleIndex))
+	server.RegisterConsoleHandleFunc("POST /buckets", middleware.BasicAuth(handleCreateBucket))
+	server.RegisterConsoleHandleFunc("DELETE /buckets/{name}", middleware.BasicAuth(handleDeleteBucket))
 	server.RegisterTemplate("index.html")
 }
 

@@ -21,7 +21,7 @@ func KnownTypes() []Type {
 // When fields are empty, the AWS SDK defaults (environment variables, shared
 // credentials, IAM role, etc.) are used.
 type S3Config struct {
-	// EndpointURL is a custom S3-compatible endpoint (e.g. "http://localhost:9000/s3api").
+	// EndpointURL is a custom S3-compatible endpoint (e.g. "http://localhost:9000").
 	EndpointURL string `json:"endpoint_url,omitempty"`
 	// Region is the AWS region (e.g. "ap-northeast-1").
 	Region string `json:"region,omitempty"`
