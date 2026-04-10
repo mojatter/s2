@@ -10,7 +10,6 @@ import (
 	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/internal/numconv"
 	"github.com/mojatter/s2/server"
-	"github.com/mojatter/s2/server/handlers/console"
 	"github.com/mojatter/s2/server/middleware"
 )
 
@@ -208,6 +207,6 @@ func init() {
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/folders", middleware.BasicAuth(handleCreateFolder))
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/upload", middleware.BasicAuth(handleUploadFile))
 	server.RegisterConsoleHandleFunc("DELETE /buckets/{name}/objects", middleware.BasicAuth(handleDeleteObject))
-	console.RegisterTemplateWithScripts("buckets/objects.html")
+	server.RegisterTemplate("buckets/objects.html")
 }
 
