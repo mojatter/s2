@@ -129,7 +129,7 @@
           <td>
             <div class="actions-cell">
               {{if isPreviewable .Name .Length}}
-              <button class="btn-view" title="Preview File" onclick="openPreview('/buckets/{{$.BucketName}}/view/{{.Name}}', '{{baseName .Name}}', '/buckets/{{$.BucketName}}/meta/{{.Name}}')">
+              <button class="btn-view" title="Preview File" onclick="openPreview('/buckets/{{$.BucketName}}/preview/{{.Name}}')">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle>
                 </svg>
@@ -194,7 +194,7 @@
 
     {{range .Objects}}
     {{if isImage .Name}}
-    <div class="gallery-card gallery-image" onclick="openPreview('/buckets/{{$.BucketName}}/view/{{.Name}}', '{{baseName .Name}}', '/buckets/{{$.BucketName}}/meta/{{.Name}}')">
+    <div class="gallery-card gallery-image" onclick="openPreview('/buckets/{{$.BucketName}}/preview/{{.Name}}')">
       <div class="gallery-thumb" data-src="/buckets/{{$.BucketName}}/view/{{.Name}}">
         <div class="gallery-thumb-placeholder">
           <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -208,7 +208,7 @@
       <span class="gallery-size">{{formatSize .Length}}</span>
     </div>
     {{else}}
-    <div class="gallery-card gallery-file" onclick="{{if isPreviewable .Name .Length}}openPreview('/buckets/{{$.BucketName}}/view/{{.Name}}', '{{baseName .Name}}', '/buckets/{{$.BucketName}}/meta/{{.Name}}'){{end}}">
+    <div class="gallery-card gallery-file" onclick="{{if isPreviewable .Name .Length}}openPreview('/buckets/{{$.BucketName}}/preview/{{.Name}}'){{end}}">
       <div class="gallery-file-icon">
         <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>

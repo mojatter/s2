@@ -103,104 +103,26 @@
   </div>
 
   <div id="preview-modal" class="modal-overlay" onclick="if(event.target===this)closePreview()">
-    <div class="modal-content">
-      <div class="modal-header">
-        <span id="preview-filename"></span>
-        <div class="modal-header-actions">
-          <a id="preview-download" href="#" class="btn-view" title="Open in new tab" target="_blank">
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line>
-            </svg>
-          </a>
-          <button class="modal-close" onclick="closePreview()">&times;</button>
-        </div>
-      </div>
-      <div id="preview-body" class="modal-body"></div>
-      <div id="preview-meta" class="modal-meta"></div>
-    </div>
   </div>
 
   <script>
-    function openPreview(url, filename, metaUrl) {
+    function openPreview(previewUrl) {
       var modal = document.getElementById('preview-modal');
-      var body = document.getElementById('preview-body');
-      var meta = document.getElementById('preview-meta');
-      var fname = document.getElementById('preview-filename');
-      var dl = document.getElementById('preview-download');
-      fname.textContent = filename;
-      dl.href = url;
-      meta.innerHTML = '';
-
-      var ext = filename.split('.').pop().toLowerCase();
-      var imageExts = ['png','jpg','jpeg','gif','webp','svg','bmp','ico'];
-      var videoExts = ['mp4','webm','ogg'];
-      var audioExts = ['mp3','wav','ogg','aac','flac'];
-      var pdfExts = ['pdf'];
-      var textExts = ['txt','md','json','xml','csv','log','yaml','yml','toml','ini','cfg','conf','html','css','js','ts','go','py','rb','rs','java','c','h','cpp','sh','sql','makefile','dockerfile'];
-
-      if (imageExts.indexOf(ext) !== -1) {
-        body.innerHTML = '<img src="'+url+'" alt="'+filename+'">';
-      } else if (videoExts.indexOf(ext) !== -1) {
-        body.innerHTML = '<video controls autoplay><source src="'+url+'"></video>';
-      } else if (audioExts.indexOf(ext) !== -1) {
-        body.innerHTML = '<audio controls autoplay><source src="'+url+'"></audio>';
-      } else if (pdfExts.indexOf(ext) !== -1) {
-        body.innerHTML = '<iframe src="'+url+'"></iframe>';
-      } else if (textExts.indexOf(ext) !== -1) {
-        body.innerHTML = '<div class="preview-loading"><div class="spinner"></div></div>';
-        fetch(url).then(function(r){return r.text()}).then(function(text){
-          var pre = document.createElement('pre');
-          pre.textContent = text;
-          body.innerHTML = '';
-          body.appendChild(pre);
-        });
-      } else {
-        body.innerHTML = '<div class="preview-unsupported"><p>Preview not available for this file type.</p><a href="'+url+'" target="_blank" class="btn-primary-sm">Open in New Tab</a></div>';
-      }
-
-      if (metaUrl) {
-        fetch(metaUrl).then(function(r){return r.json()}).then(function(data) {
-          var html = '<table class="meta-table">';
-          html += '<tr><th>Content-Type</th><td>' + (data.contentType || '-') + '</td></tr>';
-          html += '<tr><th>Size</th><td>' + formatBytes(data.size || 0) + '</td></tr>';
-          html += '<tr><th>Last Modified</th><td>' + (data.lastModified || '-') + '</td></tr>';
-          if (data.metadata) {
-            for (var key in data.metadata) {
-              html += '<tr><th>' + escapeHtml(key) + '</th><td>' + escapeHtml(data.metadata[key]) + '</td></tr>';
-            }
-          }
-          html += '</table>';
-          meta.innerHTML = html;
-        });
-      }
-
-      modal.classList.add('active');
-      document.addEventListener('keydown', previewKeyHandler);
+      htmx.ajax('GET', previewUrl, {target: '#preview-modal', swap: 'innerHTML'}).then(function() {
+        modal.classList.add('active');
+        document.addEventListener('keydown', previewKeyHandler);
+      });
     }
 
     function closePreview() {
       var modal = document.getElementById('preview-modal');
       modal.classList.remove('active');
-      document.getElementById('preview-body').innerHTML = '';
-      document.getElementById('preview-meta').innerHTML = '';
+      modal.innerHTML = '';
       document.removeEventListener('keydown', previewKeyHandler);
     }
 
     function previewKeyHandler(e) {
       if (e.key === 'Escape') closePreview();
-    }
-
-    function formatBytes(bytes) {
-      if (bytes === 0) return '0 B';
-      var units = ['B','KB','MB','GB','TB'];
-      var i = Math.floor(Math.log(bytes) / Math.log(1024));
-      return (bytes / Math.pow(1024, i)).toFixed(i ? 1 : 0) + ' ' + units[i];
-    }
-
-    function escapeHtml(str) {
-      var div = document.createElement('div');
-      div.textContent = str;
-      return div.innerHTML;
     }
 
     function setViewMode(mode, btn) {

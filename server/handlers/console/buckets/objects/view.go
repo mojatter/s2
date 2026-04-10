@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -106,7 +107,78 @@ func handleMeta(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	bucketName := r.PathValue("name")
+	objectName := r.PathValue("object")
+
+	strg, err := s.Buckets.Get(ctx, bucketName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	obj, err := strg.Get(ctx, objectName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	ext := strings.ToLower(path.Ext(objectName))
+	viewURL := fmt.Sprintf("/buckets/%s/view/%s", bucketName, objectName)
+	previewType := server.PreviewType(ext)
+
+	var textContent string
+	if previewType == "text" {
+		rc, err := obj.Open()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer func() { _ = rc.Close() }()
+
+		b, err := io.ReadAll(rc)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		textContent = string(b)
+	}
+
+	data := struct {
+		Filename     string
+		ViewURL      string
+		ContentType  string
+		Size         uint64
+		LastModified string
+		Metadata     map[string]string
+		PreviewType  string
+		TextContent  string
+	}{
+		Filename:     path.Base(objectName),
+		ViewURL:      viewURL,
+		ContentType:  contentTypeByExt(ext),
+		Size:         obj.Length(),
+		LastModified: obj.LastModified().Format("2006-01-02 15:04:05"),
+		PreviewType:  previewType,
+		TextContent:  textContent,
+	}
+	if md := obj.Metadata(); len(md) > 0 {
+		data.Metadata = md
+	}
+
+	var buf bytes.Buffer
+	if err := s.Template.ExecuteTemplate(&buf, "buckets/preview.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = buf.WriteTo(w)
+}
+
 func init() {
 	server.RegisterConsoleHandleFunc("GET /buckets/{name}/view/{object...}", middleware.BasicAuth(handleView))
 	server.RegisterConsoleHandleFunc("GET /buckets/{name}/meta/{object...}", middleware.BasicAuth(handleMeta))
+	server.RegisterConsoleHandleFunc("GET /buckets/{name}/preview/{object...}", middleware.BasicAuth(handlePreview))
 }

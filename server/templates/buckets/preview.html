@@ -1,0 +1,43 @@
+<div class="modal-content">
+  <div class="modal-header">
+    <span>{{.Filename}}</span>
+    <div class="modal-header-actions">
+      <a href="{{.ViewURL}}" class="btn-view" title="Open in new tab" target="_blank">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line>
+        </svg>
+      </a>
+      <button class="modal-close" onclick="closePreview()">&times;</button>
+    </div>
+  </div>
+
+  <div class="modal-body">
+    {{if eq .PreviewType "image"}}
+    <img src="{{.ViewURL}}" alt="{{.Filename}}">
+    {{else if eq .PreviewType "video"}}
+    <video controls autoplay><source src="{{.ViewURL}}"></video>
+    {{else if eq .PreviewType "audio"}}
+    <audio controls autoplay><source src="{{.ViewURL}}"></audio>
+    {{else if eq .PreviewType "pdf"}}
+    <iframe src="{{.ViewURL}}"></iframe>
+    {{else if eq .PreviewType "text"}}
+    <pre>{{.TextContent}}</pre>
+    {{else}}
+    <div class="preview-unsupported">
+      <p>Preview not available for this file type.</p>
+      <a href="{{.ViewURL}}" target="_blank" class="btn-primary-sm">Open in New Tab</a>
+    </div>
+    {{end}}
+  </div>
+
+  <div class="modal-meta">
+    <table class="meta-table">
+      <tr><th>Content-Type</th><td>{{.ContentType}}</td></tr>
+      <tr><th>Size</th><td>{{formatSize .Size}}</td></tr>
+      <tr><th>Last Modified</th><td>{{.LastModified}}</td></tr>
+      {{range $k, $v := .Metadata}}
+      <tr><th>{{$k}}</th><td>{{$v}}</td></tr>
+      {{end}}
+    </table>
+  </div>
+</div>

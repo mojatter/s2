@@ -22,6 +22,7 @@ var (
 	templateNames = []string{
 		"index.html",
 		"buckets/objects.html",
+		"buckets/preview.html",
 	}
 )
 
@@ -59,6 +60,36 @@ func subTemplate(sub fs.FS, t *template.Template, name string) (*template.Templa
 // imageExts is the set of file extensions recognized as images for gallery view.
 var imageExts = map[string]bool{
 	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".svg": true, ".bmp": true, ".ico": true,
+}
+
+// videoExts is the set of file extensions recognized as video for preview.
+var videoExts = map[string]bool{
+	".mp4": true, ".webm": true, ".ogg": true,
+}
+
+// audioExts is the set of file extensions recognized as audio for preview.
+var audioExts = map[string]bool{
+	".mp3": true, ".wav": true, ".aac": true, ".flac": true,
+}
+
+// PreviewType returns the preview category for the given file extension:
+// "image", "video", "audio", "pdf", "text", or "" (unsupported).
+func PreviewType(ext string) string {
+	ext = strings.ToLower(ext)
+	switch {
+	case imageExts[ext]:
+		return "image"
+	case videoExts[ext]:
+		return "video"
+	case audioExts[ext]:
+		return "audio"
+	case ext == ".pdf":
+		return "pdf"
+	case textPreviewExts[ext]:
+		return "text"
+	default:
+		return ""
+	}
 }
 
 // previewableExts is the set of file extensions that can be previewed in the Web Console.
