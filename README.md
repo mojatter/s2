@@ -456,13 +456,35 @@ Custom metadata is supported via `x-amz-meta-*` headers on PutObject/CopyObject 
 
 ## Benchmarks
 
-S2 ships a `make bench-warp` target that drives a fresh in-process s2-server with [`minio/warp`](https://github.com/minio/warp). Install warp first with `go install github.com/minio/warp@latest`, then:
+Two complementary benchmark harnesses ship with S2:
 
-```sh
-make bench-warp
-```
+- **`make bench`** runs Go-native `testing.B` benchmarks against the storage layer (`fs` package) and the HTTP handler (`server/handlers/s3api` package). Good for catching regressions in a unit-test-style loop — no external binary needed.
+- **`make bench-warp`** drives a fresh in-process s2-server end-to-end with [`minio/warp`](https://github.com/minio/warp). Good for SDK-level throughput numbers that exercise the whole stack (connection pooling, SigV4 streaming, chunked bodies, real wire HTTP). Install warp first with `go install github.com/minio/warp@latest`.
 
-The numbers below are from a local run on an Apple Silicon laptop (`darwin/arm64`, `osfs` backend, single-process server), captured with the default `make bench-warp` settings (1 MiB objects, 8 concurrent clients, 30 seconds, `warp mixed`). They are intended as a sanity check, not a competitive ranking — the most useful number is the one you get on your own hardware.
+Numbers below are local runs on an Apple M4 (`darwin/arm64`, single process). Treat them as sanity checks, not competitive rankings — the most useful number is the one you get on your own hardware.
+
+### Go-native microbenchmarks
+
+1 KiB payload, `osfs` backend rooted at `b.TempDir()`, 2-second bench time. `make bench` runs the full set.
+
+| Benchmark | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| `BenchmarkPutObject` (osfs) | 4,255,653 | 2,856 | 31 |
+| `BenchmarkGetObject` (osfs) | 38,011 | 1,051 | 12 |
+| `BenchmarkPutObjectMemFS` | 2,363 | 4,072 | 78 |
+| `BenchmarkGetObjectMemFS` | 337 | 416 | 14 |
+| `BenchmarkHTTPPutObject` (osfs) | 9,330,348 | 50,591 | 181 |
+| `BenchmarkHTTPGetObject` (osfs) | 168,535 | 11,923 | 138 |
+| `BenchmarkHTTPPutObjectMemFS` | 166,138 | 46,665 | 196 |
+| `BenchmarkHTTPGetObjectMemFS` | 35,402 | 43,067 | 120 |
+
+The `osfs` PUT path always fsyncs before rename — that durability guarantee is roughly **4 ms of the 4.2 ms per storage-layer PUT** on this machine. For apples-to-apples comparisons against benchmarks from other S3-compatible servers, make sure they are running with fsync enabled as well; many default to write-through-page-cache and will look proportionally faster until you flip the fsync switch on.
+
+The `memfs` columns exist because S2 ships an in-memory backend specifically for tests; skipping the disk barrier makes `GetObject` over **100x faster** and `PutObject` over **1800x faster** than `osfs` on the same hardware, which is what makes `memfs` worth reaching for in unit tests that need an S3-compatible target without Docker or a temp directory.
+
+### End-to-end benchmark with warp
+
+Captured with the default `make bench-warp` settings (1 MiB objects, 8 concurrent clients, 30 seconds, `warp mixed`), `osfs` backend.
 
 | Operation | Throughput | p50 latency | p99 latency |
 |---|---|---|---|
@@ -471,8 +493,6 @@ The numbers below are from a local run on an Apple Silicon laptop (`darwin/arm64
 | **STAT** | 265.58 obj/s | 0.4 ms | 3.3 ms |
 | **DELETE** | 88.70 obj/s | 4.5 ms | 12.8 ms |
 | **Total** | **531.30 MiB/s, 885.58 obj/s** | — | — |
-
-PUT throughput is bounded by `osfs`'s atomic write (rename after `Sync`); switching to `memfs` removes the disk barrier when you only need a fast in-process target for tests.
 
 You can run any other warp workload by overriding the Makefile variables, e.g. larger objects:
 
