@@ -115,6 +115,10 @@ The bind-mounted directory is recognized as a bucket automatically — no `S2_SE
   <img src="./docs/web-console.png" alt="S2 Web Console" width="720">
 </p>
 
+<p align="center">
+  <img src="./docs/web-console-gallery.png" alt="S2 Web Console — Gallery View" width="720">
+</p>
+
 ## Install
 
 ```sh
