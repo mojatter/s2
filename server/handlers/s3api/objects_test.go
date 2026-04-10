@@ -1,10 +1,12 @@
 package s3api
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/suite"
+
+	"github.com/mojatter/s2"
+	_ "github.com/mojatter/s2/fs"
+	"github.com/mojatter/s2/server"
 )
 
 type ObjectsTestSuite struct{ s3apiSuite }
@@ -1312,3 +1318,104 @@ func (s *ObjectsTestSuite) TestXMLResponseFormat() {
 	s.Contains(w.Body.String(), `<?xml version="1.0" encoding="UTF-8"?>`)
 	s.Contains(w.Body.String(), `xmlns="http://s3.amazonaws.com/doc/2006-03-01/"`)
 }
+
+// --- HTTP Benchmarks ---
+//
+// End-to-end HTTP-layer benchmarks against the S3 handler with a 1 KiB
+// payload. PUT rotates the object key each iteration (so no caching
+// hides work); GET repeatedly reads a single pre-populated object. The
+// server runs with authentication disabled (cfg.User == "") so the
+// benchmark measures transport + handler + storage cost without
+// SigV4 signature verification noise.
+
+// setupBenchServer brings up an in-process S3 listener for benchmarks.
+// The backend is selected by the caller; osfs is rooted at b.TempDir()
+// while memfs is a pristine in-process filesystem. The "benchbucket"
+// bucket is pre-created.
+func setupBenchServer(b *testing.B, typ s2.Type) *httptest.Server {
+	b.Helper()
+	cfg := server.DefaultConfig()
+	cfg.Type = typ
+	if typ == s2.TypeOSFS {
+		cfg.Root = b.TempDir()
+	}
+	cfg.User = ""
+	cfg.HealthPath = ""
+	cfg.ConsoleListen = ""
+	srv, err := server.NewServer(context.Background(), cfg)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := srv.Buckets.Create(context.Background(), "benchbucket"); err != nil {
+		b.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.S3Handler())
+	b.Cleanup(ts.Close)
+	return ts
+}
+
+func benchHTTPPutObject(b *testing.B, typ s2.Type) {
+	srv := setupBenchServer(b, typ)
+	payload := bytes.Repeat([]byte("a"), 1024) // 1 KiB
+	client := srv.Client()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; b.Loop(); i++ {
+		key := fmt.Sprintf("file-%d.txt", i)
+		req, err := http.NewRequest(http.MethodPut, srv.URL+"/benchbucket/"+key, bytes.NewReader(payload))
+		if err != nil {
+			b.Fatal(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			b.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			b.Fatalf("PUT status %d", resp.StatusCode)
+		}
+	}
+}
+
+func benchHTTPGetObject(b *testing.B, typ s2.Type) {
+	srv := setupBenchServer(b, typ)
+
+	// Pre-populate one object that every iteration reads.
+	payload := bytes.Repeat([]byte("a"), 1024)
+	req, err := http.NewRequest(http.MethodPut, srv.URL+"/benchbucket/read.txt", bytes.NewReader(payload))
+	if err != nil {
+		b.Fatal(err)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		b.Fatal(err)
+	}
+	_ = resp.Body.Close()
+
+	client := srv.Client()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		req, err := http.NewRequest(http.MethodGet, srv.URL+"/benchbucket/read.txt", nil)
+		if err != nil {
+			b.Fatal(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			b.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			b.Fatalf("GET status %d", resp.StatusCode)
+		}
+	}
+}
+
+func BenchmarkHTTPPutObject(b *testing.B)      { benchHTTPPutObject(b, s2.TypeOSFS) }
+func BenchmarkHTTPGetObject(b *testing.B)      { benchHTTPGetObject(b, s2.TypeOSFS) }
+func BenchmarkHTTPPutObjectMemFS(b *testing.B) { benchHTTPPutObject(b, s2.TypeMemFS) }
+func BenchmarkHTTPGetObjectMemFS(b *testing.B) { benchHTTPGetObject(b, s2.TypeMemFS) }

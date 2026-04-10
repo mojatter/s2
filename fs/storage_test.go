@@ -1,10 +1,12 @@
 package fs
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"io/fs"
+	"path"
 	"testing"
 	"time"
 
@@ -693,3 +695,83 @@ func (s *StorageTestSuite) TestSignedURL() {
 		})
 	}
 }
+
+// --- Benchmarks ---
+//
+// Storage-layer benchmarks against the osfs and memfs backends with a
+// 1 KiB payload. PUT rotates the key across a small alphabet so each
+// iteration writes to a distinct path (stressing directory creation
+// and rename); GET repeatedly reads a single pre-populated key
+// (stressing open/stat/read). Note that s2's atomicWrite always fsyncs
+// the payload before rename, so PUT here pays the durability cost on
+// every iteration — when comparing against benchmarks from other S3
+// implementations, verify that they are also running with fsync on
+// before drawing conclusions.
+
+// newBenchStorage creates an empty Storage for the given backend type.
+// osfs is rooted at b.TempDir() so iteration state is isolated from
+// other tests/benches in the package; memfs is a pristine in-memory
+// filesystem. Used to share the bench bodies between osfs and memfs
+// variants.
+func newBenchStorage(b *testing.B, typ s2.Type) s2.Storage {
+	b.Helper()
+	cfg := s2.Config{Type: typ}
+	if typ == s2.TypeOSFS {
+		cfg.Root = b.TempDir()
+	}
+	strg, err := s2.NewStorage(context.Background(), cfg)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return strg
+}
+
+func benchPutObject(b *testing.B, typ s2.Type) {
+	ctx := context.Background()
+	strg := newBenchStorage(b, typ)
+	content := bytes.Repeat([]byte("a"), 1024) // 1 KiB
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; b.Loop(); i++ {
+		key := path.Join("test", string(rune(i%26+97)), "file.txt")
+		if err := strg.Put(ctx, s2.NewObjectBytes(key, content)); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func benchGetObject(b *testing.B, typ s2.Type) {
+	ctx := context.Background()
+	strg := newBenchStorage(b, typ)
+	content := bytes.Repeat([]byte("a"), 1024) // 1 KiB
+	if err := strg.Put(ctx, s2.NewObjectBytes("test.txt", content)); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		obj, err := strg.Get(ctx, "test.txt")
+		if err != nil {
+			b.Fatal(err)
+		}
+		rc, err := obj.Open()
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := io.Copy(io.Discard, rc); err != nil {
+			b.Fatal(err)
+		}
+		_ = rc.Close()
+	}
+}
+
+// BenchmarkPutObject covers the osfs backend with a 1 KiB payload and
+// rotating-key writes. s2's atomicWrite always fsyncs before rename;
+// see BenchmarkPutObjectMemFS for numbers that exclude the durability
+// cost.
+func BenchmarkPutObject(b *testing.B)    { benchPutObject(b, s2.TypeOSFS) }
+func BenchmarkGetObject(b *testing.B)    { benchGetObject(b, s2.TypeOSFS) }
+func BenchmarkPutObjectMemFS(b *testing.B) { benchPutObject(b, s2.TypeMemFS) }
+func BenchmarkGetObjectMemFS(b *testing.B) { benchGetObject(b, s2.TypeMemFS) }

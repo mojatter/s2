@@ -13,6 +13,17 @@ test:
 test-integration:
 	go test -v -count=1 ./server/handlers/s3api/ -run Integration
 
+# bench runs Go-native microbenchmarks against the storage backend and the
+# HTTP handler. Shorter than bench-warp and requires no external binaries,
+# so it's the right knob for in-loop regression checks.
+BENCH_GO_PACKAGES ?= ./fs/ ./server/handlers/s3api/
+BENCH_GO_RE       ?= BenchmarkPutObject|BenchmarkGetObject|BenchmarkHTTPPutObject|BenchmarkHTTPGetObject
+BENCH_GO_TIME     ?= 2s
+
+.PHONY: bench
+bench:
+	go test $(BENCH_GO_PACKAGES) -run='^$$' -bench='$(BENCH_GO_RE)' -benchmem -benchtime=$(BENCH_GO_TIME)
+
 .PHONY: test-e2e
 test-e2e:
 	docker compose -f s2test/e2e/docker-compose.yml run --build --rm test; \
