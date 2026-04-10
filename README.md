@@ -62,6 +62,47 @@ aws --endpoint-url http://localhost:9000 s3 sync /tmp/dump s3://my-bucket
 
 Or use `mc mirror` directly between the two endpoints.
 
+## Storage Layout
+
+The `osfs` backend stores objects as plain files on disk under the configured root directory (default `/var/lib/s2` in Docker, `data` otherwise). Each bucket is a top-level directory, and object keys map directly to file paths:
+
+```
+$S2_SERVER_ROOT/
+├── assets/
+│   ├── .keep              # bucket marker (tracks creation time)
+│   ├── logo.png
+│   └── css/
+│       ├── .keep
+│       └── style.css
+└── uploads/
+    ├── .keep
+    └── photo.jpg
+```
+
+Because buckets are just directories, you can **seed data by bind-mounting host directories** into the container. This is useful for local development when you want to serve git-tracked static assets through an S3-compatible API without uploading them manually.
+
+```yaml
+services:
+  s2:
+    image: mojatter/s2-server
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      S2_SERVER_USER: myuser
+      S2_SERVER_PASSWORD: mypassword
+    volumes:
+      - ./public/assets:/var/lib/s2/assets   # host dir → bucket "assets"
+      - s2-data:/var/lib/s2
+
+volumes:
+  s2-data:
+```
+
+The bind-mounted directory is recognized as a bucket automatically — no `S2_SERVER_BUCKETS` entry is needed. Any files placed there are immediately accessible via the S3 API and Web Console.
+
+> **Note:** If the bind-mounted directory does not contain a `.keep` file, the bucket's creation timestamp falls back to the current time. This is cosmetic only and does not affect functionality.
+
 ## Features
 
 - **Unified Storage Interface** — One API for local filesystem, in-memory, and AWS S3 backends
