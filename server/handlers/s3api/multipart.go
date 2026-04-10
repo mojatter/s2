@@ -271,6 +271,14 @@ func (p *partsReader) Close() error {
 }
 
 func handleObjectPOST(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	// A trailing-slash bucket request (e.g. "POST /my-bucket/?delete")
+	// routes to this pattern with an empty key. Delegate to the
+	// bucket-level POST handler so DeleteObjects continues to work.
+	if r.PathValue("key") == "" {
+		handleBucketPOST(s, w, r)
+		return
+	}
+
 	q := r.URL.Query()
 	if _, ok := q["uploads"]; ok {
 		handleCreateMultipartUpload(s, w, r)
@@ -284,5 +292,5 @@ func handleObjectPOST(s *server.Server, w http.ResponseWriter, r *http.Request) 
 }
 
 func init() {
-	server.RegisterHandleFunc("POST /s3api/{bucket}/{key...}", middleware.SigV4(handleObjectPOST))
+	server.RegisterS3HandleFunc("POST /{bucket}/{key...}", middleware.SigV4(handleObjectPOST))
 }

@@ -2,13 +2,20 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/mojatter/s2"
 	_ "github.com/mojatter/s2/fs"
 )
+
+// ErrReservedBucketName is returned by Buckets.Create when the requested
+// name collides with a path reserved on the S3 listener — currently the
+// first segment of cfg.HealthPath.
+var ErrReservedBucketName = errors.New("bucket name is reserved")
 
 const keepFile = ".keep"
 
@@ -37,7 +44,8 @@ func (e *ErrBucketNotFound) Error() string {
 }
 
 type Buckets struct {
-	strg s2.Storage
+	strg         s2.Storage
+	reservedName string // bucket name that collides with cfg.HealthPath; "" if none
 }
 
 func newBuckets(ctx context.Context, cfg *Config) (*Buckets, error) {
@@ -45,7 +53,52 @@ func newBuckets(ctx context.Context, cfg *Config) (*Buckets, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage: %w", err)
 	}
-	return &Buckets{strg: strg}, nil
+	return &Buckets{
+		strg:         strg,
+		reservedName: healthPathReservedBucket(cfg.HealthPath),
+	}, nil
+}
+
+// healthPathReservedBucket returns the bucket name that would collide
+// with the health check endpoint, or "" if the first segment of
+// healthPath is not a syntactically valid S3 bucket name (in which case
+// no collision is possible). The default "/healthz" reserves the
+// bucket name "healthz"; operators who need that name can either
+// disable the health endpoint by setting cfg.HealthPath to "" or move
+// it onto an unreservable prefix like "/-/healthz".
+func healthPathReservedBucket(healthPath string) string {
+	if healthPath == "" {
+		return ""
+	}
+	p := strings.TrimPrefix(healthPath, "/")
+	if i := strings.IndexByte(p, '/'); i >= 0 {
+		p = p[:i]
+	}
+	if !isValidBucketName(p) {
+		return ""
+	}
+	return p
+}
+
+func isValidBucketName(name string) bool {
+	if len(name) < 3 || len(name) > 63 {
+		return false
+	}
+	first := name[0]
+	if (first < 'a' || first > 'z') && (first < '0' || first > '9') {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= '0' && c <= '9':
+		case c == '.' || c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (bs *Buckets) Names() ([]string, error) {
@@ -96,6 +149,9 @@ func (bs *Buckets) Exists(name string) (bool, error) {
 }
 
 func (bs *Buckets) Create(ctx context.Context, name string) error {
+	if bs.reservedName != "" && name == bs.reservedName {
+		return fmt.Errorf("%w: %q is served by the health endpoint", ErrReservedBucketName, name)
+	}
 	obj := s2.NewObjectBytes(name+"/"+keepFile, []byte{})
 	return bs.strg.Put(ctx, obj)
 }

@@ -158,3 +158,30 @@ func TestConfigPrecedence(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigValidate(t *testing.T) {
+	testCases := []struct {
+		caseName   string
+		healthPath string
+		wantErr    bool
+	}{
+		{caseName: "default", healthPath: "/healthz", wantErr: false},
+		{caseName: "disabled", healthPath: "", wantErr: false},
+		{caseName: "nested", healthPath: "/-/healthz", wantErr: false},
+		{caseName: "missing leading slash", healthPath: "healthz", wantErr: true},
+		{caseName: "root only", healthPath: "/", wantErr: true},
+		{caseName: "relative", healthPath: "./healthz", wantErr: true},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.HealthPath = tc.healthPath
+			err := cfg.Validate()
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}

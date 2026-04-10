@@ -49,13 +49,13 @@ func (s *IntegrationSuite) SetupTest() {
 	s.Require().NoError(err)
 	s.srv = srv
 
-	s.ts = httptest.NewServer(srv.Handler())
+	s.ts = httptest.NewServer(srv.S3Handler())
 
 	s.client = s3.NewFromConfig(aws.Config{
 		Region:      "us-east-1",
 		Credentials: credentials.NewStaticCredentialsProvider(testAccessKey, testSecretKey, ""),
 	}, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(s.ts.URL + "/s3api")
+		o.BaseEndpoint = aws.String(s.ts.URL)
 		o.UsePathStyle = true
 	})
 }

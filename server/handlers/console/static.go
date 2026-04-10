@@ -1,4 +1,4 @@
-package handlers
+package console
 
 import (
 	"io/fs"
@@ -31,5 +31,5 @@ func handleStatic(s *server.Server, w http.ResponseWriter, r *http.Request) {
 }
 
 func init() {
-	server.RegisterHandleFunc("GET /static/{filepath...}", middleware.BasicAuth(handleStatic))
+	server.RegisterConsoleHandleFunc("GET /static/{filepath...}", middleware.BasicAuth(handleStatic))
 }

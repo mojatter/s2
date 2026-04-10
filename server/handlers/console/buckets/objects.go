@@ -216,10 +216,10 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 
 
 func init() {
-	server.RegisterHandleFunc("GET /buckets/{name}", middleware.BasicAuth(handleObjects))
-	server.RegisterHandleFunc("POST /buckets/{name}/folders", middleware.BasicAuth(handleCreateFolder))
-	server.RegisterHandleFunc("POST /buckets/{name}/upload", middleware.BasicAuth(handleUploadFile))
-	server.RegisterHandleFunc("DELETE /buckets/{name}/objects", middleware.BasicAuth(handleDeleteObject))
+	server.RegisterConsoleHandleFunc("GET /buckets/{name}", middleware.BasicAuth(handleObjects))
+	server.RegisterConsoleHandleFunc("POST /buckets/{name}/folders", middleware.BasicAuth(handleCreateFolder))
+	server.RegisterConsoleHandleFunc("POST /buckets/{name}/upload", middleware.BasicAuth(handleUploadFile))
+	server.RegisterConsoleHandleFunc("DELETE /buckets/{name}/objects", middleware.BasicAuth(handleDeleteObject))
 	server.RegisterTemplate("buckets/objects.html")
 }
 

@@ -32,6 +32,8 @@ func splitBucketList(s string) []string {
 const (
 	EnvS2ServerConfig         = "S2_SERVER_CONFIG"
 	EnvS2ServerListen         = "S2_SERVER_LISTEN"
+	EnvS2ServerConsoleListen  = "S2_SERVER_CONSOLE_LISTEN"
+	EnvS2ServerHealthPath     = "S2_SERVER_HEALTH_PATH"
 	EnvS2ServerType           = "S2_SERVER_TYPE"
 	EnvS2ServerRoot           = "S2_SERVER_ROOT"
 	EnvS2ServerMaxUploadSize  = "S2_SERVER_MAX_UPLOAD_SIZE"
@@ -44,8 +46,20 @@ const (
 // Config is a configuration for the server.
 type Config struct {
 	s2.Config
-	// Listen is the address to listen on.
+	// Listen is the address the S3-compatible API listens on.
 	Listen string `json:"listen"`
+	// ConsoleListen is the address the Web Console listens on. The
+	// console runs on a dedicated listener so the S3 API can own the
+	// root path without any prefix. Set to an empty string to disable
+	// the console entirely.
+	ConsoleListen string `json:"console_listen"`
+	// HealthPath is the path the health check endpoint is mounted at on
+	// the S3 listener. Its first path segment is reserved and cannot be
+	// used as a bucket name (Buckets.Create returns ErrReservedBucketName
+	// for that name). The default "/healthz" reserves the bucket name
+	// "healthz". Must start with "/" and have at least one segment after
+	// it. Set to an empty string to disable the health endpoint entirely.
+	HealthPath string `json:"health_path"`
 	// MaxUploadSize is the maximum upload size in bytes. When 0, a backend-specific
 	// default is used (see EffectiveMaxUploadSize): 5 GiB for osfs/s3, 16 MiB for
 	// memfs. The conservative memfs default protects the host from accidental
@@ -98,13 +112,31 @@ func (cfg *Config) EffectiveMaxUploadSize() int64 {
 	return DefaultMaxUploadSize
 }
 
+// Validate checks the configuration for obvious mistakes that would
+// otherwise surface as confusing runtime errors. It is called by
+// NewServer; callers that build a Config by hand can invoke it
+// themselves before passing it in.
+func (cfg *Config) Validate() error {
+	if cfg.HealthPath != "" {
+		if !strings.HasPrefix(cfg.HealthPath, "/") {
+			return fmt.Errorf("server: HealthPath %q must start with %q", cfg.HealthPath, "/")
+		}
+		if cfg.HealthPath == "/" {
+			return fmt.Errorf("server: HealthPath %q must have at least one path segment", cfg.HealthPath)
+		}
+	}
+	return nil
+}
+
 func DefaultConfig() *Config {
 	return &Config{
 		Config: s2.Config{
 			Type: s2.TypeOSFS,
 			Root: DefaultRoot,
 		},
-		Listen: ":9000",
+		Listen:        ":9000",
+		ConsoleListen: ":9001",
+		HealthPath:    "/healthz",
 		// MaxUploadSize intentionally left 0 — EffectiveMaxUploadSize resolves
 		// a backend-appropriate default at request time.
 		MaxPreviewSize: DefaultMaxPreviewSize,
@@ -125,6 +157,14 @@ func (cfg *Config) LoadFile(filename string) error {
 func (cfg *Config) LoadEnv() error {
 	if listen := os.Getenv(EnvS2ServerListen); listen != "" {
 		cfg.Listen = listen
+	}
+	if v, ok := os.LookupEnv(EnvS2ServerConsoleListen); ok {
+		// LookupEnv so the operator can explicitly disable the console
+		// listener with an empty value, distinct from "unset".
+		cfg.ConsoleListen = v
+	}
+	if v, ok := os.LookupEnv(EnvS2ServerHealthPath); ok {
+		cfg.HealthPath = v
 	}
 	if typ := os.Getenv(EnvS2ServerType); typ != "" {
 		cfg.Type = s2.Type(typ)

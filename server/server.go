@@ -56,7 +56,12 @@ func init() {
 
 var (
 	handlersMux sync.Mutex
-	handlers    = map[string]HandlerFunc{}
+	// s3Handlers and consoleHandlers hold the routes registered via
+	// RegisterS3HandleFunc and RegisterConsoleHandleFunc respectively.
+	// They are served by S3Handler() and ConsoleHandler() on dedicated
+	// listeners so the S3 API can own the root path cleanly.
+	s3Handlers      = map[string]HandlerFunc{}
+	consoleHandlers = map[string]HandlerFunc{}
 )
 
 // Flags holds the parsed command-line arguments for s2-server. Pointer-typed
@@ -172,6 +177,9 @@ type Server struct {
 
 // NewServer creates a new server with the specified configuration.
 func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	tmpl, err := loadTemplates(cfg)
 	if err != nil {
 		return nil, err
@@ -188,53 +196,145 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 	}, nil
 }
 
-// Handler builds and returns the HTTP handler without starting a listener.
-func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	for pattern, handler := range handlers {
-		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-			handler(s, w, r)
-		})
-	}
-	return mux
+// S3Handler builds an HTTP handler that serves the S3-compatible API.
+// It includes routes registered via RegisterS3HandleFunc and, when
+// cfg.HealthPath is non-empty, a health endpoint at that path.
+func (s *Server) S3Handler() http.Handler {
+	return s.buildMux(s3Handlers)
 }
 
-// Start starts the server and shuts it down gracefully when ctx is cancelled.
+// ConsoleHandler builds an HTTP handler that serves the Web Console.
+// Returns nil when no console routes have been registered, which lets
+// the caller decide whether to start a second listener at all.
+func (s *Server) ConsoleHandler() http.Handler {
+	if len(consoleHandlers) == 0 {
+		return nil
+	}
+	return s.buildMux(consoleHandlers)
+}
+
+// buildMux composes the given registries into a single ServeMux and
+// prepends a health-check short-circuit at cfg.HealthPath when set.
+//
+// The health endpoint is intentionally *not* registered as a pattern in
+// the mux: a literal path like "/healthz" and the broader
+// "{METHOD} /{bucket}/{key...}" wildcards overlap in ways Go 1.22's
+// conflict detector refuses to accept, even when bucket creation would
+// otherwise reject the colliding name. Wrapping the mux with an
+// explicit path check sidesteps the conflict and keeps the routing
+// decisions straightforward to reason about.
+//
+// A pattern registered in more than one registry panics, same as the
+// registration APIs themselves.
+func (s *Server) buildMux(registries ...map[string]HandlerFunc) http.Handler {
+	mux := http.NewServeMux()
+	seen := map[string]struct{}{}
+	for _, reg := range registries {
+		for pattern, handler := range reg {
+			if _, dup := seen[pattern]; dup {
+				panic("s2: handler already registered for " + pattern)
+			}
+			seen[pattern] = struct{}{}
+			mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+				handler(s, w, r)
+			})
+		}
+	}
+	if s.Config.HealthPath == "" {
+		return mux
+	}
+	healthPath := s.Config.HealthPath
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == healthPath && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			handleHealthz(s, w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+// handleHealthz is mounted at cfg.HealthPath by S3Handler (and by the
+// merged Handler). It is intentionally minimal so that probes stay cheap.
+func handleHealthz(_ *Server, w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
+}
+
+// Start starts the S3 API listener and, when cfg.ConsoleListen is set and
+// there are console routes registered, the Web Console listener. Both
+// are shut down gracefully when ctx is cancelled or either listener dies.
 func (s *Server) Start(ctx context.Context) error {
-	srv := &http.Server{
+	s3srv := &http.Server{
 		Addr:              s.Config.Listen,
-		Handler:           s.Handler(),
+		Handler:           s.S3Handler(),
 		ReadHeaderTimeout: 30 * time.Second,
 	}
-	slog.Info("Server listening", "addr", s.Config.Listen)
+	servers := []*http.Server{s3srv}
+	slog.Info("S3 API listening", "addr", s.Config.Listen)
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- srv.ListenAndServe()
-	}()
+	if s.Config.ConsoleListen != "" {
+		if h := s.ConsoleHandler(); h != nil {
+			consoleSrv := &http.Server{
+				Addr:              s.Config.ConsoleListen,
+				Handler:           h,
+				ReadHeaderTimeout: 30 * time.Second,
+			}
+			servers = append(servers, consoleSrv)
+			slog.Info("Web Console listening", "addr", s.Config.ConsoleListen)
+		}
+	}
 
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
+	errCh := make(chan error, len(servers))
+	for _, srv := range servers {
+		go func() {
+			errCh <- srv.ListenAndServe()
+		}()
+	}
+
+	shutdownAll := func() error {
 		slog.Info("Shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("shutdown: %w", err)
+
+		var firstErr error
+		for _, srv := range servers {
+			if err := srv.Shutdown(shutdownCtx); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("shutdown %s: %w", srv.Addr, err)
+			}
 		}
-		return nil
+		return firstErr
+	}
+
+	select {
+	case err := <-errCh:
+		_ = shutdownAll()
+		return err
+	case <-ctx.Done():
+		return shutdownAll()
 	}
 }
 
 type HandlerFunc func(srv *Server, w http.ResponseWriter, r *http.Request)
 
-func RegisterHandleFunc(pattern string, handler HandlerFunc) {
+// RegisterS3HandleFunc registers a handler that will be served by
+// S3Handler(). Patterns use Go 1.22 ServeMux syntax.
+func RegisterS3HandleFunc(pattern string, handler HandlerFunc) {
+	registerInto(s3Handlers, "S3 ", pattern, handler)
+}
+
+// RegisterConsoleHandleFunc registers a handler that will be served by
+// ConsoleHandler(). Patterns use Go 1.22 ServeMux syntax.
+func RegisterConsoleHandleFunc(pattern string, handler HandlerFunc) {
+	registerInto(consoleHandlers, "console ", pattern, handler)
+}
+
+func registerInto(reg map[string]HandlerFunc, label, pattern string, handler HandlerFunc) {
 	handlersMux.Lock()
 	defer handlersMux.Unlock()
 
-	if _, exists := handlers[pattern]; exists {
-		panic("s2: handler already registered for " + pattern)
+	if _, exists := reg[pattern]; exists {
+		panic("s2: " + label + "handler already registered for " + pattern)
 	}
-	handlers[pattern] = handler
+	reg[pattern] = handler
 }

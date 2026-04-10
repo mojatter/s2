@@ -28,7 +28,7 @@ func (s *ObjectsTestSuite) TestListObjects() {
 		s.putObject("b", "file.txt", "hello")
 		s.putObject("b", "dir/nested.txt", "world")
 
-		req := httptest.NewRequest("GET", "/s3api/b?delimiter=/&prefix=", nil)
+		req := httptest.NewRequest("GET", "/b?delimiter=/&prefix=", nil)
 		req.SetPathValue("bucket", "b")
 		w := httptest.NewRecorder()
 		handleListObjects(s.server, w, req)
@@ -50,7 +50,7 @@ func (s *ObjectsTestSuite) TestListObjects() {
 		s.putObject("r", "a.txt", "1")
 		s.putObject("r", "sub/b.txt", "2")
 
-		req := httptest.NewRequest("GET", "/s3api/r", nil)
+		req := httptest.NewRequest("GET", "/r", nil)
 		req.SetPathValue("bucket", "r")
 		w := httptest.NewRecorder()
 		handleListObjects(s.server, w, req)
@@ -69,7 +69,7 @@ func (s *ObjectsTestSuite) TestListObjects() {
 		s.putObject("p", "images/b.png", "b")
 		s.putObject("p", "docs/c.txt", "c")
 
-		req := httptest.NewRequest("GET", "/s3api/p?prefix=images/", nil)
+		req := httptest.NewRequest("GET", "/p?prefix=images/", nil)
 		req.SetPathValue("bucket", "p")
 		w := httptest.NewRecorder()
 		handleListObjects(s.server, w, req)
@@ -84,7 +84,7 @@ func (s *ObjectsTestSuite) TestListObjects() {
 	s.Run("empty bucket", func() {
 		s.createBucket("empty")
 
-		req := httptest.NewRequest("GET", "/s3api/empty", nil)
+		req := httptest.NewRequest("GET", "/empty", nil)
 		req.SetPathValue("bucket", "empty")
 		w := httptest.NewRecorder()
 		handleListObjects(s.server, w, req)
@@ -96,7 +96,7 @@ func (s *ObjectsTestSuite) TestListObjects() {
 	})
 
 	s.Run("nonexistent bucket", func() {
-		req := httptest.NewRequest("GET", "/s3api/no-such-bucket", nil)
+		req := httptest.NewRequest("GET", "/no-such-bucket", nil)
 		req.SetPathValue("bucket", "no-such-bucket")
 		w := httptest.NewRecorder()
 		handleListObjects(s.server, w, req)
@@ -112,7 +112,7 @@ func (s *ObjectsTestSuite) TestListObjects() {
 		s.putObject("ts", "dir/b.txt", "b")
 		s.putObject("ts", "other.txt", "x")
 
-		req := httptest.NewRequest("GET", "/s3api/ts?delimiter=/&prefix=dir/", nil)
+		req := httptest.NewRequest("GET", "/ts?delimiter=/&prefix=dir/", nil)
 		req.SetPathValue("bucket", "ts")
 		w := httptest.NewRecorder()
 		handleListObjects(s.server, w, req)
@@ -129,7 +129,7 @@ func (s *ObjectsTestSuite) TestListObjects() {
 		s.createBucket("np")
 		s.putObject("np", "real.txt", "x")
 
-		req := httptest.NewRequest("GET", "/s3api/np?delimiter=/&prefix=nope/", nil)
+		req := httptest.NewRequest("GET", "/np?delimiter=/&prefix=nope/", nil)
 		req.SetPathValue("bucket", "np")
 		w := httptest.NewRecorder()
 		handleListObjects(s.server, w, req)
@@ -185,7 +185,7 @@ func (s *ObjectsTestSuite) TestListObjects() {
 		}
 		for _, tc := range testCases {
 			s.Run(tc.caseName, func() {
-				url := "/s3api/nda?delimiter=/&prefix=" + tc.prefix
+				url := "/nda?delimiter=/&prefix=" + tc.prefix
 				req := httptest.NewRequest("GET", url, nil)
 				req.SetPathValue("bucket", "nda")
 				w := httptest.NewRecorder()
@@ -219,7 +219,7 @@ func (s *ObjectsTestSuite) TestListObjects() {
 		s.putObject("ndr", "images/a.png", "a")
 		s.putObject("ndr", "images/b.png", "b")
 
-		req := httptest.NewRequest("GET", "/s3api/ndr?prefix=im", nil)
+		req := httptest.NewRequest("GET", "/ndr?prefix=im", nil)
 		req.SetPathValue("bucket", "ndr")
 		w := httptest.NewRecorder()
 		handleListObjects(s.server, w, req)
@@ -236,7 +236,7 @@ func (s *ObjectsTestSuite) TestListObjects() {
 		s.createBucket("np2")
 		s.putObject("np2", "real.txt", "x")
 
-		req := httptest.NewRequest("GET", "/s3api/np2?delimiter=/&prefix=nope", nil)
+		req := httptest.NewRequest("GET", "/np2?delimiter=/&prefix=nope", nil)
 		req.SetPathValue("bucket", "np2")
 		w := httptest.NewRecorder()
 		handleListObjects(s.server, w, req)
@@ -257,7 +257,7 @@ func (s *ObjectsTestSuite) TestListObjects_Pagination() {
 	s.putObject("pg", "c.txt", "3")
 
 	s.Run("max-keys truncates", func() {
-		req := httptest.NewRequest("GET", "/s3api/pg?max-keys=2", nil)
+		req := httptest.NewRequest("GET", "/pg?max-keys=2", nil)
 		req.SetPathValue("bucket", "pg")
 		w := httptest.NewRecorder()
 		handleListObjects(s.server, w, req)
@@ -272,7 +272,7 @@ func (s *ObjectsTestSuite) TestListObjects_Pagination() {
 
 	s.Run("continuation-token fetches rest", func() {
 		// First page
-		req1 := httptest.NewRequest("GET", "/s3api/pg?max-keys=2", nil)
+		req1 := httptest.NewRequest("GET", "/pg?max-keys=2", nil)
 		req1.SetPathValue("bucket", "pg")
 		w1 := httptest.NewRecorder()
 		handleListObjects(s.server, w1, req1)
@@ -280,7 +280,7 @@ func (s *ObjectsTestSuite) TestListObjects_Pagination() {
 		s.Require().NoError(xml.Unmarshal(w1.Body.Bytes(), &page1))
 
 		// Second page
-		req2 := httptest.NewRequest("GET", "/s3api/pg?continuation-token="+page1.NextContinuationToken, nil)
+		req2 := httptest.NewRequest("GET", "/pg?continuation-token="+page1.NextContinuationToken, nil)
 		req2.SetPathValue("bucket", "pg")
 		w2 := httptest.NewRecorder()
 		handleListObjects(s.server, w2, req2)
@@ -294,7 +294,7 @@ func (s *ObjectsTestSuite) TestListObjects_Pagination() {
 	})
 
 	s.Run("start-after", func() {
-		req := httptest.NewRequest("GET", "/s3api/pg?start-after=a.txt", nil)
+		req := httptest.NewRequest("GET", "/pg?start-after=a.txt", nil)
 		req.SetPathValue("bucket", "pg")
 		w := httptest.NewRecorder()
 		handleListObjects(s.server, w, req)
@@ -307,7 +307,7 @@ func (s *ObjectsTestSuite) TestListObjects_Pagination() {
 	})
 
 	s.Run("max-keys=0 returns empty", func() {
-		req := httptest.NewRequest("GET", "/s3api/pg?max-keys=0", nil)
+		req := httptest.NewRequest("GET", "/pg?max-keys=0", nil)
 		req.SetPathValue("bucket", "pg")
 		w := httptest.NewRecorder()
 		handleListObjects(s.server, w, req)
@@ -318,7 +318,7 @@ func (s *ObjectsTestSuite) TestListObjects_Pagination() {
 	})
 
 	s.Run("invalid max-keys uses default", func() {
-		req := httptest.NewRequest("GET", "/s3api/pg?max-keys=abc", nil)
+		req := httptest.NewRequest("GET", "/pg?max-keys=abc", nil)
 		req.SetPathValue("bucket", "pg")
 		w := httptest.NewRecorder()
 		handleListObjects(s.server, w, req)
@@ -333,7 +333,7 @@ func (s *ObjectsTestSuite) TestListObjects_Pagination() {
 		s.putObject("pgd", "b.txt", "2")
 		s.putObject("pgd", "dir/c.txt", "3")
 
-		req := httptest.NewRequest("GET", "/s3api/pgd?delimiter=/&start-after=a.txt", nil)
+		req := httptest.NewRequest("GET", "/pgd?delimiter=/&start-after=a.txt", nil)
 		req.SetPathValue("bucket", "pgd")
 		w := httptest.NewRecorder()
 		handleListObjects(s.server, w, req)
@@ -351,7 +351,7 @@ func (s *ObjectsTestSuite) TestGetObject() {
 	s.Run("typical", func() {
 		s.putObject("b", "hello.txt", "Hello, S2!")
 
-		req := httptest.NewRequest("GET", "/s3api/b/hello.txt", nil)
+		req := httptest.NewRequest("GET", "/b/hello.txt", nil)
 		req.SetPathValue("bucket", "b")
 		req.SetPathValue("key", "hello.txt")
 		w := httptest.NewRecorder()
@@ -366,7 +366,7 @@ func (s *ObjectsTestSuite) TestGetObject() {
 	s.Run("not found", func() {
 		s.createBucket("miss")
 
-		req := httptest.NewRequest("GET", "/s3api/miss/missing.txt", nil)
+		req := httptest.NewRequest("GET", "/miss/missing.txt", nil)
 		req.SetPathValue("bucket", "miss")
 		req.SetPathValue("key", "missing.txt")
 		w := httptest.NewRecorder()
@@ -381,7 +381,7 @@ func (s *ObjectsTestSuite) TestGetObject() {
 	s.Run("nested key", func() {
 		s.putObject("b2", "a/b/c.txt", "nested")
 
-		req := httptest.NewRequest("GET", "/s3api/b2/a/b/c.txt", nil)
+		req := httptest.NewRequest("GET", "/b2/a/b/c.txt", nil)
 		req.SetPathValue("bucket", "b2")
 		req.SetPathValue("key", "a/b/c.txt")
 		w := httptest.NewRecorder()
@@ -398,7 +398,7 @@ func (s *ObjectsTestSuite) TestHeadObject() {
 	s.putObject("hb", "file.txt", "content")
 
 	s.Run("returns headers without body", func() {
-		req := httptest.NewRequest("HEAD", "/s3api/hb/file.txt", nil)
+		req := httptest.NewRequest("HEAD", "/hb/file.txt", nil)
 		req.SetPathValue("bucket", "hb")
 		req.SetPathValue("key", "file.txt")
 		w := httptest.NewRecorder()
@@ -412,7 +412,7 @@ func (s *ObjectsTestSuite) TestHeadObject() {
 	s.Run("not found", func() {
 		s.createBucket("hb2")
 
-		req := httptest.NewRequest("HEAD", "/s3api/hb2/nope.txt", nil)
+		req := httptest.NewRequest("HEAD", "/hb2/nope.txt", nil)
 		req.SetPathValue("bucket", "hb2")
 		req.SetPathValue("key", "nope.txt")
 		w := httptest.NewRecorder()
@@ -429,7 +429,7 @@ func (s *ObjectsTestSuite) TestPutObject() {
 		s.createBucket("pb")
 
 		body := "hello world"
-		req := httptest.NewRequest("PUT", "/s3api/pb/new.txt", strings.NewReader(body))
+		req := httptest.NewRequest("PUT", "/pb/new.txt", strings.NewReader(body))
 		req.SetPathValue("bucket", "pb")
 		req.SetPathValue("key", "new.txt")
 		req.ContentLength = int64(len(body))
@@ -454,7 +454,7 @@ func (s *ObjectsTestSuite) TestPutObject() {
 		s.putObject("ow", "f.txt", "old")
 
 		body := "new"
-		req := httptest.NewRequest("PUT", "/s3api/ow/f.txt", strings.NewReader(body))
+		req := httptest.NewRequest("PUT", "/ow/f.txt", strings.NewReader(body))
 		req.SetPathValue("bucket", "ow")
 		req.SetPathValue("key", "f.txt")
 		req.ContentLength = int64(len(body))
@@ -488,7 +488,7 @@ func (s *ObjectsTestSuite) TestPutObject_ETag() {
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			req := httptest.NewRequest("PUT", "/s3api/etag/"+tc.key, strings.NewReader(tc.body))
+			req := httptest.NewRequest("PUT", "/etag/"+tc.key, strings.NewReader(tc.body))
 			req.SetPathValue("bucket", "etag")
 			req.SetPathValue("key", tc.key)
 			req.ContentLength = int64(len(tc.body))
@@ -514,7 +514,7 @@ func (s *ObjectsTestSuite) TestETag_RoundTrip() {
 	expectedETag := `"` + hex.EncodeToString(h[:]) + `"`
 
 	// Put via API handler
-	putReq := httptest.NewRequest("PUT", "/s3api/ert/rt.txt", strings.NewReader(body))
+	putReq := httptest.NewRequest("PUT", "/ert/rt.txt", strings.NewReader(body))
 	putReq.SetPathValue("bucket", "ert")
 	putReq.SetPathValue("key", "rt.txt")
 	putReq.ContentLength = int64(len(body))
@@ -523,7 +523,7 @@ func (s *ObjectsTestSuite) TestETag_RoundTrip() {
 	s.Equal(expectedETag, putW.Header().Get("ETag"))
 
 	// GetObject should return the same ETag
-	getReq := httptest.NewRequest("GET", "/s3api/ert/rt.txt", nil)
+	getReq := httptest.NewRequest("GET", "/ert/rt.txt", nil)
 	getReq.SetPathValue("bucket", "ert")
 	getReq.SetPathValue("key", "rt.txt")
 	getW := httptest.NewRecorder()
@@ -532,7 +532,7 @@ func (s *ObjectsTestSuite) TestETag_RoundTrip() {
 
 	// ListObjects returns objects without metadata (by design in fs backend),
 	// so ETags in list results use the fallback value.
-	listReq := httptest.NewRequest("GET", "/s3api/ert", nil)
+	listReq := httptest.NewRequest("GET", "/ert", nil)
 	listReq.SetPathValue("bucket", "ert")
 	listW := httptest.NewRecorder()
 	handleListObjects(s.server, listW, listReq)
@@ -615,7 +615,7 @@ func (s *ObjectsTestSuite) TestPutObject_AWSChunked() {
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
 			chunked := buildAWSChunkedBody(payload, chunkSize)
-			req := httptest.NewRequest("PUT", "/s3api/chunked/"+tc.key, strings.NewReader(string(chunked)))
+			req := httptest.NewRequest("PUT", "/chunked/"+tc.key, strings.NewReader(string(chunked)))
 			req.SetPathValue("bucket", "chunked")
 			req.SetPathValue("key", tc.key)
 			req.ContentLength = int64(len(chunked))
@@ -642,7 +642,7 @@ func (s *ObjectsTestSuite) TestPutObject_AWSChunked() {
 
 			// GET via handler should return the same bytes and advertise the
 			// correct Content-Length (this is what warp's minio-go validates).
-			getReq := httptest.NewRequest("GET", "/s3api/chunked/"+tc.key, nil)
+			getReq := httptest.NewRequest("GET", "/chunked/"+tc.key, nil)
 			getReq.SetPathValue("bucket", "chunked")
 			getReq.SetPathValue("key", tc.key)
 			getW := httptest.NewRecorder()
@@ -661,7 +661,7 @@ func (s *ObjectsTestSuite) TestMetadata() {
 		s.createBucket("md")
 
 		body := "data"
-		req := httptest.NewRequest("PUT", "/s3api/md/meta.txt", strings.NewReader(body))
+		req := httptest.NewRequest("PUT", "/md/meta.txt", strings.NewReader(body))
 		req.SetPathValue("bucket", "md")
 		req.SetPathValue("key", "meta.txt")
 		req.ContentLength = int64(len(body))
@@ -671,7 +671,7 @@ func (s *ObjectsTestSuite) TestMetadata() {
 		handlePutObject(s.server, w, req)
 		s.Equal(http.StatusOK, w.Code)
 
-		getReq := httptest.NewRequest("GET", "/s3api/md/meta.txt", nil)
+		getReq := httptest.NewRequest("GET", "/md/meta.txt", nil)
 		getReq.SetPathValue("bucket", "md")
 		getReq.SetPathValue("key", "meta.txt")
 		getW := httptest.NewRecorder()
@@ -688,7 +688,7 @@ func (s *ObjectsTestSuite) TestMetadata() {
 		s.createBucket("nmd")
 
 		body := "data"
-		req := httptest.NewRequest("PUT", "/s3api/nmd/plain.txt", strings.NewReader(body))
+		req := httptest.NewRequest("PUT", "/nmd/plain.txt", strings.NewReader(body))
 		req.SetPathValue("bucket", "nmd")
 		req.SetPathValue("key", "plain.txt")
 		req.ContentLength = int64(len(body))
@@ -696,7 +696,7 @@ func (s *ObjectsTestSuite) TestMetadata() {
 		handlePutObject(s.server, w, req)
 		s.Equal(http.StatusOK, w.Code)
 
-		getReq := httptest.NewRequest("GET", "/s3api/nmd/plain.txt", nil)
+		getReq := httptest.NewRequest("GET", "/nmd/plain.txt", nil)
 		getReq.SetPathValue("bucket", "nmd")
 		getReq.SetPathValue("key", "plain.txt")
 		getW := httptest.NewRecorder()
@@ -711,7 +711,7 @@ func (s *ObjectsTestSuite) TestMetadata() {
 		s.createBucket("hmd")
 
 		body := "data"
-		req := httptest.NewRequest("PUT", "/s3api/hmd/file.txt", strings.NewReader(body))
+		req := httptest.NewRequest("PUT", "/hmd/file.txt", strings.NewReader(body))
 		req.SetPathValue("bucket", "hmd")
 		req.SetPathValue("key", "file.txt")
 		req.ContentLength = int64(len(body))
@@ -719,7 +719,7 @@ func (s *ObjectsTestSuite) TestMetadata() {
 		w := httptest.NewRecorder()
 		handlePutObject(s.server, w, req)
 
-		headReq := httptest.NewRequest("HEAD", "/s3api/hmd/file.txt", nil)
+		headReq := httptest.NewRequest("HEAD", "/hmd/file.txt", nil)
 		headReq.SetPathValue("bucket", "hmd")
 		headReq.SetPathValue("key", "file.txt")
 		headW := httptest.NewRecorder()
@@ -737,7 +737,7 @@ func (s *ObjectsTestSuite) TestCopyObject() {
 	s.Run("same bucket", func() {
 		s.putObject("cb", "src.txt", "source data")
 
-		req := httptest.NewRequest("PUT", "/s3api/cb/dst.txt", nil)
+		req := httptest.NewRequest("PUT", "/cb/dst.txt", nil)
 		req.SetPathValue("bucket", "cb")
 		req.SetPathValue("key", "dst.txt")
 		req.Header.Set("x-amz-copy-source", "/cb/src.txt")
@@ -751,7 +751,7 @@ func (s *ObjectsTestSuite) TestCopyObject() {
 		s.False(result.LastModified.IsZero())
 
 		// Verify content
-		getReq := httptest.NewRequest("GET", "/s3api/cb/dst.txt", nil)
+		getReq := httptest.NewRequest("GET", "/cb/dst.txt", nil)
 		getReq.SetPathValue("bucket", "cb")
 		getReq.SetPathValue("key", "dst.txt")
 		getW := httptest.NewRecorder()
@@ -763,7 +763,7 @@ func (s *ObjectsTestSuite) TestCopyObject() {
 		s.putObject("src-bkt", "file.txt", "cross-bucket")
 		s.createBucket("dst-bkt")
 
-		req := httptest.NewRequest("PUT", "/s3api/dst-bkt/copied.txt", nil)
+		req := httptest.NewRequest("PUT", "/dst-bkt/copied.txt", nil)
 		req.SetPathValue("bucket", "dst-bkt")
 		req.SetPathValue("key", "copied.txt")
 		req.Header.Set("x-amz-copy-source", "/src-bkt/file.txt")
@@ -772,7 +772,7 @@ func (s *ObjectsTestSuite) TestCopyObject() {
 
 		s.Equal(http.StatusOK, w.Code)
 
-		getReq := httptest.NewRequest("GET", "/s3api/dst-bkt/copied.txt", nil)
+		getReq := httptest.NewRequest("GET", "/dst-bkt/copied.txt", nil)
 		getReq.SetPathValue("bucket", "dst-bkt")
 		getReq.SetPathValue("key", "copied.txt")
 		getW := httptest.NewRecorder()
@@ -783,7 +783,7 @@ func (s *ObjectsTestSuite) TestCopyObject() {
 	s.Run("without leading slash", func() {
 		s.putObject("ns", "a.txt", "no-slash")
 
-		req := httptest.NewRequest("PUT", "/s3api/ns/b.txt", nil)
+		req := httptest.NewRequest("PUT", "/ns/b.txt", nil)
 		req.SetPathValue("bucket", "ns")
 		req.SetPathValue("key", "b.txt")
 		req.Header.Set("x-amz-copy-source", "ns/a.txt")
@@ -796,7 +796,7 @@ func (s *ObjectsTestSuite) TestCopyObject() {
 	s.Run("url-encoded source", func() {
 		s.putObject("enc", "my file.txt", "encoded")
 
-		req := httptest.NewRequest("PUT", "/s3api/enc/copy.txt", nil)
+		req := httptest.NewRequest("PUT", "/enc/copy.txt", nil)
 		req.SetPathValue("bucket", "enc")
 		req.SetPathValue("key", "copy.txt")
 		req.Header.Set("x-amz-copy-source", "/enc/my%20file.txt")
@@ -807,7 +807,7 @@ func (s *ObjectsTestSuite) TestCopyObject() {
 	})
 
 	s.Run("invalid source", func() {
-		req := httptest.NewRequest("PUT", "/s3api/b/dst.txt", nil)
+		req := httptest.NewRequest("PUT", "/b/dst.txt", nil)
 		req.SetPathValue("bucket", "b")
 		req.SetPathValue("key", "dst.txt")
 		req.Header.Set("x-amz-copy-source", "no-slash-no-key")
@@ -823,7 +823,7 @@ func (s *ObjectsTestSuite) TestCopyObject() {
 	s.Run("source not found", func() {
 		s.createBucket("snf")
 
-		req := httptest.NewRequest("PUT", "/s3api/snf/dst.txt", nil)
+		req := httptest.NewRequest("PUT", "/snf/dst.txt", nil)
 		req.SetPathValue("bucket", "snf")
 		req.SetPathValue("key", "dst.txt")
 		req.Header.Set("x-amz-copy-source", "/snf/nonexistent.txt")
@@ -840,7 +840,7 @@ func (s *ObjectsTestSuite) TestDeleteObject() {
 	s.Run("existing", func() {
 		s.putObject("db", "to-delete.txt", "bye")
 
-		req := httptest.NewRequest("DELETE", "/s3api/db/to-delete.txt", nil)
+		req := httptest.NewRequest("DELETE", "/db/to-delete.txt", nil)
 		req.SetPathValue("bucket", "db")
 		req.SetPathValue("key", "to-delete.txt")
 		w := httptest.NewRecorder()
@@ -849,7 +849,7 @@ func (s *ObjectsTestSuite) TestDeleteObject() {
 		s.Equal(http.StatusNoContent, w.Code)
 
 		// Verify deleted
-		getReq := httptest.NewRequest("GET", "/s3api/db/to-delete.txt", nil)
+		getReq := httptest.NewRequest("GET", "/db/to-delete.txt", nil)
 		getReq.SetPathValue("bucket", "db")
 		getReq.SetPathValue("key", "to-delete.txt")
 		getW := httptest.NewRecorder()
@@ -860,7 +860,7 @@ func (s *ObjectsTestSuite) TestDeleteObject() {
 	s.Run("non-existing key returns error", func() {
 		s.createBucket("di")
 
-		req := httptest.NewRequest("DELETE", "/s3api/di/ghost.txt", nil)
+		req := httptest.NewRequest("DELETE", "/di/ghost.txt", nil)
 		req.SetPathValue("bucket", "di")
 		req.SetPathValue("key", "ghost.txt")
 		w := httptest.NewRecorder()
@@ -880,7 +880,7 @@ func (s *ObjectsTestSuite) TestDeleteObjects() {
 		s.putObject("do", "c.txt", "3")
 
 		body := `<Delete><Object><Key>a.txt</Key></Object><Object><Key>b.txt</Key></Object></Delete>`
-		req := httptest.NewRequest("POST", "/s3api/do?delete", strings.NewReader(body))
+		req := httptest.NewRequest("POST", "/do?delete", strings.NewReader(body))
 		req.SetPathValue("bucket", "do")
 		w := httptest.NewRecorder()
 		handleDeleteObjects(s.server, w, req)
@@ -892,7 +892,7 @@ func (s *ObjectsTestSuite) TestDeleteObjects() {
 		s.Empty(result.Errors)
 
 		// c.txt should still exist
-		getReq := httptest.NewRequest("GET", "/s3api/do/c.txt", nil)
+		getReq := httptest.NewRequest("GET", "/do/c.txt", nil)
 		getReq.SetPathValue("bucket", "do")
 		getReq.SetPathValue("key", "c.txt")
 		getW := httptest.NewRecorder()
@@ -904,7 +904,7 @@ func (s *ObjectsTestSuite) TestDeleteObjects() {
 		s.putObject("dq", "x.txt", "data")
 
 		body := `<Delete><Quiet>true</Quiet><Object><Key>x.txt</Key></Object></Delete>`
-		req := httptest.NewRequest("POST", "/s3api/dq?delete", strings.NewReader(body))
+		req := httptest.NewRequest("POST", "/dq?delete", strings.NewReader(body))
 		req.SetPathValue("bucket", "dq")
 		w := httptest.NewRecorder()
 		handleDeleteObjects(s.server, w, req)
@@ -920,7 +920,7 @@ func (s *ObjectsTestSuite) TestDeleteObjects() {
 		s.createBucket("de")
 
 		body := `<Delete><Object><Key>ghost.txt</Key></Object></Delete>`
-		req := httptest.NewRequest("POST", "/s3api/de?delete", strings.NewReader(body))
+		req := httptest.NewRequest("POST", "/de?delete", strings.NewReader(body))
 		req.SetPathValue("bucket", "de")
 		w := httptest.NewRecorder()
 		handleDeleteObjects(s.server, w, req)
@@ -935,7 +935,7 @@ func (s *ObjectsTestSuite) TestDeleteObjects() {
 
 	s.Run("nonexistent bucket", func() {
 		body := `<Delete><Object><Key>a.txt</Key></Object></Delete>`
-		req := httptest.NewRequest("POST", "/s3api/no-bucket?delete", strings.NewReader(body))
+		req := httptest.NewRequest("POST", "/no-bucket?delete", strings.NewReader(body))
 		req.SetPathValue("bucket", "no-bucket")
 		w := httptest.NewRecorder()
 		handleDeleteObjects(s.server, w, req)
@@ -946,7 +946,7 @@ func (s *ObjectsTestSuite) TestDeleteObjects() {
 	s.Run("malformed XML", func() {
 		s.createBucket("dm")
 
-		req := httptest.NewRequest("POST", "/s3api/dm?delete", strings.NewReader("not xml"))
+		req := httptest.NewRequest("POST", "/dm?delete", strings.NewReader("not xml"))
 		req.SetPathValue("bucket", "dm")
 		w := httptest.NewRecorder()
 		handleDeleteObjects(s.server, w, req)
@@ -961,7 +961,7 @@ func (s *ObjectsTestSuite) TestDeleteObjects() {
 		s.putObject("dp", "f.txt", "data")
 
 		body := `<Delete><Object><Key>f.txt</Key></Object></Delete>`
-		req := httptest.NewRequest("POST", "/s3api/dp?delete", strings.NewReader(body))
+		req := httptest.NewRequest("POST", "/dp?delete", strings.NewReader(body))
 		req.SetPathValue("bucket", "dp")
 		w := httptest.NewRecorder()
 		handleBucketPOST(s.server, w, req)
@@ -980,7 +980,7 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 	// "Hello, World!" is 13 bytes: H(0) e(1) l(2) l(3) o(4) ,(5) (6) W(7) o(8) r(9) l(10) d(11) !(12)
 
 	s.Run("mid range", func() {
-		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req := httptest.NewRequest("GET", "/rng/data.txt", nil)
 		req.SetPathValue("bucket", "rng")
 		req.SetPathValue("key", "data.txt")
 		req.Header.Set("Range", "bytes=0-4")
@@ -994,7 +994,7 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 	})
 
 	s.Run("open-ended range", func() {
-		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req := httptest.NewRequest("GET", "/rng/data.txt", nil)
 		req.SetPathValue("bucket", "rng")
 		req.SetPathValue("key", "data.txt")
 		req.Header.Set("Range", "bytes=7-")
@@ -1007,7 +1007,7 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 	})
 
 	s.Run("suffix range", func() {
-		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req := httptest.NewRequest("GET", "/rng/data.txt", nil)
 		req.SetPathValue("bucket", "rng")
 		req.SetPathValue("key", "data.txt")
 		req.Header.Set("Range", "bytes=-6")
@@ -1020,7 +1020,7 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 	})
 
 	s.Run("end clamped to file size", func() {
-		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req := httptest.NewRequest("GET", "/rng/data.txt", nil)
 		req.SetPathValue("bucket", "rng")
 		req.SetPathValue("key", "data.txt")
 		req.Header.Set("Range", "bytes=7-999")
@@ -1033,7 +1033,7 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 	})
 
 	s.Run("start beyond file size returns 416", func() {
-		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req := httptest.NewRequest("GET", "/rng/data.txt", nil)
 		req.SetPathValue("bucket", "rng")
 		req.SetPathValue("key", "data.txt")
 		req.Header.Set("Range", "bytes=999-")
@@ -1045,7 +1045,7 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 	})
 
 	s.Run("no Range header returns full content", func() {
-		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req := httptest.NewRequest("GET", "/rng/data.txt", nil)
 		req.SetPathValue("bucket", "rng")
 		req.SetPathValue("key", "data.txt")
 		w := httptest.NewRecorder()
@@ -1056,7 +1056,7 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 	})
 
 	s.Run("invalid scheme", func() {
-		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req := httptest.NewRequest("GET", "/rng/data.txt", nil)
 		req.SetPathValue("bucket", "rng")
 		req.SetPathValue("key", "data.txt")
 		req.Header.Set("Range", "pages=1-2")
@@ -1067,7 +1067,7 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 	})
 
 	s.Run("suffix zero returns 416", func() {
-		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req := httptest.NewRequest("GET", "/rng/data.txt", nil)
 		req.SetPathValue("bucket", "rng")
 		req.SetPathValue("key", "data.txt")
 		req.Header.Set("Range", "bytes=-0")
@@ -1078,7 +1078,7 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 	})
 
 	s.Run("suffix exceeding file size returns entire file", func() {
-		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req := httptest.NewRequest("GET", "/rng/data.txt", nil)
 		req.SetPathValue("bucket", "rng")
 		req.SetPathValue("key", "data.txt")
 		req.Header.Set("Range", "bytes=-999")
@@ -1091,7 +1091,7 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 	})
 
 	s.Run("non-numeric start returns 416", func() {
-		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req := httptest.NewRequest("GET", "/rng/data.txt", nil)
 		req.SetPathValue("bucket", "rng")
 		req.SetPathValue("key", "data.txt")
 		req.Header.Set("Range", "bytes=abc-5")
@@ -1102,7 +1102,7 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 	})
 
 	s.Run("non-numeric end returns 416", func() {
-		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req := httptest.NewRequest("GET", "/rng/data.txt", nil)
 		req.SetPathValue("bucket", "rng")
 		req.SetPathValue("key", "data.txt")
 		req.Header.Set("Range", "bytes=0-xyz")
@@ -1113,7 +1113,7 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 	})
 
 	s.Run("start greater than end returns 416", func() {
-		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req := httptest.NewRequest("GET", "/rng/data.txt", nil)
 		req.SetPathValue("bucket", "rng")
 		req.SetPathValue("key", "data.txt")
 		req.Header.Set("Range", "bytes=10-5")
@@ -1124,7 +1124,7 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 	})
 
 	s.Run("non-numeric suffix returns 416", func() {
-		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req := httptest.NewRequest("GET", "/rng/data.txt", nil)
 		req.SetPathValue("bucket", "rng")
 		req.SetPathValue("key", "data.txt")
 		req.Header.Set("Range", "bytes=-abc")
@@ -1135,7 +1135,7 @@ func (s *ObjectsTestSuite) TestGetObject_Range() {
 	})
 
 	s.Run("single byte range", func() {
-		req := httptest.NewRequest("GET", "/s3api/rng/data.txt", nil)
+		req := httptest.NewRequest("GET", "/rng/data.txt", nil)
 		req.SetPathValue("bucket", "rng")
 		req.SetPathValue("key", "data.txt")
 		req.Header.Set("Range", "bytes=0-0")
@@ -1156,7 +1156,7 @@ func (s *ObjectsTestSuite) TestMultipartUpload() {
 		s.createBucket("mp")
 
 		// CreateMultipartUpload
-		createReq := httptest.NewRequest("POST", "/s3api/mp/large.txt?uploads", nil)
+		createReq := httptest.NewRequest("POST", "/mp/large.txt?uploads", nil)
 		createReq.SetPathValue("bucket", "mp")
 		createReq.SetPathValue("key", "large.txt")
 		createW := httptest.NewRecorder()
@@ -1172,7 +1172,7 @@ func (s *ObjectsTestSuite) TestMultipartUpload() {
 
 		// UploadPart 1
 		part1 := "Hello, "
-		req1 := httptest.NewRequest("PUT", "/s3api/mp/large.txt?partNumber=1&uploadId="+uploadID, strings.NewReader(part1))
+		req1 := httptest.NewRequest("PUT", "/mp/large.txt?partNumber=1&uploadId="+uploadID, strings.NewReader(part1))
 		req1.SetPathValue("bucket", "mp")
 		req1.SetPathValue("key", "large.txt")
 		req1.ContentLength = int64(len(part1))
@@ -1183,7 +1183,7 @@ func (s *ObjectsTestSuite) TestMultipartUpload() {
 
 		// UploadPart 2
 		part2 := "World!"
-		req2 := httptest.NewRequest("PUT", "/s3api/mp/large.txt?partNumber=2&uploadId="+uploadID, strings.NewReader(part2))
+		req2 := httptest.NewRequest("PUT", "/mp/large.txt?partNumber=2&uploadId="+uploadID, strings.NewReader(part2))
 		req2.SetPathValue("bucket", "mp")
 		req2.SetPathValue("key", "large.txt")
 		req2.ContentLength = int64(len(part2))
@@ -1196,7 +1196,7 @@ func (s *ObjectsTestSuite) TestMultipartUpload() {
 			`<Part><PartNumber>1</PartNumber><ETag>` + w1.Header().Get("ETag") + `</ETag></Part>` +
 			`<Part><PartNumber>2</PartNumber><ETag>` + w2.Header().Get("ETag") + `</ETag></Part>` +
 			`</CompleteMultipartUpload>`
-		completeReq := httptest.NewRequest("POST", "/s3api/mp/large.txt?uploadId="+uploadID, strings.NewReader(completeBody))
+		completeReq := httptest.NewRequest("POST", "/mp/large.txt?uploadId="+uploadID, strings.NewReader(completeBody))
 		completeReq.SetPathValue("bucket", "mp")
 		completeReq.SetPathValue("key", "large.txt")
 		completeW := httptest.NewRecorder()
@@ -1210,7 +1210,7 @@ func (s *ObjectsTestSuite) TestMultipartUpload() {
 		s.Contains(completeResult.ETag, "-2") // multipart ETag ends with -<partCount>
 
 		// Verify assembled content
-		getReq := httptest.NewRequest("GET", "/s3api/mp/large.txt", nil)
+		getReq := httptest.NewRequest("GET", "/mp/large.txt", nil)
 		getReq.SetPathValue("bucket", "mp")
 		getReq.SetPathValue("key", "large.txt")
 		getW := httptest.NewRecorder()
@@ -1219,7 +1219,7 @@ func (s *ObjectsTestSuite) TestMultipartUpload() {
 		s.Equal("Hello, World!", getW.Body.String())
 
 		// Parts must be cleaned up — they should not appear in list results
-		listReq := httptest.NewRequest("GET", "/s3api/mp", nil)
+		listReq := httptest.NewRequest("GET", "/mp", nil)
 		listReq.SetPathValue("bucket", "mp")
 		listW := httptest.NewRecorder()
 		handleListObjects(s.server, listW, listReq)
@@ -1232,7 +1232,7 @@ func (s *ObjectsTestSuite) TestMultipartUpload() {
 	s.Run("abort cleans up parts", func() {
 		s.createBucket("ab")
 
-		createReq := httptest.NewRequest("POST", "/s3api/ab/f.txt?uploads", nil)
+		createReq := httptest.NewRequest("POST", "/ab/f.txt?uploads", nil)
 		createReq.SetPathValue("bucket", "ab")
 		createReq.SetPathValue("key", "f.txt")
 		createW := httptest.NewRecorder()
@@ -1242,7 +1242,7 @@ func (s *ObjectsTestSuite) TestMultipartUpload() {
 		uploadID := initResult.UploadID
 
 		// Upload a part
-		partReq := httptest.NewRequest("PUT", "/s3api/ab/f.txt?partNumber=1&uploadId="+uploadID, strings.NewReader("data"))
+		partReq := httptest.NewRequest("PUT", "/ab/f.txt?partNumber=1&uploadId="+uploadID, strings.NewReader("data"))
 		partReq.SetPathValue("bucket", "ab")
 		partReq.SetPathValue("key", "f.txt")
 		partReq.ContentLength = 4
@@ -1251,7 +1251,7 @@ func (s *ObjectsTestSuite) TestMultipartUpload() {
 		s.Equal(http.StatusOK, partW.Code)
 
 		// Abort
-		abortReq := httptest.NewRequest("DELETE", "/s3api/ab/f.txt?uploadId="+uploadID, nil)
+		abortReq := httptest.NewRequest("DELETE", "/ab/f.txt?uploadId="+uploadID, nil)
 		abortReq.SetPathValue("bucket", "ab")
 		abortReq.SetPathValue("key", "f.txt")
 		abortW := httptest.NewRecorder()
@@ -1259,7 +1259,7 @@ func (s *ObjectsTestSuite) TestMultipartUpload() {
 		s.Equal(http.StatusNoContent, abortW.Code)
 
 		// List should be empty (final object was never written)
-		listReq := httptest.NewRequest("GET", "/s3api/ab", nil)
+		listReq := httptest.NewRequest("GET", "/ab", nil)
 		listReq.SetPathValue("bucket", "ab")
 		listW := httptest.NewRecorder()
 		handleListObjects(s.server, listW, listReq)
@@ -1271,7 +1271,7 @@ func (s *ObjectsTestSuite) TestMultipartUpload() {
 	s.Run("parts hidden from list", func() {
 		s.createBucket("hid")
 
-		createReq := httptest.NewRequest("POST", "/s3api/hid/obj.txt?uploads", nil)
+		createReq := httptest.NewRequest("POST", "/hid/obj.txt?uploads", nil)
 		createReq.SetPathValue("bucket", "hid")
 		createReq.SetPathValue("key", "obj.txt")
 		createW := httptest.NewRecorder()
@@ -1281,14 +1281,14 @@ func (s *ObjectsTestSuite) TestMultipartUpload() {
 		uploadID := initResult.UploadID
 
 		// Upload part but don't complete
-		partReq := httptest.NewRequest("PUT", "/s3api/hid/obj.txt?partNumber=1&uploadId="+uploadID, strings.NewReader("partial"))
+		partReq := httptest.NewRequest("PUT", "/hid/obj.txt?partNumber=1&uploadId="+uploadID, strings.NewReader("partial"))
 		partReq.SetPathValue("bucket", "hid")
 		partReq.SetPathValue("key", "obj.txt")
 		partReq.ContentLength = 7
 		handleUploadPart(s.server, httptest.NewRecorder(), partReq)
 
 		// Parts must not appear in list
-		listReq := httptest.NewRequest("GET", "/s3api/hid", nil)
+		listReq := httptest.NewRequest("GET", "/hid", nil)
 		listReq.SetPathValue("bucket", "hid")
 		listW := httptest.NewRecorder()
 		handleListObjects(s.server, listW, listReq)
@@ -1303,7 +1303,7 @@ func (s *ObjectsTestSuite) TestMultipartUpload() {
 func (s *ObjectsTestSuite) TestXMLResponseFormat() {
 	s.createBucket("xf")
 
-	req := httptest.NewRequest("GET", "/s3api/xf", nil)
+	req := httptest.NewRequest("GET", "/xf", nil)
 	req.SetPathValue("bucket", "xf")
 	w := httptest.NewRecorder()
 	handleListObjects(s.server, w, req)
