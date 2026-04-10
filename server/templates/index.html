@@ -116,17 +116,20 @@
         </div>
       </div>
       <div id="preview-body" class="modal-body"></div>
+      <div id="preview-meta" class="modal-meta"></div>
     </div>
   </div>
 
   <script>
-    function openPreview(url, filename) {
+    function openPreview(url, filename, metaUrl) {
       var modal = document.getElementById('preview-modal');
       var body = document.getElementById('preview-body');
+      var meta = document.getElementById('preview-meta');
       var fname = document.getElementById('preview-filename');
       var dl = document.getElementById('preview-download');
       fname.textContent = filename;
       dl.href = url;
+      meta.innerHTML = '';
 
       var ext = filename.split('.').pop().toLowerCase();
       var imageExts = ['png','jpg','jpeg','gif','webp','svg','bmp','ico'];
@@ -155,6 +158,22 @@
         body.innerHTML = '<div class="preview-unsupported"><p>Preview not available for this file type.</p><a href="'+url+'" target="_blank" class="btn-primary-sm">Open in New Tab</a></div>';
       }
 
+      if (metaUrl) {
+        fetch(metaUrl).then(function(r){return r.json()}).then(function(data) {
+          var html = '<table class="meta-table">';
+          html += '<tr><th>Content-Type</th><td>' + (data.contentType || '-') + '</td></tr>';
+          html += '<tr><th>Size</th><td>' + formatBytes(data.size || 0) + '</td></tr>';
+          html += '<tr><th>Last Modified</th><td>' + (data.lastModified || '-') + '</td></tr>';
+          if (data.metadata) {
+            for (var key in data.metadata) {
+              html += '<tr><th>' + escapeHtml(key) + '</th><td>' + escapeHtml(data.metadata[key]) + '</td></tr>';
+            }
+          }
+          html += '</table>';
+          meta.innerHTML = html;
+        });
+      }
+
       modal.classList.add('active');
       document.addEventListener('keydown', previewKeyHandler);
     }
@@ -163,12 +182,88 @@
       var modal = document.getElementById('preview-modal');
       modal.classList.remove('active');
       document.getElementById('preview-body').innerHTML = '';
+      document.getElementById('preview-meta').innerHTML = '';
       document.removeEventListener('keydown', previewKeyHandler);
     }
 
     function previewKeyHandler(e) {
       if (e.key === 'Escape') closePreview();
     }
+
+    function formatBytes(bytes) {
+      if (bytes === 0) return '0 B';
+      var units = ['B','KB','MB','GB','TB'];
+      var i = Math.floor(Math.log(bytes) / Math.log(1024));
+      return (bytes / Math.pow(1024, i)).toFixed(i ? 1 : 0) + ' ' + units[i];
+    }
+
+    function escapeHtml(str) {
+      var div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    function setViewMode(mode, btn) {
+      var listView = document.getElementById('list-view');
+      var galleryView = document.getElementById('gallery-view');
+      if (!listView || !galleryView) return;
+
+      var btns = document.querySelectorAll('.view-toggle-btn');
+      btns.forEach(function(b) { b.classList.remove('active'); });
+      if (btn) {
+        btn.classList.add('active');
+      } else {
+        // Find the correct button by index
+        var idx = mode === 'gallery' ? 1 : 0;
+        if (btns[idx]) btns[idx].classList.add('active');
+      }
+
+      if (mode === 'gallery') {
+        listView.style.display = 'none';
+        galleryView.style.display = '';
+      } else {
+        listView.style.display = '';
+        galleryView.style.display = 'none';
+      }
+      localStorage.setItem('s2-view-mode', mode);
+    }
+
+    function initGalleryView() {
+      // Set up Intersection Observer for lazy-loading thumbnails
+      var thumbs = document.querySelectorAll('.gallery-thumb[data-src]');
+      if (thumbs.length > 0) {
+        var observer = new IntersectionObserver(function(entries) {
+          entries.forEach(function(entry) {
+            if (!entry.isIntersecting) return;
+            var el = entry.target;
+            var src = el.getAttribute('data-src');
+            if (!src) return;
+            var img = new Image();
+            img.onload = function() {
+              el.innerHTML = '';
+              el.appendChild(img);
+            };
+            img.src = src;
+            img.alt = '';
+            el.removeAttribute('data-src');
+            observer.unobserve(el);
+          });
+        }, {rootMargin: '200px'});
+
+        thumbs.forEach(function(el) { observer.observe(el); });
+      }
+
+      // Restore view mode from localStorage
+      var mode = localStorage.getItem('s2-view-mode') || 'list';
+      setViewMode(mode);
+    }
+
+    // Re-initialize gallery after HTMX content settles into the DOM
+    document.addEventListener('htmx:afterSettle', function(evt) {
+      if (evt.detail.target.id === 'main-content') {
+        initGalleryView();
+      }
+    });
   </script>
 </body>
 

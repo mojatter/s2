@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -73,6 +74,39 @@ func handleView(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func handleMeta(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	bucketName := r.PathValue("name")
+	objectName := r.PathValue("object")
+
+	strg, err := s.Buckets.Get(ctx, bucketName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	obj, err := strg.Get(ctx, objectName)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	ct := contentTypeByExt(path.Ext(objectName))
+	resp := map[string]any{
+		"name":         path.Base(objectName),
+		"contentType":  ct,
+		"size":         obj.Length(),
+		"lastModified": obj.LastModified().Format("2006-01-02 15:04:05"),
+	}
+	if md := obj.Metadata(); len(md) > 0 {
+		resp["metadata"] = md
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 func init() {
 	server.RegisterConsoleHandleFunc("GET /buckets/{name}/view/{object...}", middleware.BasicAuth(handleView))
+	server.RegisterConsoleHandleFunc("GET /buckets/{name}/meta/{object...}", middleware.BasicAuth(handleMeta))
 }

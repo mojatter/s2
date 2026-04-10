@@ -56,6 +56,11 @@ func subTemplate(sub fs.FS, t *template.Template, name string) (*template.Templa
 	return t.New(name).Parse(string(b))
 }
 
+// imageExts is the set of file extensions recognized as images for gallery view.
+var imageExts = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".svg": true, ".bmp": true, ".ico": true,
+}
+
 // previewableExts is the set of file extensions that can be previewed in the Web Console.
 var previewableExts = map[string]bool{
 	// Images
@@ -104,6 +109,9 @@ func templateFuncs(cfg *Config) template.FuncMap {
 			return t.Format("2006-01-02 15:04")
 		},
 		"baseName": path.Base,
+		"isImage": func(name string) bool {
+			return imageExts[strings.ToLower(path.Ext(name))]
+		},
 		"isPreviewable": func(name string, size uint64) bool {
 			ext := strings.ToLower(path.Ext(name))
 			if !previewableExts[ext] {
