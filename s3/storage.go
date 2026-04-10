@@ -196,18 +196,65 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 	}, nil
 }
 
+// Exists reports whether name resolves to either a leaf object or a
+// non-empty prefix under the storage root.
+//
+// Implementation: try HeadObject first (the common case — the caller
+// is checking a regular object). On a 404 (NotFound) fall back to a
+// 1-key ListObjectsV2 probe with the prefix "<name>/" so that
+// "directory" semantics behave like the fs backends — anything
+// underneath the prefix counts the prefix itself as present.
+//
+// Caveat carried over from S3's data model: a "directory" with no
+// objects underneath cannot be detected (S3 has no standalone
+// directory primitive), so a sub-prefix that the user logically
+// considers empty will always report Exists == false. The storage
+// root itself (name == "") always reports true: constructing this
+// Storage means the caller has accepted the underlying S3 bucket as
+// existing, and forcing a HeadBucket round-trip on every call adds
+// no information that the first real read or write would not.
 func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
+	if name == "" || name == "/" {
+		return true, nil
+	}
+	key := path.Join(s.prefix, name)
+
 	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(path.Join(s.prefix, name)),
+		Key:    aws.String(key),
 	})
-	if err != nil {
-		if strings.Contains(err.Error(), "NotFound") || strings.Contains(err.Error(), "404") {
-			return false, nil
-		}
+	if err == nil {
+		return true, nil
+	}
+	if !isNotFoundErr(err) {
 		return false, err
 	}
-	return true, nil
+
+	// Fallback: probe for any object under "<name>/" so that prefixes
+	// laid down by Buckets.Create (or any caller that writes nested
+	// objects) report as present.
+	listOut, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket:  aws.String(s.bucket),
+		Prefix:  aws.String(key + "/"),
+		MaxKeys: aws.Int32(1),
+	})
+	if err != nil {
+		return false, err
+	}
+	return len(listOut.Contents) > 0, nil
+}
+
+// isNotFoundErr is the not-found check shared by Exists and any
+// caller that needs to map an AWS SDK error back to s2.ErrNotExist.
+// The aws-sdk-go-v2 surface returns a typed error for HeadObject 404s,
+// but other paths hit string-shaped errors, so we cover both.
+func isNotFoundErr(err error) bool {
+	var nf *s3types.NotFound
+	if errors.As(err, &nf) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "NotFound") || strings.Contains(msg, "404")
 }
 
 func (s *storage) Put(ctx context.Context, obj s2.Object) error {

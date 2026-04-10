@@ -577,8 +577,20 @@ func (s *StorageTestSuite) TestExists() {
 		name     string
 		want     bool
 	}{
-		{caseName: "found", name: "a.txt", want: true},
-		{caseName: "not found", name: "not-found.txt", want: false},
+		{caseName: "leaf object", name: "a.txt", want: true},
+		{caseName: "leaf object missing", name: "not-found.txt", want: false},
+		// "cc" is not a leaf object, but the mock has cc/c1.txt and
+		// cc/c2.txt under it, so the ListObjectsV2 fallback finds them.
+		{caseName: "non-empty prefix", name: "cc", want: true},
+		// No object starts with "no-such/", so the fallback returns 0.
+		{caseName: "missing prefix", name: "no-such", want: false},
+		// The storage root is always considered present: constructing
+		// the Storage means the caller has accepted the bucket as
+		// existing, and we don't burn a HeadBucket round-trip on every
+		// call to confirm what the next read or write would surface
+		// anyway.
+		{caseName: "storage root", name: "", want: true},
+		{caseName: "storage root slash", name: "/", want: true},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {

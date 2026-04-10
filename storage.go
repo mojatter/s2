@@ -82,7 +82,11 @@ type Storage interface {
 	// Get returns the object identified by name, including its metadata.
 	// If no object exists at name, the returned error wraps ErrNotExist.
 	Get(ctx context.Context, name string) (Object, error)
-	// Exists reports whether an object exists at name.
+	// Exists reports whether anything is present at name. Backends that
+	// expose a directory hierarchy (osfs, memfs) treat both regular
+	// files and directories as "present"; flat key-value backends (s3)
+	// only resolve to leaf objects since they have no directory
+	// primitive of their own.
 	Exists(ctx context.Context, name string) (bool, error)
 	// Put writes obj to the storage atomically per object. Any metadata on
 	// obj is persisted as part of the same call.

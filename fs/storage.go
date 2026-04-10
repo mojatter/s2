@@ -202,15 +202,19 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 	return obj, nil
 }
 
+// Exists reports whether a path exists under the storage root. Both
+// regular files and directories count as "present"; callers that need
+// to distinguish the two should use Get (which rejects directories)
+// or List (which only enumerates directories).
 func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
-	info, err := fs.Stat(s.fsys, name)
+	_, err := fs.Stat(s.fsys, name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
 		}
 		return false, fmt.Errorf("failed to stat: %w", err)
 	}
-	return !info.IsDir(), nil
+	return true, nil
 }
 
 

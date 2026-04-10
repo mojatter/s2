@@ -135,17 +135,20 @@ func (bs *Buckets) CreatedAt(ctx context.Context, name string) time.Time {
 	return obj.LastModified()
 }
 
+// Exists reports whether a bucket directory exists under the storage
+// root. It is implemented as a single Stat against the bucket path
+// rather than a directory listing of the storage root, so it stays
+// O(1) regardless of how many buckets exist — and, more importantly,
+// regardless of how many objects each bucket holds. Every S3 request
+// runs this on the hot path through Buckets.Get.
+//
+// Note: Buckets is tied to the fs-family Storage backends (osfs,
+// memfs), which expose a real directory hierarchy. Pairing it with
+// the s3 backend would need a different implementation because S3
+// has no "directory" primitive; s3 is intended for library-style use
+// against a single bucket, not as a multi-bucket server backend.
 func (bs *Buckets) Exists(name string) (bool, error) {
-	names, err := bs.Names()
-	if err != nil {
-		return false, err
-	}
-	for _, n := range names {
-		if n == name {
-			return true, nil
-		}
-	}
-	return false, nil
+	return bs.strg.Exists(context.Background(), name)
 }
 
 func (bs *Buckets) Create(ctx context.Context, name string) error {

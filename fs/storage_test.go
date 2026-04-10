@@ -563,7 +563,7 @@ func (s *StorageTestSuite) TestExists() {
 	}{
 		{caseName: "file exists", name: "a.txt", want: true},
 		{caseName: "not found", name: "not-found.txt", want: false},
-		{caseName: "directory returns false", name: "cc", want: false},
+		{caseName: "directory counts as existing", name: "cc", want: true},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
