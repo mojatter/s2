@@ -62,7 +62,7 @@
   <dialog id="preview-dialog" onclick="if(event.target===this)this.close()">
   </dialog>
 
-  <div hx-get="/scripts" hx-trigger="load" hx-swap="innerHTML" style="display:none;"></div>
+  {{template "scripts:buckets/objects.html" .}}
 </body>
 
 </html>
