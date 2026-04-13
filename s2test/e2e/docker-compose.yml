@@ -7,6 +7,7 @@ services:
       S2_SERVER_LISTEN: ":9000"
       S2_SERVER_USER: "testkey"
       S2_SERVER_PASSWORD: "testsecret"
+      S2_SERVER_BUCKETS: "sdk-test-bucket"
     tmpfs:
       - /var/lib/s2
 
@@ -35,3 +36,17 @@ services:
     command: ["/bin/sh", "/tests/run.sh"]
     volumes:
       - ./run.sh:/tests/run.sh:ro
+
+  test-sdk:
+    build:
+      context: ../..
+      dockerfile: s2test/e2e/Dockerfile.sdk
+    depends_on:
+      s2:
+        condition: service_started
+    environment:
+      S2_TEST_S3_BUCKET: "sdk-test-bucket"
+      S2_TEST_S3_ENDPOINT: "http://s2:9000"
+      S2_TEST_S3_REGION: "us-east-1"
+      S2_TEST_S3_ACCESS_KEY_ID: "testkey"
+      S2_TEST_S3_SECRET_ACCESS_KEY: "testsecret"
