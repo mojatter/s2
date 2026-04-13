@@ -4,6 +4,8 @@ go 1.24.0
 
 require (
 	cloud.google.com/go/storage v1.60.0
+	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
+	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.4
 	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/aws/aws-sdk-go-v2/config v1.32.14
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.14
@@ -21,6 +23,9 @@ require (
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/iam v1.5.3 // indirect
 	cloud.google.com/go/monitoring v1.24.3 // indirect
+	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0 // indirect
+	github.com/Azure/azure-sdk-for-go/sdk/internal v1.11.2 // indirect
+	github.com/AzureAD/microsoft-authentication-library-for-go v1.6.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.30.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.55.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.55.0 // indirect
@@ -48,10 +53,13 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.3 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
+	github.com/golang-jwt/jwt/v5 v5.3.0 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.11 // indirect
 	github.com/googleapis/gax-go/v2 v2.17.0 // indirect
+	github.com/kylelemons/godebug v1.1.0 // indirect
+	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.6.0 // indirect

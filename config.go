@@ -7,6 +7,7 @@ const (
 	TypeMemFS Type = "memfs"
 	TypeS3    Type = "s3"
 	TypeGCS   Type = "gcs"
+	TypeAzblob Type = "azblob"
 )
 
 // KnownTypes returns the list of storage Types that are known to s2.
@@ -15,7 +16,7 @@ const (
 // type is *registered* depends on whether the corresponding backend
 // package has been imported (e.g. _ "github.com/mojatter/s2/fs").
 func KnownTypes() []Type {
-	return []Type{TypeOSFS, TypeMemFS, TypeS3, TypeGCS}
+	return []Type{TypeOSFS, TypeMemFS, TypeS3, TypeGCS, TypeAzblob}
 }
 
 // S3Config holds S3-specific configuration.
@@ -40,6 +41,18 @@ type GCSConfig struct {
 	CredentialsFile string `json:"credentials_file,omitempty"`
 }
 
+// AzblobConfig holds Azure Blob Storage-specific configuration.
+// Authentication priority: ConnectionString > AccountName+AccountKey >
+// DefaultAzureCredential (environment, managed identity, Azure CLI, etc.).
+type AzblobConfig struct {
+	// AccountName is the Azure storage account name.
+	AccountName string `json:"account_name,omitempty"`
+	// AccountKey is the shared key for the storage account.
+	AccountKey string `json:"account_key,omitempty"`
+	// ConnectionString is a full Azure Storage connection string.
+	ConnectionString string `json:"connection_string,omitempty"`
+}
+
 // Config is a configuration for a storage.
 type Config struct {
 	// Type is the type of storage.
@@ -56,4 +69,6 @@ type Config struct {
 	S3 *S3Config `json:"s3,omitempty"`
 	// GCS holds GCS-specific settings. Only used when Type is TypeGCS.
 	GCS *GCSConfig `json:"gcs,omitempty"`
+	// Azblob holds Azure Blob Storage-specific settings. Only used when Type is TypeAzblob.
+	Azblob *AzblobConfig `json:"azblob,omitempty"`
 }
