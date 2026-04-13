@@ -1,9 +1,11 @@
 package s3
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"strings"
 
@@ -258,10 +260,22 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 	}
 	defer func() { _ = rc.Close() }()
 
+	// The AWS SDK requires a seekable body for payload signing over HTTP
+	// and checksum calculation. If the stream is already seekable, use it
+	// as-is; otherwise buffer it into a bytes.Reader.
+	body, ok := rc.(io.ReadSeeker)
+	if !ok {
+		b, err := io.ReadAll(rc)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(b)
+	}
+
 	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(path.Join(s.prefix, obj.Name())),
-		Body:          rc,
+		Body:          body,
 		ContentLength: aws.Int64(numconv.MustInt64(obj.Length())),
 		Metadata:      obj.Metadata(),
 	})
