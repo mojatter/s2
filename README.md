@@ -105,7 +105,7 @@ The bind-mounted directory is recognized as a bucket automatically — no `S2_SE
 
 ## Features
 
-- **Unified Storage Interface** — One API for local filesystem, in-memory, and AWS S3 backends
+- **Unified Storage Interface** — One API for local filesystem, in-memory, AWS S3, Google Cloud Storage, and Azure Blob Storage
 - **S3-Compatible Server** — Serve any backend over S3 APIs; a drop-in replacement for MinIO in local development
 - **Lightweight** — Minimal dependencies, single binary, `go install` ready
 - **Pluggable Backends** — Register storage implementations with a blank import
@@ -290,13 +290,17 @@ The `s2test` package provides reusable assertion helpers (e.g. `s2test.TestStora
 | `osfs` | `github.com/mojatter/s2/fs` | Local filesystem storage |
 | `memfs` | `github.com/mojatter/s2/fs` | In-memory filesystem (great for testing; see notes below) |
 | `s3` | `github.com/mojatter/s2/s3` | AWS S3 (and any S3-compatible service) |
+| `gcs` | `github.com/mojatter/s2/gcs` | Google Cloud Storage |
+| `azblob` | `github.com/mojatter/s2/azblob` | Azure Blob Storage |
 
 Backends are registered via blank imports. Import only what you need:
 
 ```go
 import (
-	_ "github.com/mojatter/s2/fs" // osfs + memfs
-	_ "github.com/mojatter/s2/s3" // AWS S3
+	_ "github.com/mojatter/s2/fs"     // osfs + memfs
+	_ "github.com/mojatter/s2/s3"     // AWS S3
+	_ "github.com/mojatter/s2/gcs"    // Google Cloud Storage
+	_ "github.com/mojatter/s2/azblob" // Azure Blob Storage
 )
 ```
 
@@ -348,6 +352,89 @@ With `s2env`, use the `"s3"` key in JSON:
 | `secret_access_key` | AWS secret access key |
 
 When `S3Config` is nil or all fields are empty, the standard AWS SDK credential chain is used.
+
+## GCS Backend Configuration
+
+When using the `gcs` backend, authentication uses [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) by default. Run `gcloud auth application-default login` for local development.
+
+```go
+strg, err := s2.NewStorage(ctx, s2.Config{
+    Type: s2.TypeGCS,
+    Root: "my-bucket/optional-prefix",
+    // GCS: nil — ADC is used automatically
+})
+```
+
+To use a service account key file:
+
+```go
+strg, err := s2.NewStorage(ctx, s2.Config{
+    Type: s2.TypeGCS,
+    Root: "my-bucket",
+    GCS: &s2.GCSConfig{
+        CredentialsFile: "/path/to/service-account.json",
+    },
+})
+```
+
+With `s2env`:
+
+```json
+{
+  "assets": {
+    "type": "gcs",
+    "root": "my-bucket/assets",
+    "gcs": {
+      "credentials_file": "/path/to/service-account.json"
+    }
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `credentials_file` | Path to a service account JSON key file |
+
+When `GCSConfig` is nil or all fields are empty, Application Default Credentials are used.
+
+## Azure Blob Storage Backend Configuration
+
+When using the `azblob` backend, you can authenticate with a connection string, shared key, or [DefaultAzureCredential](https://learn.microsoft.com/en-us/azure/developer/go/azure-sdk-authentication).
+
+```go
+// Shared key authentication
+strg, err := s2.NewStorage(ctx, s2.Config{
+    Type: s2.TypeAzblob,
+    Root: "my-container/optional-prefix",
+    Azblob: &s2.AzblobConfig{
+        AccountName: "mystorageaccount",
+        AccountKey:  "base64-encoded-key",
+    },
+})
+```
+
+With `s2env`:
+
+```json
+{
+  "uploads": {
+    "type": "azblob",
+    "root": "my-container",
+    "azblob": {
+      "account_name": "mystorageaccount",
+      "account_key": "base64-encoded-key"
+    }
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `account_name` | Azure storage account name |
+| `account_key` | Shared key for the storage account |
+| `connection_string` | Full Azure Storage connection string (takes precedence over name+key) |
+
+Authentication priority: `connection_string` > `account_name`+`account_key` > DefaultAzureCredential.
 
 ## Storage Interface
 
