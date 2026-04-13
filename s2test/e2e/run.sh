@@ -157,6 +157,41 @@ run_test "ListDirAndPartialFilename" sh -c '
   [ "$out" = "images/a.png" ]
 '
 
+# Metadata operations
+run_test "PutObjectWithMetadata" sh -c '
+  EP="'"$ENDPOINT"'"
+  printf "meta body" > /tmp/meta.txt
+  aws s3api --endpoint-url "$EP" put-object \
+    --bucket test-bucket --key meta.txt --body /tmp/meta.txt \
+    --metadata key1=val1,key2=val2
+  out=$(aws s3api --endpoint-url "$EP" head-object --bucket test-bucket --key meta.txt --query "Metadata" --output json)
+  echo "$out" | grep -q "val1"
+  echo "$out" | grep -q "val2"
+'
+
+run_test "CopyObjectPreservesMetadata" sh -c '
+  EP="'"$ENDPOINT"'"
+  aws s3api --endpoint-url "$EP" copy-object \
+    --bucket test-bucket --key meta-copy.txt \
+    --copy-source test-bucket/meta.txt
+  out=$(aws s3api --endpoint-url "$EP" head-object --bucket test-bucket --key meta-copy.txt --query "Metadata" --output json)
+  echo "$out" | grep -q "val1"
+  echo "$out" | grep -q "val2"
+'
+
+run_test "CopyObjectReplaceMetadata" sh -c '
+  EP="'"$ENDPOINT"'"
+  aws s3api --endpoint-url "$EP" copy-object \
+    --bucket test-bucket --key meta-replaced.txt \
+    --copy-source test-bucket/meta.txt \
+    --metadata-directive REPLACE \
+    --metadata newkey=newval
+  out=$(aws s3api --endpoint-url "$EP" head-object --bucket test-bucket --key meta-replaced.txt --query "Metadata" --output json)
+  echo "$out" | grep -q "newval"
+  # Original metadata should NOT be present
+  ! echo "$out" | grep -q "val1"
+'
+
 # Presigned URL (query-string SigV4)
 run_test "PresignedGetObject" sh -c '
   EP="'"$ENDPOINT"'"

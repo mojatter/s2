@@ -27,9 +27,11 @@ bench:
 .PHONY: test-e2e
 test-e2e:
 	docker compose -f s2test/e2e/docker-compose.yml run --build --rm test; \
-	rc=$$?; \
+	rc1=$$?; \
+	docker compose -f s2test/e2e/docker-compose.yml run --build --rm test-sdk; \
+	rc2=$$?; \
 	docker compose -f s2test/e2e/docker-compose.yml down; \
-	exit $$rc
+	[ $$rc1 -eq 0 ] && [ $$rc2 -eq 0 ]
 
 # bench-warp runs a `warp mixed` benchmark against a fresh in-process
 # s2-server. It expects the github.com/minio/warp binary on PATH; the

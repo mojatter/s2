@@ -452,6 +452,14 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 	}
 	defer func() { _ = rc.Close() }()
 
+	// Determine metadata for the destination object.
+	var md s2.Metadata
+	if strings.EqualFold(r.Header.Get("x-amz-metadata-directive"), "REPLACE") {
+		md = parseMetadataHeaders(r)
+	} else {
+		md = srcObj.Metadata().Clone()
+	}
+
 	// Write to destination
 	dstStrg, err := s.Buckets.Get(ctx, dstBucket)
 	if err != nil {
@@ -460,8 +468,16 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	dstObj := s2.NewObjectReader(dstKey, rc, srcObj.Length())
+	dstObj := s2.NewObjectReader(dstKey, rc, srcObj.Length(), s2.WithMetadata(md))
 	if err := dstStrg.Put(ctx, dstObj); err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+
+	// Persist ETag (carried from source or recomputed) alongside user metadata.
+	md[etagMetadataKey] = objectETag(srcObj)
+	if err := dstStrg.PutMetadata(ctx, dstKey, md); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return

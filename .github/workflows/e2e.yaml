@@ -23,12 +23,8 @@ jobs:
         uses: docker/setup-buildx-action@v4
       -
         name: Run E2E tests
-        run: |
-          docker compose -f s2test/e2e/docker-compose.yml up \
-            --build \
-            --abort-on-container-exit \
-            --exit-code-from test
+        run: make test-e2e
       -
         name: Show s2 logs on failure
         if: failure()
-        run: docker compose -f s2test/e2e/docker-compose.yml logs s2
+        run: docker compose -f s2test/e2e/docker-compose.yml logs s2 s2-mem

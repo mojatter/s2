@@ -1,0 +1,4 @@
+FROM golang:1.24-alpine
+WORKDIR /app
+RUN --mount=target=. go test -tags integtest -c -o /usr/local/bin/s3-integ-test ./s3/
+ENTRYPOINT ["s3-integ-test", "-test.v", "-test.run", "TestS3Integration"]
