@@ -10,6 +10,7 @@ import (
 
 	"github.com/mojatter/s2"
 	_ "github.com/mojatter/s2/fs"
+	_ "github.com/mojatter/s2/gcs"
 	_ "github.com/mojatter/s2/s3"
 )
 
