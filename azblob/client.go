@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	azsdk "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
@@ -259,7 +260,9 @@ func fromPtrMetadata(md map[string]*string) map[string]string {
 	out := make(map[string]string, len(md))
 	for k, v := range md {
 		if v != nil {
-			out[k] = *v
+			// Azure normalizes metadata keys to Title-Case;
+			// lowercase them for consistency with S3 and GCS.
+			out[strings.ToLower(k)] = *v
 		}
 	}
 	return out
