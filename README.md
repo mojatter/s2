@@ -106,7 +106,7 @@ The bind-mounted directory is recognized as a bucket automatically — no `S2_SE
 ## Features
 
 - **Unified Storage Interface** — One API for local filesystem, in-memory, AWS S3, Google Cloud Storage, and Azure Blob Storage
-- **S3-Compatible Server** — Serve any backend over S3 APIs; a drop-in replacement for MinIO in local development
+- **S3-Compatible Server** — Serve `osfs` or `memfs` backends over S3 APIs; a drop-in replacement for MinIO in local development
 - **Lightweight** — Minimal dependencies, single binary, `go install` ready
 - **Pluggable Backends** — Register storage implementations with a blank import
 - **Web Console** — Built-in browser interface for managing buckets and objects
@@ -198,7 +198,7 @@ func main() {
 }
 ```
 
-`s2env` automatically registers all built-in backends (`osfs`, `memfs`, `s3`), so no blank imports are needed.
+`s2env` automatically registers all built-in backends (`osfs`, `memfs`, `s3`, `gcs`, `azblob`), so no blank imports are needed.
 
 ### As a Local S3 Server
 
@@ -507,7 +507,7 @@ if _, err := strg.Get(ctx, "missing.txt"); errors.Is(err, s2.ErrNotExist) {
 | `S2_SERVER_BUCKETS` | — | Comma-separated list of buckets to create on startup |
 
 Environment variables take precedence over the config file.
-Other settings (such as S3 backend options) are not configurable via environment variables — use `S2_SERVER_CONFIG` to point to a JSON config file instead.
+The server supports `osfs` and `memfs` backends only. Cloud backends (`s3`, `gcs`, `azblob`) are available as a library but not as server backends.
 
 ### Authentication
 
