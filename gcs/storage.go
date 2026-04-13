@@ -17,7 +17,9 @@ import (
 	"github.com/mojatter/s2/internal/numconv"
 )
 
-var ErrRequiredConfigRoot = errors.New("required config.root")
+// ErrRequiredConfigRoot is kept for backwards compatibility.
+// Deprecated: Use s2.ErrRequiredConfigRoot instead.
+var ErrRequiredConfigRoot = s2.ErrRequiredConfigRoot
 
 type gcsStorage struct {
 	client gcsClient
@@ -49,7 +51,7 @@ func NewStorage(ctx context.Context, cfg s2.Config) (s2.Storage, error) {
 		return nil, fmt.Errorf("gcs: failed to create client: %w", err)
 	}
 
-	bucket, prefix := parseRoot(cfg.Root)
+	bucket, prefix := s2.ParseRoot(cfg.Root)
 
 	return &gcsStorage{
 		client: &sdkClient{c: client},
@@ -258,15 +260,6 @@ func (s *gcsStorage) SignedURL(_ context.Context, opts s2.SignedURLOptions) (str
 }
 
 // --- helpers ---
-
-func parseRoot(root string) (bucket, prefix string) {
-	roots := strings.SplitN(strings.Trim(root, "/"), "/", 2)
-	bucket = roots[0]
-	if len(roots) > 1 {
-		prefix = roots[1]
-	}
-	return
-}
 
 func (s *gcsStorage) key(name string) string {
 	if s.prefix == "" {

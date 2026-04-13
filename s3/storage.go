@@ -16,9 +16,9 @@ import (
 	"github.com/mojatter/s2/internal/numconv"
 )
 
-var (
-	ErrRequiredConfigRoot = errors.New("required config.root")
-)
+// ErrRequiredConfigRoot is kept for backwards compatibility.
+// Deprecated: Use s2.ErrRequiredConfigRoot instead.
+var ErrRequiredConfigRoot = s2.ErrRequiredConfigRoot
 
 type clientAPI interface {
 	s3.ListObjectsV2APIClient
@@ -84,12 +84,7 @@ func NewStorage(ctx context.Context, cfg s2.Config) (s2.Storage, error) {
 		})
 	}
 
-	roots := strings.SplitN(strings.Trim(cfg.Root, "/"), "/", 2)
-	bucket := roots[0]
-	prefix := ""
-	if len(roots) > 1 {
-		prefix = roots[1]
-	}
+	bucket, prefix := s2.ParseRoot(cfg.Root)
 	return &storage{
 		client: s3.NewFromConfig(awsCfg, s3Opts...),
 		bucket: bucket,

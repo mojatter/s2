@@ -16,8 +16,11 @@ import (
 	"github.com/mojatter/s2/internal/numconv"
 )
 
+// ErrRequiredConfigRoot is kept for backwards compatibility.
+// Deprecated: Use s2.ErrRequiredConfigRoot instead.
+var ErrRequiredConfigRoot = s2.ErrRequiredConfigRoot
+
 var (
-	ErrRequiredConfigRoot         = errors.New("required config.root")
 	ErrRequiredAccountName        = errors.New("azblob: account_name or connection_string is required")
 	ErrSignedURLRequiresSharedKey = errors.New("azblob: signed URL requires account_name and account_key")
 )
@@ -32,7 +35,7 @@ func init() {
 	s2.RegisterNewStorageFunc(s2.TypeAzblob, NewStorage)
 }
 
-// NewStorage creates a new Azure Blob Storage backend.
+// NewStorage creates a new Azure Blob Storage backend (azblob).
 // cfg.Root must be set to "<container>" or "<container>/<prefix>".
 func NewStorage(ctx context.Context, cfg s2.Config) (s2.Storage, error) {
 	if cfg.Root == "" {
@@ -44,12 +47,7 @@ func NewStorage(ctx context.Context, cfg s2.Config) (s2.Storage, error) {
 		return nil, err
 	}
 
-	roots := strings.SplitN(strings.Trim(cfg.Root, "/"), "/", 2)
-	ctr := roots[0]
-	prefix := ""
-	if len(roots) > 1 {
-		prefix = roots[1]
-	}
+	ctr, prefix := s2.ParseRoot(cfg.Root)
 
 	return &azblobStorage{
 		client:    client,
@@ -160,7 +158,7 @@ func (s *azblobStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListR
 			name:      name,
 			length:    numconv.MustUint64(item.contentLength),
 			modified:  item.lastModified,
-			metadata:  s2.Metadata(fromAzureMetadata(item.metadata)),
+			metadata:  s2.Metadata(fromPtrMetadata(item.metadata)),
 		})
 	}
 
@@ -184,7 +182,7 @@ func (s *azblobStorage) Get(ctx context.Context, name string) (s2.Object, error)
 		name:      name,
 		length:    numconv.MustUint64(props.contentLength),
 		modified:  props.lastModified,
-		metadata:  s2.Metadata(fromAzureMetadata(props.metadata)),
+		metadata:  s2.Metadata(fromPtrMetadata(props.metadata)),
 	}, nil
 }
 
@@ -216,11 +214,11 @@ func (s *azblobStorage) Put(ctx context.Context, obj s2.Object) error {
 	}
 	defer func() { _ = rc.Close() }()
 
-	return s.client.upload(ctx, s.container, s.key(obj.Name()), rc, toAzureMetadata(obj.Metadata()))
+	return s.client.upload(ctx, s.container, s.key(obj.Name()), rc, toPtrMetadata(obj.Metadata()))
 }
 
 func (s *azblobStorage) PutMetadata(ctx context.Context, name string, metadata s2.Metadata) error {
-	return s.client.setMetadata(ctx, s.container, s.key(name), toAzureMetadata(metadata))
+	return s.client.setMetadata(ctx, s.container, s.key(name), toPtrMetadata(metadata))
 }
 
 func (s *azblobStorage) Copy(ctx context.Context, src, dst string) error {

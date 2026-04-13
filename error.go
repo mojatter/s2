@@ -11,6 +11,11 @@ import "errors"
 //	}
 var ErrNotExist = errors.New("s2: object not exist")
 
+// ErrRequiredConfigRoot is returned by NewStorage implementations when
+// Config.Root is empty. Root identifies the bucket, container, or directory
+// that the storage operates on and is always required.
+var ErrRequiredConfigRoot = errors.New("s2: required config.root")
+
 // ErrUnknownType is returned by NewStorage when no plugin is registered for
 // the requested Type. Detect with errors.Is:
 //

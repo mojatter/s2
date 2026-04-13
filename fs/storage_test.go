@@ -51,7 +51,7 @@ func (s *StorageTestSuite) TestNewStorage() {
 	}{
 		{
 			caseName: "osfs",
-			cfg:      s2.Config{Type: s2.TypeOSFS},
+			cfg:      s2.Config{Type: s2.TypeOSFS, Root: s.T().TempDir()},
 			wantType: &storage{},
 		},
 		{
@@ -67,6 +67,11 @@ func (s *StorageTestSuite) TestNewStorage() {
 			s.IsType(tc.wantType, got)
 		})
 	}
+}
+
+func (s *StorageTestSuite) TestNewStorageOSFSEmptyRoot() {
+	_, err := NewStorage(context.Background(), s2.Config{Type: s2.TypeOSFS})
+	s.Require().ErrorIs(err, s2.ErrRequiredConfigRoot)
 }
 
 func (s *StorageTestSuite) TestNewStorageDir() {

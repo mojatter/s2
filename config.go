@@ -1,5 +1,19 @@
 package s2
 
+import "strings"
+
+// ParseRoot splits a Root string like "bucket/some/prefix" into the
+// top-level name (bucket, container, or directory) and an optional
+// key prefix. Leading and trailing slashes are trimmed.
+func ParseRoot(root string) (name, prefix string) {
+	parts := strings.SplitN(strings.Trim(root, "/"), "/", 2)
+	name = parts[0]
+	if len(parts) > 1 {
+		prefix = parts[1]
+	}
+	return
+}
+
 type Type string
 
 const (

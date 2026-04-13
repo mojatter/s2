@@ -24,6 +24,9 @@ func NewStorage(_ context.Context, cfg s2.Config) (s2.Storage, error) {
 	if cfg.Type == s2.TypeMemFS {
 		return NewStorageMem(cfg), nil
 	}
+	if cfg.Root == "" {
+		return nil, s2.ErrRequiredConfigRoot
+	}
 	return NewStorageFS(cfg, osfs.DirFS(cfg.Root)), nil
 }
 
@@ -217,7 +220,6 @@ func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
 	return true, nil
 }
 
-
 func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 	rc, err := obj.Open()
 	if err != nil {
@@ -281,7 +283,6 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 	}
 	return s.Delete(ctx, src)
 }
-
 
 func (s *storage) Delete(ctx context.Context, name string) error {
 	// Ignore metadata deletion errors (file may not have metadata)

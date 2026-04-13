@@ -240,7 +240,7 @@ func derefTime(p *time.Time) time.Time {
 	return *p
 }
 
-func toAzureMetadata(md map[string]string) map[string]*string {
+func toPtrMetadata(md map[string]string) map[string]*string {
 	if md == nil {
 		return nil
 	}
@@ -252,7 +252,7 @@ func toAzureMetadata(md map[string]string) map[string]*string {
 	return out
 }
 
-func fromAzureMetadata(md map[string]*string) map[string]string {
+func fromPtrMetadata(md map[string]*string) map[string]string {
 	if md == nil {
 		return nil
 	}
