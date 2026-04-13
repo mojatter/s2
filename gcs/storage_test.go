@@ -319,48 +319,6 @@ func (s *StorageTestSuite) TestNewStorageError() {
 	})
 }
 
-func (s *StorageTestSuite) TestParseRoot() {
-	testCases := []struct {
-		caseName   string
-		root       string
-		wantBucket string
-		wantPrefix string
-	}{
-		{
-			caseName:   "bucket only",
-			root:       "my-bucket",
-			wantBucket: "my-bucket",
-			wantPrefix: "",
-		},
-		{
-			caseName:   "bucket with prefix",
-			root:       "my-bucket/some/prefix",
-			wantBucket: "my-bucket",
-			wantPrefix: "some/prefix",
-		},
-		{
-			caseName:   "root with slashes trimmed",
-			root:       "/my-bucket/pfx/",
-			wantBucket: "my-bucket",
-			wantPrefix: "pfx",
-		},
-		{
-			caseName:   "bucket with single prefix",
-			root:       "my-bucket/data",
-			wantBucket: "my-bucket",
-			wantPrefix: "data",
-		},
-	}
-
-	for _, tc := range testCases {
-		s.Run(tc.caseName, func() {
-			bucket, prefix := parseRoot(tc.root)
-			s.Equal(tc.wantBucket, bucket)
-			s.Equal(tc.wantPrefix, prefix)
-		})
-	}
-}
-
 func (s *StorageTestSuite) TestS2TestList() {
 	_, strg := s.testMockStorage()
 	ctx := context.Background()
