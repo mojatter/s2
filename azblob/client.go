@@ -1,4 +1,4 @@
-package azure
+package azblob
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	azsdk "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
@@ -32,15 +32,16 @@ type blobItem struct {
 	metadata      map[string]*string
 }
 
-// azureClient abstracts the Azure Blob SDK so that tests can swap in a mock.
-type azureClient interface {
+// azblobClient abstracts the Azure Blob SDK so that tests can swap in a mock.
+type azblobClient interface {
 	getProperties(ctx context.Context, container, blob string) (blobProps, error)
 	downloadStream(ctx context.Context, container, blobName string, offset, count int64) (io.ReadCloser, error)
 	upload(ctx context.Context, container, blobName string, body io.Reader, metadata map[string]*string) error
 	deleteBlob(ctx context.Context, container, blobName string) error
 	setMetadata(ctx context.Context, container, blobName string, metadata map[string]*string) error
 	copyBlob(ctx context.Context, container, src, dst string) error
-	listBlobs(ctx context.Context, container, prefix, delimiter string, maxResults int32, marker string) (listBlobsResult, error)
+	listBlobs(ctx context.Context, container, prefix string, maxResults int32, marker string) (listBlobsResult, error)
+	listBlobsHierarchy(ctx context.Context, container, prefix, delimiter string, maxResults int32, marker string) (listBlobsResult, error)
 	signedURL(container, blobName string, method string, expiry time.Time) (string, error)
 	serviceURL() string
 }
@@ -48,8 +49,8 @@ type azureClient interface {
 // --- SDK implementation ---
 
 type sdkClient struct {
-	client    *azblob.Client
-	sharedKey *azblob.SharedKeyCredential
+	client    *azsdk.Client
+	sharedKey *azsdk.SharedKeyCredential
 }
 
 func (c *sdkClient) serviceURL() string {
@@ -77,9 +78,9 @@ func (c *sdkClient) getProperties(ctx context.Context, ctr, blobName string) (bl
 }
 
 func (c *sdkClient) downloadStream(ctx context.Context, ctr, blobName string, offset, count int64) (io.ReadCloser, error) {
-	var opts *azblob.DownloadStreamOptions
+	var opts *azsdk.DownloadStreamOptions
 	if offset > 0 || count > 0 {
-		opts = &azblob.DownloadStreamOptions{
+		opts = &azsdk.DownloadStreamOptions{
 			Range: blob.HTTPRange{Offset: offset, Count: count},
 		}
 	}
@@ -92,7 +93,7 @@ func (c *sdkClient) downloadStream(ctx context.Context, ctr, blobName string, of
 }
 
 func (c *sdkClient) upload(ctx context.Context, ctr, blobName string, body io.Reader, metadata map[string]*string) error {
-	_, err := c.client.UploadStream(ctx, ctr, blobName, body, &azblob.UploadStreamOptions{
+	_, err := c.client.UploadStream(ctx, ctr, blobName, body, &azsdk.UploadStreamOptions{
 		Metadata: metadata,
 	})
 	return err
@@ -114,79 +115,78 @@ func (c *sdkClient) copyBlob(ctx context.Context, ctr, src, dst string) error {
 	return err
 }
 
-func (c *sdkClient) listBlobs(ctx context.Context, ctr, prefix, delimiter string, maxResults int32, marker string) (listBlobsResult, error) {
-	cc := c.containerClient(ctr)
+func (c *sdkClient) listBlobs(ctx context.Context, ctr, prefix string, maxResults int32, marker string) (listBlobsResult, error) {
+	opts := &container.ListBlobsFlatOptions{
+		MaxResults: &maxResults,
+	}
+	if prefix != "" {
+		opts.Prefix = &prefix
+	}
+	if marker != "" {
+		opts.Marker = &marker
+	}
+
+	pager := c.containerClient(ctr).NewListBlobsFlatPager(opts)
+	if !pager.More() {
+		return listBlobsResult{}, nil
+	}
+
+	page, err := pager.NextPage(ctx)
+	if err != nil {
+		return listBlobsResult{}, err
+	}
+
 	var result listBlobsResult
-
-	if delimiter == "" {
-		opts := &container.ListBlobsFlatOptions{
-			MaxResults: &maxResults,
-		}
-		if prefix != "" {
-			opts.Prefix = &prefix
-		}
-		if marker != "" {
-			opts.Marker = &marker
-		}
-
-		pager := cc.NewListBlobsFlatPager(opts)
-		if !pager.More() {
-			return result, nil
-		}
-
-		page, err := pager.NextPage(ctx)
-		if err != nil {
-			return listBlobsResult{}, err
-		}
-
-		for _, item := range page.Segment.BlobItems {
-			result.items = append(result.items, blobItem{
-				name:          derefString(item.Name),
-				contentLength: derefInt64(item.Properties.ContentLength),
-				lastModified:  derefTime(item.Properties.LastModified),
-				metadata:      item.Metadata,
-			})
-		}
-		if page.NextMarker != nil && *page.NextMarker != "" {
-			result.nextMarker = *page.NextMarker
-		}
-	} else {
-		opts := &container.ListBlobsHierarchyOptions{
-			MaxResults: &maxResults,
-		}
-		if prefix != "" {
-			opts.Prefix = &prefix
-		}
-		if marker != "" {
-			opts.Marker = &marker
-		}
-
-		pager := cc.NewListBlobsHierarchyPager(delimiter, opts)
-		if !pager.More() {
-			return result, nil
-		}
-
-		page, err := pager.NextPage(ctx)
-		if err != nil {
-			return listBlobsResult{}, err
-		}
-
-		for _, item := range page.Segment.BlobItems {
-			result.items = append(result.items, blobItem{
-				name:          derefString(item.Name),
-				contentLength: derefInt64(item.Properties.ContentLength),
-				lastModified:  derefTime(item.Properties.LastModified),
-				metadata:      item.Metadata,
-			})
-		}
-		for _, p := range page.Segment.BlobPrefixes {
-			result.prefixes = append(result.prefixes, derefString(p.Name))
-		}
-		if page.NextMarker != nil && *page.NextMarker != "" {
-			result.nextMarker = *page.NextMarker
-		}
+	for _, item := range page.Segment.BlobItems {
+		result.items = append(result.items, toBlobItem(item))
+	}
+	if page.NextMarker != nil && *page.NextMarker != "" {
+		result.nextMarker = *page.NextMarker
 	}
 	return result, nil
+}
+
+func (c *sdkClient) listBlobsHierarchy(ctx context.Context, ctr, prefix, delimiter string, maxResults int32, marker string) (listBlobsResult, error) {
+	opts := &container.ListBlobsHierarchyOptions{
+		MaxResults: &maxResults,
+	}
+	if prefix != "" {
+		opts.Prefix = &prefix
+	}
+	if marker != "" {
+		opts.Marker = &marker
+	}
+
+	pager := c.containerClient(ctr).NewListBlobsHierarchyPager(delimiter, opts)
+	if !pager.More() {
+		return listBlobsResult{}, nil
+	}
+
+	page, err := pager.NextPage(ctx)
+	if err != nil {
+		return listBlobsResult{}, err
+	}
+
+	var result listBlobsResult
+	for _, item := range page.Segment.BlobItems {
+		result.items = append(result.items, toBlobItem(item))
+	}
+	for _, p := range page.Segment.BlobPrefixes {
+		result.prefixes = append(result.prefixes, derefString(p.Name))
+	}
+	if page.NextMarker != nil && *page.NextMarker != "" {
+		result.nextMarker = *page.NextMarker
+	}
+	return result, nil
+}
+
+func toBlobItem(item *container.BlobItem) blobItem {
+	return blobItem{
+		name:          derefString(item.Name),
+		contentLength: derefInt64(item.Properties.ContentLength),
+		lastModified:  derefTime(item.Properties.LastModified),
+		metadata:      item.Metadata,
+	}
 }
 
 func (c *sdkClient) signedURL(ctr, blobName string, method string, expiry time.Time) (string, error) {
@@ -211,7 +211,7 @@ func (c *sdkClient) signedURL(ctr, blobName string, method string, expiry time.T
 		BlobName:      blobName,
 	}.SignWithSharedKey(c.sharedKey)
 	if err != nil {
-		return "", fmt.Errorf("azure: sign SAS: %w", err)
+		return "", fmt.Errorf("azblob: sign SAS: %w", err)
 	}
 
 	return fmt.Sprintf("%s%s/%s?%s", c.client.URL(), ctr, blobName, qp.Encode()), nil

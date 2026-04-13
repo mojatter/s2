@@ -1,4 +1,4 @@
-package azure
+package azblob
 
 import (
 	"bytes"
@@ -28,24 +28,24 @@ type mockBlob struct {
 	metadata  map[string]*string
 }
 
-type mockAzureClient struct {
+type mockAzblobClient struct {
 	mu      sync.RWMutex
 	blobs   map[string]*mockBlob // keyed by "container/key"
 	svcURL  string
 }
 
-func newMockAzureClient() *mockAzureClient {
-	return &mockAzureClient{
+func newMockAzblobClient() *mockAzblobClient {
+	return &mockAzblobClient{
 		blobs:  make(map[string]*mockBlob),
 		svcURL: "https://mockaccount.blob.core.windows.net/",
 	}
 }
 
-func (m *mockAzureClient) blobKey(container, key string) string {
+func (m *mockAzblobClient) blobKey(container, key string) string {
 	return container + "/" + key
 }
 
-func (m *mockAzureClient) put(container, key string, body []byte, metadata map[string]*string) {
+func (m *mockAzblobClient) put(container, key string, body []byte, metadata map[string]*string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -58,7 +58,7 @@ func (m *mockAzureClient) put(container, key string, body []byte, metadata map[s
 	}
 }
 
-func (m *mockAzureClient) get(container, key string) (*mockBlob, bool) {
+func (m *mockAzblobClient) get(container, key string) (*mockBlob, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -66,18 +66,18 @@ func (m *mockAzureClient) get(container, key string) (*mockBlob, bool) {
 	return b, ok
 }
 
-func (m *mockAzureClient) del(container, key string) {
+func (m *mockAzblobClient) del(container, key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	delete(m.blobs, m.blobKey(container, key))
 }
 
-func (m *mockAzureClient) serviceURL() string {
+func (m *mockAzblobClient) serviceURL() string {
 	return m.svcURL
 }
 
-func (m *mockAzureClient) getProperties(_ context.Context, container, blobName string) (blobProps, error) {
+func (m *mockAzblobClient) getProperties(_ context.Context, container, blobName string) (blobProps, error) {
 	b, ok := m.get(container, blobName)
 	if !ok {
 		return blobProps{}, newBlobNotFoundError()
@@ -89,7 +89,7 @@ func (m *mockAzureClient) getProperties(_ context.Context, container, blobName s
 	}, nil
 }
 
-func (m *mockAzureClient) downloadStream(_ context.Context, container, blobName string, offset, count int64) (io.ReadCloser, error) {
+func (m *mockAzblobClient) downloadStream(_ context.Context, container, blobName string, offset, count int64) (io.ReadCloser, error) {
 	b, ok := m.get(container, blobName)
 	if !ok {
 		return nil, newBlobNotFoundError()
@@ -105,7 +105,7 @@ func (m *mockAzureClient) downloadStream(_ context.Context, container, blobName 
 	return io.NopCloser(bytes.NewReader(body)), nil
 }
 
-func (m *mockAzureClient) upload(_ context.Context, container, blobName string, body io.Reader, metadata map[string]*string) error {
+func (m *mockAzblobClient) upload(_ context.Context, container, blobName string, body io.Reader, metadata map[string]*string) error {
 	data, err := io.ReadAll(body)
 	if err != nil {
 		return err
@@ -114,7 +114,7 @@ func (m *mockAzureClient) upload(_ context.Context, container, blobName string, 
 	return nil
 }
 
-func (m *mockAzureClient) deleteBlob(_ context.Context, container, blobName string) error {
+func (m *mockAzblobClient) deleteBlob(_ context.Context, container, blobName string) error {
 	_, ok := m.get(container, blobName)
 	if !ok {
 		return newBlobNotFoundError()
@@ -123,7 +123,7 @@ func (m *mockAzureClient) deleteBlob(_ context.Context, container, blobName stri
 	return nil
 }
 
-func (m *mockAzureClient) setMetadata(_ context.Context, container, blobName string, metadata map[string]*string) error {
+func (m *mockAzblobClient) setMetadata(_ context.Context, container, blobName string, metadata map[string]*string) error {
 	b, ok := m.get(container, blobName)
 	if !ok {
 		return newBlobNotFoundError()
@@ -132,7 +132,7 @@ func (m *mockAzureClient) setMetadata(_ context.Context, container, blobName str
 	return nil
 }
 
-func (m *mockAzureClient) copyBlob(_ context.Context, container, src, dst string) error {
+func (m *mockAzblobClient) copyBlob(_ context.Context, container, src, dst string) error {
 	b, ok := m.get(container, src)
 	if !ok {
 		return newBlobNotFoundError()
@@ -151,7 +151,15 @@ func (m *mockAzureClient) copyBlob(_ context.Context, container, src, dst string
 	return nil
 }
 
-func (m *mockAzureClient) listBlobs(_ context.Context, container, prefix, delimiter string, maxResults int32, marker string) (listBlobsResult, error) {
+func (m *mockAzblobClient) listBlobs(_ context.Context, ctr, prefix string, maxResults int32, marker string) (listBlobsResult, error) {
+	return m.doList(ctr, prefix, "", maxResults, marker), nil
+}
+
+func (m *mockAzblobClient) listBlobsHierarchy(_ context.Context, ctr, prefix, delimiter string, maxResults int32, marker string) (listBlobsResult, error) {
+	return m.doList(ctr, prefix, delimiter, maxResults, marker), nil
+}
+
+func (m *mockAzblobClient) doList(ctr, prefix, delimiter string, maxResults int32, marker string) listBlobsResult {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -166,7 +174,7 @@ func (m *mockAzureClient) listBlobs(_ context.Context, container, prefix, delimi
 
 	for _, objPath := range keys {
 		b := m.blobs[objPath]
-		if b.container != container {
+		if b.container != ctr {
 			continue
 		}
 		if !strings.HasPrefix(b.key, prefix) {
@@ -201,10 +209,10 @@ func (m *mockAzureClient) listBlobs(_ context.Context, container, prefix, delimi
 			metadata:      b.metadata,
 		})
 	}
-	return result, nil
+	return result
 }
 
-func (m *mockAzureClient) signedURL(container, blobName string, _ string, _ time.Time) (string, error) {
+func (m *mockAzblobClient) signedURL(container, blobName string, _ string, _ time.Time) (string, error) {
 	return fmt.Sprintf("https://mockaccount.blob.core.windows.net/%s/%s?signed", container, blobName), nil
 }
 
@@ -224,8 +232,8 @@ func TestStorageTestSuite(t *testing.T) {
 	suite.Run(t, &StorageTestSuite{})
 }
 
-func (s *StorageTestSuite) testMockStorage() (*mockAzureClient, s2.Storage) {
-	m := newMockAzureClient()
+func (s *StorageTestSuite) testMockStorage() (*mockAzblobClient, s2.Storage) {
+	m := newMockAzblobClient()
 	files := map[string][]byte{
 		"a.txt":     []byte("a"),
 		"b.txt":     []byte("b"),
@@ -235,7 +243,7 @@ func (s *StorageTestSuite) testMockStorage() (*mockAzureClient, s2.Storage) {
 	for key, b := range files {
 		m.put("mycontainer", key, b, nil)
 	}
-	return m, &azureStorage{
+	return m, &azblobStorage{
 		client:    m,
 		container: "mycontainer",
 	}
@@ -249,9 +257,9 @@ func (s *StorageTestSuite) TestNewStorageError() {
 
 	s.Run("no account name or connection string", func() {
 		_, err := NewStorage(context.Background(), s2.Config{
-			Type:  s2.TypeAzure,
+			Type:  s2.TypeAzblob,
 			Root:  "my-container",
-			Azure: &s2.AzureConfig{},
+			Azblob: &s2.AzblobConfig{},
 		})
 		s.Require().ErrorIs(err, ErrRequiredAccountName)
 	})
@@ -267,9 +275,9 @@ func (s *StorageTestSuite) TestNewStorage() {
 		{
 			caseName: "container only",
 			cfg: s2.Config{
-				Type:  s2.TypeAzure,
+				Type:  s2.TypeAzblob,
 				Root:  "my-container",
-				Azure: &s2.AzureConfig{AccountName: "test", AccountKey: "dGVzdA=="},
+				Azblob: &s2.AzblobConfig{AccountName: "test", AccountKey: "dGVzdA=="},
 			},
 			wantContainer: "my-container",
 			wantPrefix:    "",
@@ -277,9 +285,9 @@ func (s *StorageTestSuite) TestNewStorage() {
 		{
 			caseName: "container with prefix",
 			cfg: s2.Config{
-				Type:  s2.TypeAzure,
+				Type:  s2.TypeAzblob,
 				Root:  "my-container/some/prefix",
-				Azure: &s2.AzureConfig{AccountName: "test", AccountKey: "dGVzdA=="},
+				Azblob: &s2.AzblobConfig{AccountName: "test", AccountKey: "dGVzdA=="},
 			},
 			wantContainer: "my-container",
 			wantPrefix:    "some/prefix",
@@ -287,9 +295,9 @@ func (s *StorageTestSuite) TestNewStorage() {
 		{
 			caseName: "root with slashes trimmed",
 			cfg: s2.Config{
-				Type:  s2.TypeAzure,
+				Type:  s2.TypeAzblob,
 				Root:  "/my-container/pfx/",
-				Azure: &s2.AzureConfig{AccountName: "test", AccountKey: "dGVzdA=="},
+				Azblob: &s2.AzblobConfig{AccountName: "test", AccountKey: "dGVzdA=="},
 			},
 			wantContainer: "my-container",
 			wantPrefix:    "pfx",
@@ -301,7 +309,7 @@ func (s *StorageTestSuite) TestNewStorage() {
 			strg, err := NewStorage(context.Background(), tc.cfg)
 			s.Require().NoError(err)
 
-			st := strg.(*azureStorage)
+			st := strg.(*azblobStorage)
 			s.Equal(tc.wantContainer, st.container)
 			s.Equal(tc.wantPrefix, st.prefix)
 			s.NotNil(st.client)
@@ -355,7 +363,7 @@ func (s *StorageTestSuite) TestS2TestPutMetadata() {
 
 func (s *StorageTestSuite) TestType() {
 	_, strg := s.testMockStorage()
-	s.Equal(s2.TypeAzure, strg.Type())
+	s.Equal(s2.TypeAzblob, strg.Type())
 }
 
 func (s *StorageTestSuite) TestGet() {
@@ -396,7 +404,7 @@ func (s *StorageTestSuite) TestGet() {
 		})
 	}
 	s.Run("open-error", func() {
-		m := newMockAzureClient()
+		m := newMockAzblobClient()
 		obj := &object{
 			client:    m,
 			container: "mycontainer",
@@ -463,7 +471,7 @@ func (s *StorageTestSuite) TestSub() {
 
 	sub, err := strg.Sub(ctx, "cc")
 	s.Require().NoError(err)
-	s.Equal(s2.TypeAzure, sub.Type())
+	s.Equal(s2.TypeAzblob, sub.Type())
 
 	res, err := sub.List(ctx, s2.ListOptions{Limit: 10, Recursive: true})
 	s.Require().NoError(err)

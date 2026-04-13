@@ -1,4 +1,4 @@
-package azure
+package azblob
 
 import (
 	"io"
@@ -11,7 +11,7 @@ import (
 
 type ObjectTestSuite struct {
 	suite.Suite
-	client *mockAzureClient
+	client *mockAzblobClient
 }
 
 func TestObjectTestSuite(t *testing.T) {
@@ -19,7 +19,7 @@ func TestObjectTestSuite(t *testing.T) {
 }
 
 func (s *ObjectTestSuite) SetupTest() {
-	s.client = newMockAzureClient()
+	s.client = newMockAzblobClient()
 	s.client.put("my-container", "test.txt", []byte("hello"), nil)
 }
 

@@ -1,4 +1,4 @@
-package azure
+package azblob
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 )
 
 type object struct {
-	client    azureClient
+	client    azblobClient
 	container string
 	prefix    string
 	name      string
