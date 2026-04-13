@@ -187,7 +187,7 @@ func TestStorageGetPut(ctx context.Context, strg s2.Storage) error {
 	name := "s2test-getput.txt"
 	body := []byte("s2test content")
 	obj := s2.NewObjectBytes(name, body)
-	obj.Metadata().Set("test-key", "test-val")
+	obj.Metadata().Set("testkey", "test-val")
 
 	if err := strg.Put(ctx, obj); err != nil {
 		return fmt.Errorf("Put(%q) failed: %w", name, err)
@@ -217,11 +217,11 @@ func TestStorageGetPut(ctx context.Context, strg s2.Storage) error {
 		errorf("body = %q, want %q", string(b), string(body))
 	}
 
-	v, ok := got.Metadata().Get("test-key")
+	v, ok := got.Metadata().Get("testkey")
 	if !ok {
-		errorf("metadata key %q not found", "test-key")
+		errorf("metadata key %q not found", "testkey")
 	} else if v != "test-val" {
-		errorf("metadata %q = %q, want %q", "test-key", v, "test-val")
+		errorf("metadata %q = %q, want %q", "testkey", v, "test-val")
 	}
 
 	if len(errs) > 0 {

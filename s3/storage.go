@@ -174,8 +174,7 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 		Key:    aws.String(path.Join(s.prefix, name)),
 	})
 	if err != nil {
-		var noSuchKeyErr *s3types.NoSuchKey
-		if errors.As(err, &noSuchKeyErr) {
+		if isNotFoundErr(err) {
 			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, name)
 		}
 		return nil, fmt.Errorf("failed to get object: %w", err)
