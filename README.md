@@ -125,6 +125,16 @@ The bind-mounted directory is recognized as a bucket automatically — no `S2_SE
 go get github.com/mojatter/s2
 ```
 
+Cloud backends live in separate modules — install only what you need:
+
+```sh
+go get github.com/mojatter/s2/s3     # AWS S3
+go get github.com/mojatter/s2/gcs    # Google Cloud Storage
+go get github.com/mojatter/s2/azblob # Azure Blob Storage
+```
+
+> **Note:** If your code already imports a backend package (e.g. `_ "github.com/mojatter/s2/s3"`), `go mod tidy` will add the required module automatically.
+
 To install the S2 server CLI:
 
 ```sh
@@ -156,7 +166,7 @@ Define your storage backends in a JSON config file:
 }
 ```
 
-Load and use them with `s2env`:
+Load and use them with `s2env` (`go get github.com/mojatter/s2/s2env`):
 
 ```go
 package main
@@ -285,13 +295,15 @@ The `s2test` package provides reusable assertion helpers (e.g. `s2test.TestStora
 
 ## Storage Backends
 
-| Type | Import | Description |
-|------|--------|-------------|
-| `osfs` | `github.com/mojatter/s2/fs` | Local filesystem storage |
-| `memfs` | `github.com/mojatter/s2/fs` | In-memory filesystem (great for testing; see notes below) |
-| `s3` | `github.com/mojatter/s2/s3` | AWS S3 (and any S3-compatible service) |
-| `gcs` | `github.com/mojatter/s2/gcs` | Google Cloud Storage |
-| `azblob` | `github.com/mojatter/s2/azblob` | Azure Blob Storage |
+Each cloud backend is a separate Go module with its own dependencies, so `go get github.com/mojatter/s2` alone does not pull in any cloud SDK.
+
+| Type | Import | Module |Description |
+|------|--------|--------|-------------|
+| `osfs` | `github.com/mojatter/s2/fs` | `github.com/mojatter/s2` | Local filesystem storage |
+| `memfs` | `github.com/mojatter/s2/fs` | `github.com/mojatter/s2` | In-memory filesystem (great for testing; see notes below) |
+| `s3` | `github.com/mojatter/s2/s3` | `github.com/mojatter/s2/s3` | AWS S3 (and any S3-compatible service) |
+| `gcs` | `github.com/mojatter/s2/gcs` | `github.com/mojatter/s2/gcs` | Google Cloud Storage |
+| `azblob` | `github.com/mojatter/s2/azblob` | `github.com/mojatter/s2/azblob` | Azure Blob Storage |
 
 Backends are registered via blank imports. Import only what you need:
 

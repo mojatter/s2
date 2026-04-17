@@ -8,6 +8,10 @@ build:
 .PHONY: test
 test:
 	go test -short ./...
+	@for dir in s3 gcs azblob s2env s2test; do \
+		echo "=== Testing $$dir ==="; \
+		(cd $$dir && go test -short ./...); \
+	done
 
 .PHONY: test-integration
 test-integration:

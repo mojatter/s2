@@ -8,6 +8,8 @@ on:
     paths:
       - 'go.mod'
       - 'go.sum'
+      - '*/go.mod'
+      - '*/go.sum'
       - '.github/workflows/govulncheck.yaml'
 
 jobs:
@@ -15,7 +17,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       -
-        name: Run govulncheck
-        uses: golang/govulncheck-action@v1
+        name: Checkout
+        uses: actions/checkout@v6
+      -
+        name: Set up Go
+        uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version: '1.25.9'
+      -
+        name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      -
+        name: Run govulncheck (root)
+        run: govulncheck ./...
+      -
+        name: Run govulncheck (submodules)
+        run: |
+          for dir in s3 gcs azblob s2env s2test; do
+            echo "=== govulncheck $dir ==="
+            (cd $dir && govulncheck ./...)
+          done

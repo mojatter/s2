@@ -22,7 +22,7 @@ jobs:
         name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
+          go-version-file: gcs/go.mod
       -
         name: Run go test
         run: |
@@ -33,3 +33,17 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.11.4
+      -
+        name: Test submodules
+        run: |
+          for dir in s3 gcs azblob s2env s2test; do
+            echo "=== Testing $dir ==="
+            (cd $dir && go mod tidy && go test -v ./...)
+          done
+      -
+        name: Lint submodules
+        run: |
+          for dir in s3 gcs azblob s2env s2test; do
+            echo "=== Linting $dir ==="
+            (cd $dir && golangci-lint run ./...)
+          done
