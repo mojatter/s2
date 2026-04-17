@@ -1,12 +1,14 @@
+// Package s2env loads JSON configuration files and initializes all storage
+// backends. Importing this package registers every built-in backend via
+// side-effect imports.
+//
+// The core types and functions now live in the parent s2 package.
+// This package re-exports them for backward compatibility.
 package s2env
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 
 	"github.com/mojatter/s2"
 	_ "github.com/mojatter/s2/azblob"
@@ -15,52 +17,31 @@ import (
 	_ "github.com/mojatter/s2/s3"
 )
 
-// Configs is a map of logical names to s2.Config objects.
-type Configs map[string]s2.Config
+// Configs is an alias for [s2.Configs].
+type Configs = s2.Configs
 
-// Storages is a map of logical names to s2.Storage instances.
-type Storages map[string]s2.Storage
+// Storages is an alias for [s2.Storages].
+type Storages = s2.Storages
 
 // LoadConfigs parses JSON formatted data from the specified io.Reader into Configs.
+//
+// Deprecated: Use [s2.LoadConfigs] instead.
 func LoadConfigs(r io.Reader) (Configs, error) {
-	var c Configs
-	if err := json.NewDecoder(r).Decode(&c); err != nil {
-		return nil, fmt.Errorf("decode configs: %w", err)
-	}
-	return c, nil
+	return s2.LoadConfigs(r)
 }
 
 // LoadConfigsFile reads the file at the given path and parses it as a JSON format
 // into Configs.
+//
+// Deprecated: Use [s2.LoadConfigsFile] instead.
 func LoadConfigsFile(filename string) (Configs, error) {
-	f, err := os.Open(filepath.Clean(filename))
-	if err != nil {
-		return nil, fmt.Errorf("open config file: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-	return LoadConfigs(f)
-}
-
-// Storages iterates over the parsed configs, invokes s2.NewStorage for each,
-// and returns a new Configs map representing the initialized storage environments.
-func (c Configs) Storages(ctx context.Context) (Storages, error) {
-	storages := make(Storages, len(c))
-	for name, cfg := range c {
-		strg, err := s2.NewStorage(ctx, cfg)
-		if err != nil {
-			return nil, err
-		}
-		storages[name] = strg
-	}
-	return storages, nil
+	return s2.LoadConfigsFile(filename)
 }
 
 // Load helps to simplify loading the Configs from a specific JSON file and
 // fully initializing all nested Storage instances into the resulting Storages structure.
+//
+// Deprecated: Use [s2.Load] instead.
 func Load(ctx context.Context, filename string) (Storages, error) {
-	c, err := LoadConfigsFile(filename)
-	if err != nil {
-		return nil, err
-	}
-	return c.Storages(ctx)
+	return s2.Load(ctx, filename)
 }
