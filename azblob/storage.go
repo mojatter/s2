@@ -13,7 +13,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 
 	"github.com/mojatter/s2"
-	"github.com/mojatter/s2/internal/numconv"
 )
 
 // ErrRequiredConfigRoot is kept for backwards compatibility.
@@ -156,7 +155,7 @@ func (s *azblobStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListR
 			container: s.container,
 			prefix:    s.prefix,
 			name:      name,
-			length:    numconv.MustUint64(item.contentLength),
+			length:    s2.MustUint64(item.contentLength),
 			modified:  item.lastModified,
 			metadata:  s2.Metadata(fromPtrMetadata(item.metadata)),
 		})
@@ -180,7 +179,7 @@ func (s *azblobStorage) Get(ctx context.Context, name string) (s2.Object, error)
 		container: s.container,
 		prefix:    s.prefix,
 		name:      name,
-		length:    numconv.MustUint64(props.contentLength),
+		length:    s2.MustUint64(props.contentLength),
 		modified:  props.lastModified,
 		metadata:  s2.Metadata(fromPtrMetadata(props.metadata)),
 	}, nil

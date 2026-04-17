@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/mojatter/s2"
-	"github.com/mojatter/s2/internal/numconv"
 	"github.com/mojatter/s2/server"
 	"github.com/mojatter/s2/server/middleware"
 )
@@ -149,7 +148,7 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	}
 
 	key := path.Join(prefix, header.Filename)
-	obj := s2.NewObjectReader(key, file, numconv.MustUint64(header.Size))
+	obj := s2.NewObjectReader(key, file, s2.MustUint64(header.Size))
 	if err := strg.Put(ctx, obj); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

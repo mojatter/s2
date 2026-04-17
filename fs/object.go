@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/mojatter/s2"
-	"github.com/mojatter/s2/internal/numconv"
 	"github.com/mojatter/wfs"
 )
 
@@ -27,7 +26,7 @@ func newObjectFileInfo(fsys fs.FS, name string, info fs.FileInfo) *object {
 	return &object{
 		fsys:         fsys,
 		name:         name,
-		length:       numconv.MustUint64(info.Size()),
+		length:       s2.MustUint64(info.Size()),
 		lastModified: info.ModTime(),
 	}
 }
@@ -73,22 +72,22 @@ func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
 		return rc, nil
 	}
 	if seeker, ok := rc.(io.ReadSeeker); ok {
-		if _, err := seeker.Seek(numconv.MustInt64(offset), io.SeekStart); err != nil {
+		if _, err := seeker.Seek(s2.MustInt64(offset), io.SeekStart); err != nil {
 			_ = rc.Close()
 			return nil, err
 		}
 		return &limitReadCloser{
-			Reader: io.LimitReader(seeker, numconv.MustInt64(length)),
+			Reader: io.LimitReader(seeker, s2.MustInt64(length)),
 			Closer: rc,
 		}, nil
 	}
 	// Fallback for non-seeker
-	if _, err := io.CopyN(io.Discard, rc, numconv.MustInt64(offset)); err != nil {
+	if _, err := io.CopyN(io.Discard, rc, s2.MustInt64(offset)); err != nil {
 		_ = rc.Close()
 		return nil, err
 	}
 	return &limitReadCloser{
-		Reader: io.LimitReader(rc, numconv.MustInt64(length)),
+		Reader: io.LimitReader(rc, s2.MustInt64(length)),
 		Closer: rc,
 	}, nil
 }
