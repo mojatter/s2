@@ -6,8 +6,8 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.4
-	github.com/mojatter/s2 v0.7.0
-	github.com/mojatter/s2/s2test v0.7.0
+	github.com/mojatter/s2 v0.5.1
+	github.com/mojatter/s2/s2test v0.8.0
 	github.com/stretchr/testify v1.11.1
 )
 
