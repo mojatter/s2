@@ -26,10 +26,26 @@ jobs:
       -
         name: Run go test
         run: |
-          go mod tidy
-          go test -v ./...
+          GOWORK=off go mod tidy
+          GOWORK=off go test -v ./...
       -
         name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.11.4
+        env:
+          GOWORK: "off"
+      -
+        name: Test submodules
+        run: |
+          for dir in s3 gcs azblob s2env s2test; do
+            echo "=== Testing $dir ==="
+            (cd $dir && GOWORK=off go mod tidy && GOWORK=off go test -v ./...)
+          done
+      -
+        name: Lint submodules
+        run: |
+          for dir in s3 gcs azblob s2env s2test; do
+            echo "=== Linting $dir ==="
+            (cd $dir && GOWORK=off golangci-lint run ./...)
+          done

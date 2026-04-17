@@ -7,7 +7,11 @@ build:
 
 .PHONY: test
 test:
-	go test -short ./...
+	GOWORK=off go test -short ./...
+	@for dir in s3 gcs azblob s2env s2test; do \
+		echo "=== Testing $$dir ==="; \
+		(cd $$dir && GOWORK=off go test -short ./...); \
+	done
 
 .PHONY: test-integration
 test-integration:
