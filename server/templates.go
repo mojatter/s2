@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mojatter/s2/internal/numconv"
+	"github.com/mojatter/s2"
 )
 
 //go:embed templates/*
@@ -150,7 +150,7 @@ func templateFuncs(cfg *Config) template.FuncMap {
 			if !previewableExts[ext] {
 				return false
 			}
-			if textPreviewExts[ext] && numconv.MustInt64(size) > cfg.MaxPreviewSize {
+			if textPreviewExts[ext] && s2.MustInt64(size) > cfg.MaxPreviewSize {
 				return false
 			}
 			return true

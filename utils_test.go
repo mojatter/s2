@@ -1,4 +1,4 @@
-package numconv
+package s2
 
 import (
 	"math"
@@ -40,6 +40,7 @@ func TestMustInt64Panic(t *testing.T) {
 					t.Errorf("MustInt64(%d) did not panic", tc.input)
 				}
 			}()
+
 			MustInt64(tc.input)
 		})
 	}
@@ -80,6 +81,7 @@ func TestMustUint64Panic(t *testing.T) {
 					t.Errorf("MustUint64(%d) did not panic", tc.input)
 				}
 			}()
+
 			MustUint64(tc.input)
 		})
 	}

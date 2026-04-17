@@ -14,7 +14,6 @@ import (
 	"google.golang.org/api/option"
 
 	"github.com/mojatter/s2"
-	"github.com/mojatter/s2/internal/numconv"
 )
 
 // ErrRequiredConfigRoot is kept for backwards compatibility.
@@ -131,7 +130,7 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 			bucket:       s.bucket,
 			prefix:       s.prefix,
 			name:         name,
-			length:       numconv.MustUint64(attrs.Size),
+			length:       s2.MustUint64(attrs.Size),
 			lastModified: attrs.Updated,
 			metadata:     s2.Metadata(attrs.Metadata),
 		})
@@ -150,7 +149,7 @@ func (s *gcsStorage) Get(ctx context.Context, name string) (s2.Object, error) {
 		bucket:       s.bucket,
 		prefix:       s.prefix,
 		name:         name,
-		length:       numconv.MustUint64(attrs.Size),
+		length:       s2.MustUint64(attrs.Size),
 		lastModified: attrs.Updated,
 		metadata:     s2.Metadata(attrs.Metadata),
 	}, nil

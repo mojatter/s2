@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/mojatter/s2"
-	"github.com/mojatter/s2/internal/numconv"
 )
 
 type object struct {
@@ -33,7 +32,7 @@ func (o *object) Open() (io.ReadCloser, error) {
 }
 
 func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
-	rc, err := o.client.downloadStream(context.Background(), o.container, o.key(), numconv.MustInt64(offset), numconv.MustInt64(length))
+	rc, err := o.client.downloadStream(context.Background(), o.container, o.key(), s2.MustInt64(offset), s2.MustInt64(length))
 	if err != nil {
 		return nil, mapNotExist(err, o.name)
 	}

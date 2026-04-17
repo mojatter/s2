@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/mojatter/s2"
-	"github.com/mojatter/s2/internal/numconv"
 	"github.com/mojatter/s2/server"
 	"github.com/mojatter/s2/server/middleware"
 )
@@ -366,7 +365,7 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 			contentLength = n
 		}
 	}
-	obj := s2.NewObjectReader(key, io.NopCloser(body), numconv.MustUint64(contentLength))
+	obj := s2.NewObjectReader(key, io.NopCloser(body), s2.MustUint64(contentLength))
 
 	if err := strg.Put(ctx, obj); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)

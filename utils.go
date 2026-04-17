@@ -1,11 +1,4 @@
-// Package numconv contains internal helpers for converting between Go's
-// signed and unsigned integer types when dealing with stdlib APIs that
-// disagree on signedness (notably os.FileInfo.Size and io.Seeker offsets).
-//
-// These helpers panic on overflow rather than silently truncating; they
-// are intended for paths where the input cannot legitimately exceed the
-// destination range, so a panic indicates a programmer error.
-package numconv
+package s2
 
 import (
 	"fmt"

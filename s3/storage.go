@@ -15,7 +15,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/mojatter/s2"
-	"github.com/mojatter/s2/internal/numconv"
 )
 
 // ErrRequiredConfigRoot is kept for backwards compatibility.
@@ -160,7 +159,7 @@ func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult,
 			bucket:       s.bucket,
 			prefix:       s.prefix,
 			name:         key,
-			length:       numconv.MustUint64(aws.ToInt64(c.Size)),
+			length:       s2.MustUint64(aws.ToInt64(c.Size)),
 			lastModified: aws.ToTime(c.LastModified),
 		})
 	}
@@ -186,7 +185,7 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 		bucket:       s.bucket,
 		prefix:       s.prefix,
 		name:         name,
-		length:       numconv.MustUint64(aws.ToInt64(params.ContentLength)),
+		length:       s2.MustUint64(aws.ToInt64(params.ContentLength)),
 		lastModified: aws.ToTime(params.LastModified),
 		metadata:     s2.Metadata(params.Metadata),
 	}, nil
@@ -276,7 +275,7 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(path.Join(s.prefix, obj.Name())),
 		Body:          body,
-		ContentLength: aws.Int64(numconv.MustInt64(obj.Length())),
+		ContentLength: aws.Int64(s2.MustInt64(obj.Length())),
 		Metadata:      obj.Metadata(),
 	})
 	return err
