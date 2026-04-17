@@ -29,11 +29,11 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
       -
         name: Run govulncheck (root)
-        run: GOWORK=off govulncheck ./...
+        run: govulncheck ./...
       -
         name: Run govulncheck (submodules)
         run: |
           for dir in s3 gcs azblob s2env s2test; do
             echo "=== govulncheck $dir ==="
-            (cd $dir && GOWORK=off govulncheck ./...)
+            (cd $dir && govulncheck ./...)
           done
