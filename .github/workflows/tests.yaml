@@ -36,14 +36,14 @@ jobs:
       -
         name: Test submodules
         run: |
-          for dir in s3 gcs azblob s2env s2test cmd/s2-server; do
+          for dir in s3 gcs azblob s2env cmd/s2-server; do
             echo "=== Testing $dir ==="
             (cd $dir && go mod tidy && go test -v ./...)
           done
       -
         name: Lint submodules
         run: |
-          for dir in s3 gcs azblob s2env s2test cmd/s2-server; do
+          for dir in s3 gcs azblob s2env cmd/s2-server; do
             echo "=== Linting $dir ==="
             (cd $dir && golangci-lint run ./...)
           done

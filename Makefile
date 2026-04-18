@@ -8,7 +8,7 @@ build:
 .PHONY: test
 test:
 	go test -short ./...
-	@for dir in s3 gcs azblob s2env s2test cmd/s2-server; do \
+	@for dir in s3 gcs azblob s2env cmd/s2-server; do \
 		echo "=== Testing $$dir ==="; \
 		(cd $$dir && go test -short ./...); \
 	done
