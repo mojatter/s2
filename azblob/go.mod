@@ -7,7 +7,6 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.4
 	github.com/mojatter/s2 v0.5.1
-	github.com/mojatter/s2/s2test v0.8.0
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -27,7 +26,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace (
-	github.com/mojatter/s2 => ../
-	github.com/mojatter/s2/s2test => ../s2test
-)
+replace github.com/mojatter/s2 => ../
