@@ -405,7 +405,7 @@ Environment variables take precedence over the config file.
 
 ### Build tags
 
-The server supports `osfs` and `memfs` backends by default. To enable cloud backends, build with the corresponding tags:
+The server supports `osfs` and `memfs` backends by default. The official release binaries and Docker images include these two only. To enable cloud backends, install with the corresponding tags:
 
 ```sh
 # Single backend
@@ -415,7 +415,7 @@ go install -tags server_gcs github.com/mojatter/s2/cmd/s2-server@latest
 go install -tags server_s3,server_gcs,server_azblob github.com/mojatter/s2/cmd/s2-server@latest
 ```
 
-> **Note:** The official release binaries and Docker images include `osfs` and `memfs` only.
+The available tags are `server_s3`, `server_gcs`, `server_azblob`. Combine them with comma to enable multiple backends in one binary.
 
 ### Authentication
 

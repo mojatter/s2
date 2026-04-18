@@ -1,0 +1,10 @@
+go 1.25.0
+
+use (
+	.
+	./azblob
+	./cmd/s2-server
+	./gcs
+	./s2env
+	./s3
+)
