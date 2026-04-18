@@ -3,12 +3,12 @@ LDFLAGS := -s -w -X github.com/mojatter/s2/server.version=$(VERSION)
 
 .PHONY: build
 build:
-	go build -ldflags "$(LDFLAGS)" -o bin/s2-server ./cmd/s2-server
+	cd cmd/s2-server && go build -ldflags "$(LDFLAGS)" -o ../../bin/s2-server .
 
 .PHONY: test
 test:
 	go test -short ./...
-	@for dir in s3 gcs azblob s2env s2test; do \
+	@for dir in s3 gcs azblob s2env s2test cmd/s2-server; do \
 		echo "=== Testing $$dir ==="; \
 		(cd $$dir && go test -short ./...); \
 	done

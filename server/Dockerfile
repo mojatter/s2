@@ -1,12 +1,13 @@
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 WORKDIR /app
 # DefaultRoot is overridden via -ldflags so the Docker image defaults to
 # /var/lib/s2 while a bare "go install" binary keeps the friendlier
-# relative "data" default (see server/config.go).
+# relative "./data" default (see server/config.go).
 RUN --mount=target=. GOOS=linux CGO_ENABLED=0 \
+    cd cmd/s2-server && \
     go build \
       -ldflags "-s -w -X github.com/mojatter/s2/server.DefaultRoot=/var/lib/s2" \
-      -o /s2-server ./cmd/s2-server
+      -o /s2-server .
 
 FROM busybox AS init
 RUN mkdir -p /var/lib/s2

@@ -90,7 +90,7 @@ const (
 // a different default via linker flags, matching the same idiom used for
 // version injection:
 //
-//	go build -ldflags "-X github.com/mojatter/s2/server.DefaultRoot=/var/lib/s2" ./cmd/s2-server
+//	cd cmd/s2-server && go build -ldflags "-X github.com/mojatter/s2/server.DefaultRoot=/var/lib/s2" .
 //
 // This lets the stock "go install" binary default to a relative "data"
 // directory (so a new user can run s2-server in any directory and
