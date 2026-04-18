@@ -125,6 +125,14 @@ github.com/keybase/go-keychain v0.0.1 h1:way+bWYa6lDppZoZcgMbYsvC7GxljxrskdNInRt
 github.com/keybase/go-keychain v0.0.1/go.mod h1:PdEILRW3i9D8JcdM+FmY6RwkHGnhHxXwkPPMeUgOK1k=
 github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0SNc=
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
+github.com/mojatter/s2 v0.8.1 h1:JECnegwntZ631shlPyGtK8NvdJcYNPfMBme1RXjOOlE=
+github.com/mojatter/s2 v0.8.1/go.mod h1:El0cAilYejR+PXbKi18+tpZFsiGG8mkYMP0cap0iZ3Q=
+github.com/mojatter/s2/azblob v0.8.0 h1:0WdzjZNnmsmWMr0s3Ct0pR5z26tMU7y7GalFr+25qEw=
+github.com/mojatter/s2/azblob v0.8.0/go.mod h1:a16bgkqy0m2JVqiWOHAQMSZz0F5TDnbNGTIQ4L+7Uws=
+github.com/mojatter/s2/gcs v0.8.0 h1:5T6KAEC8azP60MX7qrlZdIDXOSEFk57hBpYwWkK+VFU=
+github.com/mojatter/s2/gcs v0.8.0/go.mod h1:Ap0AgNOlnCG1229TKNzZHkNEzlDhvtRwKw9kYPH96mw=
+github.com/mojatter/s2/s3 v0.8.0 h1:5PfFqzqfMoUAikKB8p2TPxYRd8k83e4mgfznlzerKbg=
+github.com/mojatter/s2/s3 v0.8.0/go.mod h1:7Aze6IAIuaOvv0mg3HleisgqMN12wpBbT0h11lnLG3U=
 github.com/mojatter/wfs v0.5.0 h1:ewXtdNbc94skw2ipDWBWbEwg+QTlUtJUd3ujSj1hN7w=
 github.com/mojatter/wfs v0.5.0/go.mod h1:PlxShpeTA90XFUWkWWi9DmXG7tgFd4v64hPDqrf1n7c=
 github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c h1:+mdjkGKdHQG3305AYmdv1U2eRNDiU2ErMBj1gwrq8eQ=
