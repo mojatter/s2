@@ -6,7 +6,7 @@ A drop-in replacement for MinIO in local development and CI environments.
 ## Quick Start
 
 ```sh
-docker run -p 9000:9000 -p 9001:9001 mojatter/s2-server
+docker run --rm -p 9000:9000 -p 9001:9001 mojatter/s2-server
 ```
 
 S2 serves the S3 API on `:9000` at the root path (same layout as MinIO), and the Web Console on `:9001`. Use any S3 client without extra configuration:
@@ -21,7 +21,7 @@ Access the Web Console at http://localhost:9001.
 ## Persistent Storage
 
 ```sh
-docker run -p 9000:9000 -p 9001:9001 -v /your/data:/var/lib/s2 mojatter/s2-server
+docker run --rm -p 9000:9000 -p 9001:9001 -v $(pwd)/data:/var/lib/s2 mojatter/s2-server
 ```
 
 ## docker-compose
@@ -58,7 +58,7 @@ services:
 Set `S2_SERVER_USER` and `S2_SERVER_PASSWORD` to enable authentication:
 
 ```sh
-docker run -p 9000:9000 -p 9001:9001 \
+docker run --rm -p 9000:9000 -p 9001:9001 \
   -e S2_SERVER_USER=myuser \
   -e S2_SERVER_PASSWORD=mypassword \
   mojatter/s2-server
