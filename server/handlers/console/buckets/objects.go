@@ -12,6 +12,7 @@ import (
 	"github.com/mojatter/s2/server/middleware"
 )
 
+// Breadcrumb represents a single path segment in the console navigation.
 type Breadcrumb struct {
 	Name   string
 	Prefix string
@@ -80,28 +81,26 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		parentPrefix = ""
 	}
 
-	data := struct {
-		BucketName    string
-		Objects       []s2.Object
-		Prefixes      []string
-		CurrentPrefix string
-		ParentPrefix  string
-		Breadcrumbs   []Breadcrumb
-		HasParent     bool
-		Search        string
-	}{
-		BucketName:    name,
-		Objects:       objs,
-		Prefixes:      prefixes,
-		CurrentPrefix: prefix,
-		ParentPrefix:  parentPrefix,
-		Breadcrumbs:   breadcrumbs,
-		HasParent:     prefix != "" && prefix != "/",
-		Search:        search,
+	data := map[string]any{
+		"BucketName":    name,
+		"Objects":       objs,
+		"Prefixes":      prefixes,
+		"CurrentPrefix": prefix,
+		"ParentPrefix":  parentPrefix,
+		"Breadcrumbs":   breadcrumbs,
+		"HasParent":     prefix != "" && prefix != "/",
+		"Search":        search,
+	}
+
+	if r.Header.Get("HX-Request") != "true" {
+		if err := s.RenderConsoleIndex(w, data); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
 	}
 
 	var buf bytes.Buffer
-	if err := s.Template.ExecuteTemplate(&buf, "buckets/objects.html", data); err != nil {
+	if err := s.Template.ExecuteTemplate(&buf, "console/buckets/objects.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -214,9 +213,8 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 }
 
 func init() {
-	server.RegisterConsoleHandleFunc("GET /buckets/{name}", middleware.BasicAuth(middleware.ServeIndex(handleObjects)))
+	server.RegisterConsoleHandleFunc("GET /buckets/{name}", middleware.BasicAuth(handleObjects))
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/folders", middleware.BasicAuth(handleCreateFolder))
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/upload", middleware.BasicAuth(handleUploadFile))
 	server.RegisterConsoleHandleFunc("DELETE /buckets/{name}/objects", middleware.BasicAuth(handleDeleteObject))
-	server.RegisterTemplate("buckets/objects.html")
 }

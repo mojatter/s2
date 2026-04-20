@@ -168,7 +168,7 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 
 	var buf bytes.Buffer
-	if err := s.Template.ExecuteTemplate(&buf, "buckets/preview.html", data); err != nil {
+	if err := s.Template.ExecuteTemplate(&buf, "console/buckets/preview.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
