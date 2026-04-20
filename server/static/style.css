@@ -635,12 +635,26 @@ tr:hover td {
   padding: 3rem;
 }
 
+/* Table controls row (search left, view-toggle right) */
+.table-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+  gap: 1rem;
+}
+
+.table-controls-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 /* View Toggle */
 .view-toggle {
   display: flex;
   gap: 0.25rem;
-  margin-bottom: 1rem;
-  justify-content: flex-end;
+  flex-shrink: 0;
 }
 
 .view-toggle-btn {
@@ -812,3 +826,55 @@ tr:hover td {
   border-bottom: none;
 }
 
+
+.search-form {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.search-input {
+  -webkit-appearance: none;
+  appearance: none;
+  box-sizing: border-box;
+  height: 34px;
+  line-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background-color: var(--surface);
+  color: var(--text);
+  font-size: 0.875rem;
+  width: 200px;
+  transition: border-color 0.2s;
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.search-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  background-color: rgba(59, 130, 246, 0.1);
+  color: var(--primary);
+  text-decoration: none;
+  font-size: 0.875rem;
+  white-space: nowrap;
+  transition: background-color 0.2s;
+}
+
+.search-chip:hover {
+  background-color: rgba(59, 130, 246, 0.2);
+}
+
+.search-chip span {
+  font-size: 0.75rem;
+  opacity: 0.7;
+}

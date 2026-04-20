@@ -84,18 +84,32 @@
       <input type="hidden" name="prefix" value="{{.CurrentPrefix}}">
       <input type="file" name="file" onchange="this.form.requestSubmit()">
     </form>
+
   </div>
 </div>
 
 
 <div class="main-view">
-  <div class="view-toggle">
-    <button class="view-toggle-btn active" onclick="setViewMode('list', this)" title="List View">
-      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-view-list"></use></svg>
-    </button>
+  <div class="table-controls">
+    <div class="table-controls-left">
+      <form hx-get="/buckets/{{.BucketName}}" hx-target="#main-content" hx-push-url="true" class="search-form">
+        <input type="hidden" name="prefix" value="{{.CurrentPrefix}}">
+        <input type="search" name="search" value="{{.Search}}" placeholder="Search by prefix..." class="search-input">
+      </form>
+      {{if .Search}}
+      <a href="/buckets/{{.BucketName}}?prefix={{.CurrentPrefix}}" hx-get="/buckets/{{.BucketName}}?prefix={{.CurrentPrefix}}" hx-target="#main-content" hx-push-url="true" class="search-chip" title="Clear search">
+        {{.Search}} <span>✕</span>
+      </a>
+      {{end}}
+    </div>
+    <div class="view-toggle">
+      <button class="view-toggle-btn active" onclick="setViewMode('list', this)" title="List View">
+        <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-view-list"></use></svg>
+      </button>
     <button class="view-toggle-btn" onclick="setViewMode('gallery', this)" title="Gallery View">
       <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-view-gallery"></use></svg>
     </button>
+    </div>
   </div>
 
   <div id="list-view" class="object-table-container">
@@ -155,7 +169,7 @@
               <span class="obj-icon">
                 <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-file"></use></svg>
               </span>
-              {{baseName .Name}}
+              {{if $.Search}}{{trimPrefix $.CurrentPrefix .Name}}{{else}}{{baseName .Name}}{{end}}
             </div>
           </td>
           <td>{{formatSize .Length}}</td>
@@ -232,7 +246,7 @@
             <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-image"></use></svg>
           </div>
         </div>
-        <span class="gallery-label">{{baseName .Name}}</span>
+        <span class="gallery-label">{{if $.Search}}{{trimPrefix $.CurrentPrefix .Name}}{{else}}{{baseName .Name}}{{end}}</span>
         <span class="gallery-size">{{formatSize .Length}}</span>
       </div>
       <div class="gallery-card-actions">
@@ -252,7 +266,7 @@
         <div class="gallery-file-icon">
           <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-file"></use></svg>
         </div>
-        <span class="gallery-label">{{baseName .Name}}</span>
+        <span class="gallery-label">{{if $.Search}}{{trimPrefix $.CurrentPrefix .Name}}{{else}}{{baseName .Name}}{{end}}</span>
         <span class="gallery-size">{{formatSize .Length}}</span>
       </div>
       <div class="gallery-card-actions">

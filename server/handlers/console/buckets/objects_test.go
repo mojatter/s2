@@ -48,70 +48,142 @@ func TestObjectsTestSuite(t *testing.T) {
 // --- GET /buckets/{name} ---
 
 func (s *ObjectsTestSuite) TestHandleObjects() {
-	s.Run("empty bucket", func() {
-		s.createBucket("empty")
+	testCases := []struct {
+		caseName        string
+		setup           func()
+		bucketName      string
+		url             string
+		htmx            bool
+		wantCode        int
+		wantContains    []string
+		wantNotContains []string
+		wantHeader      map[string]string
+	}{
+		{
+			caseName:     "empty bucket",
+			setup:        func() { s.createBucket("empty") },
+			bucketName:   "empty",
+			url:          "/buckets/empty",
+			htmx:         true,
+			wantCode:     http.StatusOK,
+			wantContains: []string{"This folder is empty"},
+		},
+		{
+			caseName:     "with objects",
+			setup:        func() { s.createBucket("files"); s.putObject("files", "readme.txt", "hello") },
+			bucketName:   "files",
+			url:          "/buckets/files",
+			htmx:         true,
+			wantCode:     http.StatusOK,
+			wantContains: []string{"readme.txt"},
+		},
+		{
+			caseName: "with prefix",
+			setup: func() {
+				s.createBucket("nested")
+				s.Require().NoError(s.server.Buckets.CreateFolder(context.Background(), "nested", "sub"))
+				s.putObject("nested", "sub/file.txt", "data")
+			},
+			bucketName:   "nested",
+			url:          "/buckets/nested?prefix=sub",
+			htmx:         true,
+			wantCode:     http.StatusOK,
+			wantContains: []string{"file.txt", "Parent Directory"},
+		},
+		{
+			caseName:   "nonexistent bucket",
+			setup:      func() {},
+			bucketName: "nope",
+			url:        "/buckets/nope",
+			htmx:       false,
+			wantCode:   http.StatusNotFound,
+		},
+		{
+			// search="logo" matches keys starting with "logo"
+			caseName: "search at root finds files recursively",
+			setup: func() {
+				s.createBucket("srch")
+				s.putObject("srch", "logo.png", "data")
+				s.putObject("srch", "logo/small.png", "data")
+				s.putObject("srch", "other.png", "data")
+			},
+			bucketName:      "srch",
+			url:             "/buckets/srch?search=logo",
+			htmx:            true,
+			wantCode:        http.StatusOK,
+			wantContains:    []string{"logo.png", "logo/small.png"},
+			wantNotContains: []string{"other.png"},
+		},
+		{
+			// prefix="a", search="s2" → listPrefix="a/s2"; b/s2* excluded
+			caseName: "search with prefix scopes results to prefix",
+			setup: func() {
+				s.createBucket("srchp")
+				s.putObject("srchp", "a/s2-foo.png", "data")
+				s.putObject("srchp", "a/s2/bar.png", "data")
+				s.putObject("srchp", "b/s2-baz.png", "data")
+			},
+			bucketName:      "srchp",
+			url:             "/buckets/srchp?prefix=a&search=s2",
+			htmx:            true,
+			wantCode:        http.StatusOK,
+			wantContains:    []string{"s2-foo.png", "s2/bar.png"},
+			wantNotContains: []string{"s2-baz.png"},
+		},
+		{
+			caseName:     "search with no matches shows empty state",
+			setup:        func() { s.createBucket("srchem"); s.putObject("srchem", "readme.txt", "data") },
+			bucketName:   "srchem",
+			url:          "/buckets/srchem?search=nomatch",
+			htmx:         true,
+			wantCode:     http.StatusOK,
+			wantContains: []string{"This folder is empty"},
+		},
+		{
+			caseName:     "search renders chip with search term",
+			setup:        func() { s.createBucket("srchc"); s.putObject("srchc", "doc.txt", "data") },
+			bucketName:   "srchc",
+			url:          "/buckets/srchc?search=doc",
+			htmx:         true,
+			wantCode:     http.StatusOK,
+			wantContains: []string{"search-chip"},
+		},
+		{
+			caseName:    "full page without HX-Request redirects to index",
+			setup:       func() { s.createBucket("full") },
+			bucketName:  "full",
+			url:         "/buckets/full",
+			htmx:        false,
+			wantCode:    http.StatusFound,
+			wantHeader:  map[string]string{"Location": "/"},
+		},
+	}
 
-		req := httptest.NewRequest("GET", "/buckets/empty", nil)
-		req.SetPathValue("name", "empty")
-		req.Header.Set("HX-Request", "true")
-		w := httptest.NewRecorder()
-		handleObjects(s.server, w, req)
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			tc.setup()
 
-		s.Equal(http.StatusOK, w.Code)
-		s.Contains(w.Body.String(), "This folder is empty")
-	})
+			req := httptest.NewRequest("GET", tc.url, nil)
+			req.SetPathValue("name", tc.bucketName)
+			if tc.htmx {
+				req.Header.Set("HX-Request", "true")
+			}
+			w := httptest.NewRecorder()
+			handleObjects(s.server, w, req)
 
-	s.Run("with objects", func() {
-		s.createBucket("files")
-		s.putObject("files", "readme.txt", "hello")
-
-		req := httptest.NewRequest("GET", "/buckets/files", nil)
-		req.SetPathValue("name", "files")
-		req.Header.Set("HX-Request", "true")
-		w := httptest.NewRecorder()
-		handleObjects(s.server, w, req)
-
-		s.Equal(http.StatusOK, w.Code)
-		s.Contains(w.Body.String(), "readme.txt")
-	})
-
-	s.Run("with prefix", func() {
-		s.createBucket("nested")
-		s.server.Buckets.CreateFolder(context.Background(), "nested", "sub")
-		s.putObject("nested", "sub/file.txt", "data")
-
-		req := httptest.NewRequest("GET", "/buckets/nested?prefix=sub", nil)
-		req.SetPathValue("name", "nested")
-		req.Header.Set("HX-Request", "true")
-		w := httptest.NewRecorder()
-		handleObjects(s.server, w, req)
-
-		s.Equal(http.StatusOK, w.Code)
-		body := w.Body.String()
-		s.Contains(body, "file.txt")
-		s.Contains(body, "Parent Directory")
-	})
-
-	s.Run("nonexistent bucket", func() {
-		req := httptest.NewRequest("GET", "/buckets/nope", nil)
-		req.SetPathValue("name", "nope")
-		w := httptest.NewRecorder()
-		handleObjects(s.server, w, req)
-
-		s.Equal(http.StatusNotFound, w.Code)
-	})
-
-	s.Run("full page without HX-Request redirects to index", func() {
-		s.createBucket("full")
-
-		req := httptest.NewRequest("GET", "/buckets/full", nil)
-		req.SetPathValue("name", "full")
-		w := httptest.NewRecorder()
-		handleObjects(s.server, w, req)
-
-		s.Equal(http.StatusFound, w.Code)
-		s.Equal("/", w.Header().Get("Location"))
-	})
+			s.Equal(tc.wantCode, w.Code)
+			body := w.Body.String()
+			for _, want := range tc.wantContains {
+				s.Contains(body, want)
+			}
+			for _, notWant := range tc.wantNotContains {
+				s.NotContains(body, notWant)
+			}
+			for k, v := range tc.wantHeader {
+				s.Equal(v, w.Header().Get(k))
+			}
+		})
+	}
 }
 
 // --- POST /buckets/{name}/folders ---
