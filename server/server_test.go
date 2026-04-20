@@ -415,7 +415,7 @@ func TestRenderConsoleIndex(t *testing.T) {
 			}
 
 			w := httptest.NewRecorder()
-			require.NoError(t, srv.RenderConsoleIndex(w))
+			require.NoError(t, srv.RenderConsoleIndex(w, nil))
 
 			body := w.Body.String()
 			for _, want := range tc.wantContains {

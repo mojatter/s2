@@ -50,7 +50,7 @@
 
     <main class="content">
       <div id="main-content">
-        {{template "console/empty.html" .}}
+        {{if .BucketName}}{{template "console/buckets/objects.html" .}}{{else}}{{template "console/empty.html" .}}{{end}}
       </div>
 
       <div id="loading" class="htmx-indicator">
@@ -63,14 +63,6 @@
   </dialog>
 
   {{template "scripts:console/buckets/objects.html" .}}
-  <script>
-    document.addEventListener('DOMContentLoaded', function () {
-      var path = window.location.pathname + window.location.search;
-      if (path !== '/') {
-        htmx.ajax('GET', path, { target: '#main-content', swap: 'innerHTML' });
-      }
-    });
-  </script>
 </body>
 
 </html>

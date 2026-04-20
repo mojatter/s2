@@ -263,23 +263,29 @@ func handleHealthz(_ *Server, w http.ResponseWriter, _ *http.Request) {
 }
 
 
-// Start starts the S3 API listener and, when cfg.ConsoleListen is set and
-// there are console routes registered, the Web Console listener. Both
-// are shut down gracefully when ctx is cancelled or either listener dies.
-// RenderConsoleIndex renders the full index.html page with the current bucket list into w.
-func (s *Server) RenderConsoleIndex(w http.ResponseWriter) error {
+// RenderConsoleIndex renders the full index.html page into w. The
+// current bucket list is added to data under the "Buckets" key before
+// template execution; data may be nil.
+func (s *Server) RenderConsoleIndex(w http.ResponseWriter, data map[string]any) error {
 	names, err := s.Buckets.Names()
 	if err != nil {
 		return err
 	}
+	if data == nil {
+		data = map[string]any{}
+	}
+	data["Buckets"] = names
 	var buf bytes.Buffer
-	if err := s.Template.ExecuteTemplate(&buf, "console/index.html", struct{ Buckets []string }{names}); err != nil {
+	if err := s.Template.ExecuteTemplate(&buf, "console/index.html", data); err != nil {
 		return err
 	}
 	_, _ = buf.WriteTo(w)
 	return nil
 }
 
+// Start starts the S3 API listener and, when cfg.ConsoleListen is set and
+// there are console routes registered, the Web Console listener. Both
+// are shut down gracefully when ctx is cancelled or either listener dies.
 func (s *Server) Start(ctx context.Context) error {
 	s3srv := &http.Server{
 		Addr:              s.Config.Listen,

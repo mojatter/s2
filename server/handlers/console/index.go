@@ -9,7 +9,7 @@ import (
 )
 
 func handleIndex(s *server.Server, w http.ResponseWriter, _ *http.Request) {
-	if err := s.RenderConsoleIndex(w); err != nil {
+	if err := s.RenderConsoleIndex(w, nil); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
