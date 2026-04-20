@@ -101,7 +101,7 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 
 	var buf bytes.Buffer
-	if err := s.Template.ExecuteTemplate(&buf, "buckets/objects.html", data); err != nil {
+	if err := s.Template.ExecuteTemplate(&buf, "console/buckets/objects.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -214,7 +214,7 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 }
 
 func init() {
-	server.RegisterConsoleHandleFunc("GET /buckets/{name}", middleware.BasicAuth(middleware.ServeIndex(handleObjects)))
+	server.RegisterConsoleHandleFunc("GET /buckets/{name}", middleware.BasicAuth(middleware.ServeConsoleIndex(handleObjects)))
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/folders", middleware.BasicAuth(handleCreateFolder))
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/upload", middleware.BasicAuth(handleUploadFile))
 	server.RegisterConsoleHandleFunc("DELETE /buckets/{name}/objects", middleware.BasicAuth(handleDeleteObject))

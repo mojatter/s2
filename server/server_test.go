@@ -386,7 +386,7 @@ func TestStart(t *testing.T) {
 	})
 }
 
-func TestRenderIndex(t *testing.T) {
+func TestRenderConsoleIndex(t *testing.T) {
 	testCases := []struct {
 		caseName     string
 		buckets      []string
@@ -415,7 +415,7 @@ func TestRenderIndex(t *testing.T) {
 			}
 
 			w := httptest.NewRecorder()
-			require.NoError(t, srv.RenderIndex(w))
+			require.NoError(t, srv.RenderConsoleIndex(w))
 
 			body := w.Body.String()
 			for _, want := range tc.wantContains {

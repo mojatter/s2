@@ -20,7 +20,7 @@ func newTestServer(t *testing.T) *server.Server {
 	return srv
 }
 
-func TestServeIndex(t *testing.T) {
+func TestServeConsoleIndex(t *testing.T) {
 	testCases := []struct {
 		caseName     string
 		htmx         bool
@@ -56,7 +56,7 @@ func TestServeIndex(t *testing.T) {
 				req.Header.Set("HX-Request", "true")
 			}
 			w := httptest.NewRecorder()
-			ServeIndex(next)(srv, w, req)
+			ServeConsoleIndex(next)(srv, w, req)
 
 			assert.Equal(t, tc.wantCode, w.Code)
 			assert.Equal(t, tc.handlerCalled, called)

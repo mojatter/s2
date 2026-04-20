@@ -9,7 +9,7 @@ import (
 )
 
 func handleIndex(s *server.Server, w http.ResponseWriter, _ *http.Request) {
-	if err := s.RenderIndex(w); err != nil {
+	if err := s.RenderConsoleIndex(w); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -49,7 +49,7 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 	data := struct{ Buckets []string }{Buckets: names}
 
 	var buf bytes.Buffer
-	if err := s.Template.ExecuteTemplate(&buf, "buckets/list.html", data); err != nil {
+	if err := s.Template.ExecuteTemplate(&buf, "console/buckets/list.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -57,7 +57,7 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 	// OOB swap to reset main content to empty state
 	buf.WriteString(`<div id="main-content" hx-swap-oob="innerHTML">`)
 
-	if err := s.Template.ExecuteTemplate(&buf, "empty.html", nil); err != nil {
+	if err := s.Template.ExecuteTemplate(&buf, "console/empty.html", nil); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -79,7 +79,7 @@ func renderBucketList(s *server.Server, w http.ResponseWriter) {
 	data := struct{ Buckets []string }{Buckets: names}
 
 	var buf bytes.Buffer
-	if err := s.Template.ExecuteTemplate(&buf, "buckets/list.html", data); err != nil {
+	if err := s.Template.ExecuteTemplate(&buf, "console/buckets/list.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

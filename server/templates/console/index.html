@@ -44,13 +44,13 @@
           <button type="submit">Create</button>
         </form>
 
-        {{template "buckets/list.html" .}}
+        {{template "console/buckets/list.html" .}}
       </div>
     </aside>
 
     <main class="content">
       <div id="main-content">
-        {{template "empty.html" .}}
+        {{template "console/empty.html" .}}
       </div>
 
       <div id="loading" class="htmx-indicator">
@@ -62,7 +62,7 @@
   <dialog id="preview-dialog" onclick="if(event.target===this)this.close()">
   </dialog>
 
-  {{template "scripts:buckets/objects.html" .}}
+  {{template "scripts:console/buckets/objects.html" .}}
   <script>
     document.addEventListener('DOMContentLoaded', function () {
       var path = window.location.pathname + window.location.search;
