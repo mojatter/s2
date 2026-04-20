@@ -63,6 +63,14 @@
   </dialog>
 
   {{template "scripts:buckets/objects.html" .}}
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      var path = window.location.pathname + window.location.search;
+      if (path !== '/') {
+        htmx.ajax('GET', path, { target: '#main-content', swap: 'innerHTML' });
+      }
+    });
+  </script>
 </body>
 
 </html>
