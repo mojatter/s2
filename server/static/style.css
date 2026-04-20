@@ -474,7 +474,8 @@ tr:hover td {
   gap: 0.5rem;
 }
 
-.actions-cell .btn-delete-sm {
+.actions-cell .btn-delete-sm,
+.gallery-card-actions .btn-delete-sm {
   opacity: 1;
 }
 
@@ -508,6 +509,9 @@ tr:hover td {
   max-height: 100vh;
   width: 100%;
   height: 100%;
+}
+
+#preview-dialog[open] {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -676,10 +680,31 @@ tr:hover td {
   border: 1px solid var(--border);
   border-radius: 12px;
   overflow: hidden;
-  cursor: pointer;
   transition: all 0.2s;
   text-decoration: none;
   color: var(--text);
+  position: relative;
+}
+
+.gallery-card-body {
+  display: block;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+}
+
+.gallery-card-actions {
+  position: absolute;
+  bottom: 0.4rem;
+  right: 0.4rem;
+  display: flex;
+  gap: 0.25rem;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.gallery-card:hover .gallery-card-actions {
+  opacity: 1;
 }
 
 .gallery-card:hover {
