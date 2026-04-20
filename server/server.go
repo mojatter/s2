@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -55,15 +54,7 @@ func init() {
 	}
 }
 
-var (
-	handlersMux sync.Mutex
-	// s3Handlers and consoleHandlers hold the routes registered via
-	// RegisterS3HandleFunc and RegisterConsoleHandleFunc respectively.
-	// They are served by S3Handler() and ConsoleHandler() on dedicated
-	// listeners so the S3 API can own the root path cleanly.
-	s3Handlers      = map[string]HandlerFunc{}
-	consoleHandlers = map[string]HandlerFunc{}
-)
+var handlersMux sync.Mutex
 
 // Flags holds the parsed command-line arguments for s2-server. Pointer-typed
 // fields distinguish "explicitly set" from "left at default"; only explicitly
@@ -197,23 +188,6 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 	}, nil
 }
 
-// S3Handler builds an HTTP handler that serves the S3-compatible API.
-// It includes routes registered via RegisterS3HandleFunc and, when
-// cfg.HealthPath is non-empty, a health endpoint at that path.
-func (s *Server) S3Handler() http.Handler {
-	return corsHandler(s.buildMux(s3Handlers))
-}
-
-// ConsoleHandler builds an HTTP handler that serves the Web Console.
-// Returns nil when no console routes have been registered, which lets
-// the caller decide whether to start a second listener at all.
-func (s *Server) ConsoleHandler() http.Handler {
-	if len(consoleHandlers) == 0 {
-		return nil
-	}
-	return s.buildMux(consoleHandlers)
-}
-
 // buildMux composes the given registries into a single ServeMux and
 // prepends a health-check short-circuit at cfg.HealthPath when set.
 //
@@ -254,34 +228,6 @@ func (s *Server) buildMux(registries ...map[string]HandlerFunc) http.Handler {
 	})
 }
 
-// handleHealthz is mounted at cfg.HealthPath by S3Handler (and by the
-// merged Handler). It is intentionally minimal so that probes stay cheap.
-func handleHealthz(_ *Server, w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
-}
-
-
-// RenderConsoleIndex renders the full index.html page into w. The
-// current bucket list is added to data under the "Buckets" key before
-// template execution; data may be nil.
-func (s *Server) RenderConsoleIndex(w http.ResponseWriter, data map[string]any) error {
-	names, err := s.Buckets.Names()
-	if err != nil {
-		return err
-	}
-	if data == nil {
-		data = map[string]any{}
-	}
-	data["Buckets"] = names
-	var buf bytes.Buffer
-	if err := s.Template.ExecuteTemplate(&buf, "console/index.html", data); err != nil {
-		return err
-	}
-	_, _ = buf.WriteTo(w)
-	return nil
-}
 
 // Start starts the S3 API listener and, when cfg.ConsoleListen is set and
 // there are console routes registered, the Web Console listener. Both
@@ -338,18 +284,6 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 type HandlerFunc func(srv *Server, w http.ResponseWriter, r *http.Request)
-
-// RegisterS3HandleFunc registers a handler that will be served by
-// S3Handler(). Patterns use Go 1.22 ServeMux syntax.
-func RegisterS3HandleFunc(pattern string, handler HandlerFunc) {
-	registerInto(s3Handlers, "S3 ", pattern, handler)
-}
-
-// RegisterConsoleHandleFunc registers a handler that will be served by
-// ConsoleHandler(). Patterns use Go 1.22 ServeMux syntax.
-func RegisterConsoleHandleFunc(pattern string, handler HandlerFunc) {
-	registerInto(consoleHandlers, "console ", pattern, handler)
-}
 
 func registerInto(reg map[string]HandlerFunc, label, pattern string, handler HandlerFunc) {
 	handlersMux.Lock()
