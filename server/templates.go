@@ -142,6 +142,12 @@ func templateFuncs(cfg *Config) template.FuncMap {
 			return t.Format("2006-01-02 15:04")
 		},
 		"baseName": path.Base,
+		"trimPrefix": func(prefix, key string) string {
+			if prefix == "" {
+				return key
+			}
+			return strings.TrimPrefix(key, prefix+"/")
+		},
 		"isImage": func(name string) bool {
 			return imageExts[strings.ToLower(path.Ext(name))]
 		},

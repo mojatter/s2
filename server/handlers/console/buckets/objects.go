@@ -21,6 +21,7 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue("name")
 	prefix := strings.TrimRight(r.URL.Query().Get("prefix"), "/")
+	search := r.URL.Query().Get("search")
 
 	strg, err := s.Buckets.Get(ctx, name)
 	if err != nil {
@@ -28,13 +29,30 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := strg.List(ctx, s2.ListOptions{Prefix: prefix})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	var (
+		objs     []s2.Object
+		prefixes []string
+	)
+	if search != "" {
+		listPrefix := search
+		if prefix != "" {
+			listPrefix = prefix + "/" + search
+		}
+		res, err := strg.List(ctx, s2.ListOptions{Prefix: listPrefix, Recursive: true})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		objs = server.FilterKeep(res.Objects)
+	} else {
+		res, err := strg.List(ctx, s2.ListOptions{Prefix: prefix})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		objs = server.FilterKeep(res.Objects)
+		prefixes = res.CommonPrefixes
 	}
-	objs := server.FilterKeep(res.Objects)
-	prefixes := res.CommonPrefixes
 
 	// Calculate breadcrumbs
 	var breadcrumbs []Breadcrumb
@@ -77,6 +95,7 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		ParentPrefix  string
 		Breadcrumbs   []Breadcrumb
 		HasParent     bool
+		Search        string
 	}{
 		BucketName:    name,
 		Objects:       objs,
@@ -85,6 +104,7 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		ParentPrefix:  parentPrefix,
 		Breadcrumbs:   breadcrumbs,
 		HasParent:     prefix != "" && prefix != "/",
+		Search:        search,
 	}
 
 	var buf bytes.Buffer
@@ -200,7 +220,6 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 	handleObjects(s, w, r)
 }
 
-
 func init() {
 	server.RegisterConsoleHandleFunc("GET /buckets/{name}", middleware.BasicAuth(handleObjects))
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/folders", middleware.BasicAuth(handleCreateFolder))
@@ -208,4 +227,3 @@ func init() {
 	server.RegisterConsoleHandleFunc("DELETE /buckets/{name}/objects", middleware.BasicAuth(handleDeleteObject))
 	server.RegisterTemplate("buckets/objects.html")
 }
-
