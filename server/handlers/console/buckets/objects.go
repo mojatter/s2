@@ -12,6 +12,7 @@ import (
 	"github.com/mojatter/s2/server/middleware"
 )
 
+// Breadcrumb represents a single path segment in the console navigation.
 type Breadcrumb struct {
 	Name   string
 	Prefix string

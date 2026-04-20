@@ -15,6 +15,8 @@ import (
 //go:embed templates/*
 var templatesFS embed.FS
 
+// loadTemplates parses every file under templates/ into a single
+// template set, keyed by its path relative to templates/.
 func loadTemplates(cfg *Config) (*template.Template, error) {
 	sub, err := fs.Sub(templatesFS, "templates")
 	if err != nil {
@@ -106,6 +108,8 @@ var textPreviewExts = map[string]bool{
 	".makefile": true, ".dockerfile": true,
 }
 
+// templateFuncs returns the FuncMap exposed to every template loaded
+// by loadTemplates.
 func templateFuncs(cfg *Config) template.FuncMap {
 	return template.FuncMap{
 		"formatSize": func(size uint64) string {

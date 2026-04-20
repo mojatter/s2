@@ -2,25 +2,24 @@ package server
 
 import (
 	"bytes"
+	"log/slog"
 	"net/http"
+	"time"
 )
 
+// consoleHandlers holds the routes registered via RegisterConsoleHandleFunc,
+// served by ConsoleHandler().
 var consoleHandlers = map[string]HandlerFunc{}
 
 // ConsoleHandler builds an HTTP handler that serves the Web Console.
-// Returns nil when no console routes have been registered, which lets
-// the caller decide whether to start a second listener at all.
 func (s *Server) ConsoleHandler() http.Handler {
-	if len(consoleHandlers) == 0 {
-		return nil
-	}
 	return s.buildMux(consoleHandlers)
 }
 
 // RegisterConsoleHandleFunc registers a handler that will be served by
 // ConsoleHandler(). Patterns use Go 1.22 ServeMux syntax.
 func RegisterConsoleHandleFunc(pattern string, handler HandlerFunc) {
-	registerInto(consoleHandlers, "console ", pattern, handler)
+	registerHandler(consoleHandlers, "console ", pattern, handler)
 }
 
 // RenderConsoleIndex renders the full index.html page into w. The
@@ -41,4 +40,18 @@ func (s *Server) RenderConsoleIndex(w http.ResponseWriter, data map[string]any) 
 	}
 	_, _ = buf.WriteTo(w)
 	return nil
+}
+
+func init() {
+	registerHttpServerFactory(func(s *Server) *http.Server {
+		if s.Config.ConsoleListen == "" {
+			return nil
+		}
+		slog.Info("Web Console listening", "addr", s.Config.ConsoleListen)
+		return &http.Server{
+			Addr:              s.Config.ConsoleListen,
+			Handler:           s.ConsoleHandler(),
+			ReadHeaderTimeout: 30 * time.Second,
+		}
+	})
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -54,7 +55,10 @@ func init() {
 	}
 }
 
-var handlersMux sync.Mutex
+// registryMux guards access to the package-level registries populated
+// via RegisterS3HandleFunc, RegisterConsoleHandleFunc, and
+// registerHttpServerFactory.
+var registryMux sync.Mutex
 
 // Flags holds the parsed command-line arguments for s2-server. Pointer-typed
 // fields distinguish "explicitly set" from "left at default"; only explicitly
@@ -188,75 +192,58 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 	}, nil
 }
 
-// buildMux composes the given registries into a single ServeMux and
-// prepends a health-check short-circuit at cfg.HealthPath when set.
-//
-// The health endpoint is intentionally *not* registered as a pattern in
-// the mux: a literal path like "/healthz" and the broader
-// "{METHOD} /{bucket}/{key...}" wildcards overlap in ways Go 1.22's
-// conflict detector refuses to accept, even when bucket creation would
-// otherwise reject the colliding name. Wrapping the mux with an
-// explicit path check sidesteps the conflict and keeps the routing
-// decisions straightforward to reason about.
-//
-// A pattern registered in more than one registry panics, same as the
-// registration APIs themselves.
-func (s *Server) buildMux(registries ...map[string]HandlerFunc) http.Handler {
+// buildMux composes the given registry into an http.ServeMux, then wraps
+// it with the provided middlewares in order: the first middleware wraps
+// the mux, the second wraps that result, and so on.
+func (s *Server) buildMux(registry map[string]HandlerFunc, middlewares ...func(http.Handler) http.Handler) http.Handler {
 	mux := http.NewServeMux()
-	seen := map[string]struct{}{}
-	for _, reg := range registries {
-		for pattern, handler := range reg {
-			if _, dup := seen[pattern]; dup {
-				panic("s2: handler already registered for " + pattern)
-			}
-			seen[pattern] = struct{}{}
-			mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
-				handler(s, w, r)
-			})
-		}
+	for pattern, handler := range registry {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			handler(s, w, r)
+		})
 	}
-	if s.Config.HealthPath == "" {
-		return mux
+	var h http.Handler = mux
+	for _, mw := range middlewares {
+		h = mw(h)
 	}
-	healthPath := s.Config.HealthPath
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == healthPath && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
-			handleHealthz(s, w, r)
-			return
-		}
-		mux.ServeHTTP(w, r)
-	})
+	return h
 }
 
+// httpServerFactory builds an *http.Server for s. Returning nil causes
+// (*Server).Start to skip this factory entirely (no server is started).
+type httpServerFactory func(s *Server) *http.Server
 
-// Start starts the S3 API listener and, when cfg.ConsoleListen is set and
-// there are console routes registered, the Web Console listener. Both
-// are shut down gracefully when ctx is cancelled or either listener dies.
+// httpServerFactories holds the factory list consumed by (*Server).Start.
+var httpServerFactories []httpServerFactory
+
+// registerHttpServerFactory appends fn to the list of HTTP server
+// factories invoked by (*Server).Start.
+func registerHttpServerFactory(fn httpServerFactory) {
+	registryMux.Lock()
+	defer registryMux.Unlock()
+
+	httpServerFactories = append(httpServerFactories, fn)
+}
+
+// Start launches each HTTP server produced by the registered factories.
+// Factories returning nil are skipped. All running servers are shut
+// down gracefully when ctx is cancelled or any listener dies.
 func (s *Server) Start(ctx context.Context) error {
-	s3srv := &http.Server{
-		Addr:              s.Config.Listen,
-		Handler:           s.S3Handler(),
-		ReadHeaderTimeout: 30 * time.Second,
-	}
-	servers := []*http.Server{s3srv}
-	slog.Info("S3 API listening", "addr", s.Config.Listen)
+	registryMux.Lock()
+	factories := slices.Clone(httpServerFactories)
+	registryMux.Unlock()
 
-	if s.Config.ConsoleListen != "" {
-		if h := s.ConsoleHandler(); h != nil {
-			consoleSrv := &http.Server{
-				Addr:              s.Config.ConsoleListen,
-				Handler:           h,
-				ReadHeaderTimeout: 30 * time.Second,
-			}
-			servers = append(servers, consoleSrv)
-			slog.Info("Web Console listening", "addr", s.Config.ConsoleListen)
+	var httpServers []*http.Server
+	for _, fn := range factories {
+		if httpServer := fn(s); httpServer != nil {
+			httpServers = append(httpServers, httpServer)
 		}
 	}
 
-	errCh := make(chan error, len(servers))
-	for _, srv := range servers {
+	errCh := make(chan error, len(httpServers))
+	for _, httpServer := range httpServers {
 		go func() {
-			errCh <- srv.ListenAndServe()
+			errCh <- httpServer.ListenAndServe()
 		}()
 	}
 
@@ -266,9 +253,9 @@ func (s *Server) Start(ctx context.Context) error {
 		defer cancel()
 
 		var firstErr error
-		for _, srv := range servers {
-			if err := srv.Shutdown(shutdownCtx); err != nil && firstErr == nil {
-				firstErr = fmt.Errorf("shutdown %s: %w", srv.Addr, err)
+		for _, httpServer := range httpServers {
+			if err := httpServer.Shutdown(shutdownCtx); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("shutdown %s: %w", httpServer.Addr, err)
 			}
 		}
 		return firstErr
@@ -283,11 +270,16 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
+// HandlerFunc is the signature for S3 API and Web Console route
+// handlers registered via RegisterS3HandleFunc / RegisterConsoleHandleFunc.
 type HandlerFunc func(srv *Server, w http.ResponseWriter, r *http.Request)
 
-func registerInto(reg map[string]HandlerFunc, label, pattern string, handler HandlerFunc) {
-	handlersMux.Lock()
-	defer handlersMux.Unlock()
+// registerHandler adds handler to reg under pattern, panicking if
+// pattern is already registered. label is prefixed to the panic
+// message to identify which registry ("S3 " or "console ") was hit.
+func registerHandler(reg map[string]HandlerFunc, label, pattern string, handler HandlerFunc) {
+	registryMux.Lock()
+	defer registryMux.Unlock()
 
 	if _, exists := reg[pattern]; exists {
 		panic("s2: " + label + "handler already registered for " + pattern)

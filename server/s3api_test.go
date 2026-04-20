@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,14 +36,14 @@ func TestRegisterHandleFunc(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
-			handlersMux.Lock()
+			registryMux.Lock()
 			original := *tc.registry
 			*tc.registry = map[string]HandlerFunc{}
-			handlersMux.Unlock()
+			registryMux.Unlock()
 			defer func() {
-				handlersMux.Lock()
+				registryMux.Lock()
 				*tc.registry = original
-				handlersMux.Unlock()
+				registryMux.Unlock()
 			}()
 
 			tc.register("GET /test", noop)
@@ -53,17 +55,17 @@ func TestRegisterHandleFunc(t *testing.T) {
 }
 
 func TestS3HandlerAndConsoleHandler(t *testing.T) {
-	handlersMux.Lock()
+	registryMux.Lock()
 	origS3 := s3Handlers
 	origConsole := consoleHandlers
 	s3Handlers = map[string]HandlerFunc{}
 	consoleHandlers = map[string]HandlerFunc{}
-	handlersMux.Unlock()
+	registryMux.Unlock()
 	defer func() {
-		handlersMux.Lock()
+		registryMux.Lock()
 		s3Handlers = origS3
 		consoleHandlers = origConsole
-		handlersMux.Unlock()
+		registryMux.Unlock()
 	}()
 
 	RegisterS3HandleFunc("GET /s3-only", func(_ *Server, w http.ResponseWriter, _ *http.Request) {
@@ -149,5 +151,140 @@ func TestCORSHandler(t *testing.T) {
 			assert.NotEmpty(t, w.Header().Get("Access-Control-Allow-Methods"))
 			assert.NotEmpty(t, w.Header().Get("Access-Control-Allow-Headers"))
 		})
+	}
+}
+
+func TestHealthHandler(t *testing.T) {
+	testCases := []struct {
+		caseName    string
+		path        string
+		reqPath     string
+		reqMethod   string
+		wantBody    string
+		wantHandled bool
+	}{
+		{
+			caseName:    "empty path is a no-op middleware",
+			path:        "",
+			reqPath:     "/healthz",
+			reqMethod:   http.MethodGet,
+			wantBody:    "next",
+			wantHandled: true,
+		},
+		{
+			caseName:  "GET matching path returns ok",
+			path:      "/healthz",
+			reqPath:   "/healthz",
+			reqMethod: http.MethodGet,
+			wantBody:  "ok",
+		},
+		{
+			caseName:  "HEAD matching path returns ok",
+			path:      "/healthz",
+			reqPath:   "/healthz",
+			reqMethod: http.MethodHead,
+			wantBody:  "ok",
+		},
+		{
+			caseName:    "POST matching path passes through",
+			path:        "/healthz",
+			reqPath:     "/healthz",
+			reqMethod:   http.MethodPost,
+			wantBody:    "next",
+			wantHandled: true,
+		},
+		{
+			caseName:    "non-matching path passes through",
+			path:        "/healthz",
+			reqPath:     "/other",
+			reqMethod:   http.MethodGet,
+			wantBody:    "next",
+			wantHandled: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			handled := false
+			next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				handled = true
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("next"))
+			})
+
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.reqMethod, tc.reqPath, nil)
+			healthHandler(tc.path)(next).ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusOK, w.Code)
+			assert.Equal(t, tc.wantHandled, handled)
+			if tc.reqMethod != http.MethodHead {
+				assert.Equal(t, tc.wantBody, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestStartSkipsNilFactories(t *testing.T) {
+	// Swap out the factory list so real init-time factories don't run.
+	registryMux.Lock()
+	origFuncs := httpServerFactories
+	httpServerFactories = nil
+	registryMux.Unlock()
+	defer func() {
+		registryMux.Lock()
+		httpServerFactories = origFuncs
+		registryMux.Unlock()
+	}()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+
+	nilCalled := false
+	realCalled := false
+	registerHttpServerFactory(func(_ *Server) *http.Server {
+		nilCalled = true
+		return nil
+	})
+	registerHttpServerFactory(func(_ *Server) *http.Server {
+		realCalled = true
+		return &http.Server{
+			Addr:              addr,
+			ReadHeaderTimeout: 30 * time.Second,
+		}
+	})
+
+	cfg := DefaultConfig()
+	cfg.Root = t.TempDir()
+	srv, err := NewServer(context.Background(), cfg)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Start(ctx)
+	}()
+
+	// The non-nil factory's listener should come up.
+	require.Eventually(t, func() bool {
+		conn, dialErr := net.Dial("tcp", addr)
+		if dialErr != nil {
+			return false
+		}
+		conn.Close()
+		return true
+	}, 3*time.Second, 10*time.Millisecond)
+
+	assert.True(t, nilCalled, "nil-returning factory should still be invoked")
+	assert.True(t, realCalled, "non-nil factory should be invoked")
+
+	cancel()
+	select {
+	case err := <-errCh:
+		assert.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("Start did not return after context cancel")
 	}
 }

@@ -9,25 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestConsoleHandlerNilWhenEmpty(t *testing.T) {
-	handlersMux.Lock()
-	origConsole := consoleHandlers
-	consoleHandlers = map[string]HandlerFunc{}
-	handlersMux.Unlock()
-	defer func() {
-		handlersMux.Lock()
-		consoleHandlers = origConsole
-		handlersMux.Unlock()
-	}()
-
-	cfg := DefaultConfig()
-	cfg.Root = t.TempDir()
-	srv, err := NewServer(context.Background(), cfg)
-	require.NoError(t, err)
-
-	assert.Nil(t, srv.ConsoleHandler(), "ConsoleHandler should be nil when no console routes are registered")
-}
-
 func TestRenderConsoleIndex(t *testing.T) {
 	testCases := []struct {
 		caseName     string
