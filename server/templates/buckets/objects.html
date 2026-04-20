@@ -1,3 +1,57 @@
+<svg style="display:none" aria-hidden="true">
+  <symbol id="icon-folder-new" viewBox="0 0 24 24">
+    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+    <line x1="12" y1="11" x2="12" y2="17"></line>
+    <line x1="9" y1="14" x2="15" y2="14"></line>
+  </symbol>
+  <symbol id="icon-upload" viewBox="0 0 24 24">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+    <polyline points="17 8 12 3 7 8"></polyline>
+    <line x1="12" y1="3" x2="12" y2="15"></line>
+  </symbol>
+  <symbol id="icon-view-list" viewBox="0 0 24 24">
+    <line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line>
+    <line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line>
+  </symbol>
+  <symbol id="icon-view-gallery" viewBox="0 0 24 24">
+    <rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect>
+    <rect x="3" y="14" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect>
+  </symbol>
+  <symbol id="icon-arrow-back" viewBox="0 0 24 24">
+    <path d="M10 18l-6-6 6-6"></path><path d="M4 12h18"></path>
+  </symbol>
+  <symbol id="icon-folder" viewBox="0 0 24 24">
+    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+  </symbol>
+  <symbol id="icon-file" viewBox="0 0 24 24">
+    <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
+    <polyline points="13 2 13 9 20 9"></polyline>
+  </symbol>
+  <symbol id="icon-eye" viewBox="0 0 24 24">
+    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+    <circle cx="12" cy="12" r="3"></circle>
+  </symbol>
+  <symbol id="icon-download" viewBox="0 0 24 24">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+    <polyline points="7 10 12 15 17 10"></polyline>
+    <line x1="12" y1="15" x2="12" y2="3"></line>
+  </symbol>
+  <symbol id="icon-trash" viewBox="0 0 24 24">
+    <polyline points="3 6 5 6 21 6"></polyline>
+    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+  </symbol>
+  <symbol id="icon-empty" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="10"></circle>
+    <line x1="12" y1="8" x2="12" y2="12"></line>
+    <line x1="12" y1="16" x2="12.01" y2="16"></line>
+  </symbol>
+  <symbol id="icon-image" viewBox="0 0 24 24">
+    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+    <circle cx="8.5" cy="8.5" r="1.5"></circle>
+    <polyline points="21 15 16 10 5 21"></polyline>
+  </symbol>
+</svg>
+
 <div class="header">
   <div class="welcome-msg">
     <h1>{{.BucketName}}</h1>
@@ -11,10 +65,7 @@
   </div>
   <div class="toolbar">
     <button class="btn-primary-sm" onclick="this.nextElementSibling.classList.toggle('active')">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-        <line x1="12" y1="11" x2="12" y2="17"></line><line x1="9" y1="14" x2="15" y2="14"></line>
-      </svg>
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-folder-new"></use></svg>
       New Folder
     </button>
     <form class="new-folder-form inline-form" hx-post="/buckets/{{.BucketName}}/folders" hx-target="#main-content">
@@ -26,9 +77,7 @@
     <div class="divider"></div>
 
     <button class="btn-secondary-sm" onclick="this.nextElementSibling.querySelector('input[type=file]').click()">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line>
-      </svg>
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-upload"></use></svg>
       Upload File
     </button>
     <form hx-post="/buckets/{{.BucketName}}/upload" hx-encoding="multipart/form-data" hx-target="#main-content" style="display:none;">
@@ -42,16 +91,10 @@
 <div class="main-view">
   <div class="view-toggle">
     <button class="view-toggle-btn active" onclick="setViewMode('list', this)" title="List View">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line>
-        <line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line>
-      </svg>
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-view-list"></use></svg>
     </button>
     <button class="view-toggle-btn" onclick="setViewMode('gallery', this)" title="Gallery View">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect>
-        <rect x="3" y="14" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect>
-      </svg>
+      <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-view-gallery"></use></svg>
     </button>
   </div>
 
@@ -71,9 +114,7 @@
           <td>
             <div class="obj-name-wrap">
               <span class="obj-icon">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M10 18l-6-6 6-6"></path><path d="M4 12h18"></path>
-                </svg>
+                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-arrow-back"></use></svg>
               </span>
               <a href="/buckets/{{.BucketName}}?prefix={{.ParentPrefix}}" hx-get="/buckets/{{.BucketName}}?prefix={{.ParentPrefix}}" hx-target="#main-content" hx-push-url="true">.. (Parent Directory)</a>
             </div>
@@ -89,9 +130,7 @@
           <td>
             <div class="obj-name-wrap">
               <span class="obj-icon folder-icon">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-                </svg>
+                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-folder"></use></svg>
               </span>
               <a href="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-get="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-target="#main-content" hx-push-url="true">{{baseName .}}/</a>
             </div>
@@ -101,9 +140,7 @@
           <td>
             <div class="actions-cell">
               <button class="btn-delete-sm" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.}}/&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete folder '{{baseName .}}' and all its contents?" hx-target="#main-content" title="Delete Folder">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                </svg>
+                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
               </button>
             </div>
           </td>
@@ -116,10 +153,7 @@
           <td>
             <div class="obj-name-wrap">
               <span class="obj-icon">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
-                  <polyline points="13 2 13 9 20 9"></polyline>
-                </svg>
+                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-file"></use></svg>
               </span>
               {{baseName .Name}}
             </div>
@@ -132,20 +166,14 @@
               <button class="btn-view" title="Preview File"
                 hx-get="/buckets/{{$.BucketName}}/preview/{{.Name}}"
                 hx-target="#preview-dialog" hx-swap="innerHTML">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle>
-                </svg>
+                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-eye"></use></svg>
               </button>
               {{end}}
               <a class="btn-download" href="/buckets/{{$.BucketName}}/view/{{.Name}}" download="{{baseName .Name}}" title="Download File">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line>
-                </svg>
+                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-download"></use></svg>
               </a>
               <button class="btn-delete-sm" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.Name}}&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete file '{{baseName .Name}}'?" hx-target="#main-content" title="Delete File">
-                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                </svg>
+                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
               </button>
             </div>
           </td>
@@ -156,11 +184,7 @@
           <tr>
             <td colspan="4" class="empty-state">
               <div class="empty-icon">
-                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                  <circle cx="12" cy="12" r="10"></circle>
-                  <line x1="12" y1="8" x2="12" y2="12"></line>
-                  <line x1="12" y1="16" x2="12.01" y2="16"></line>
-                </svg>
+                <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-empty"></use></svg>
               </div>
               <p>This folder is empty.</p>
             </td>
@@ -175,65 +199,77 @@
     {{if .HasParent}}
     <a href="/buckets/{{.BucketName}}?prefix={{.ParentPrefix}}" hx-get="/buckets/{{.BucketName}}?prefix={{.ParentPrefix}}" hx-target="#main-content" hx-push-url="true" class="gallery-card gallery-folder">
       <div class="gallery-folder-icon">
-        <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M10 18l-6-6 6-6"></path><path d="M4 12h18"></path>
-        </svg>
+        <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-arrow-back"></use></svg>
       </div>
       <span class="gallery-label">..</span>
     </a>
     {{end}}
 
     {{range .Prefixes}}
-    <a href="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-get="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-target="#main-content" hx-push-url="true" class="gallery-card gallery-folder">
-      <div class="gallery-folder-icon">
-        <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
-        </svg>
+    <div class="gallery-card gallery-folder" data-name="{{baseName .}}/">
+      <a href="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-get="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-target="#main-content" hx-push-url="true" class="gallery-card-body">
+        <div class="gallery-folder-icon">
+          <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-folder"></use></svg>
+        </div>
+        <span class="gallery-label">{{baseName .}}/</span>
+      </a>
+      <div class="gallery-card-actions">
+        <button class="btn-delete-sm" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.}}/&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete folder '{{baseName .}}' and all its contents?" hx-target="#main-content" title="Delete Folder">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
+        </button>
       </div>
-      <span class="gallery-label">{{baseName .}}/</span>
-    </a>
+    </div>
     {{end}}
 
     {{range .Objects}}
     {{if isImage .Name}}
-    <div class="gallery-card gallery-image"
-      hx-get="/buckets/{{$.BucketName}}/preview/{{.Name}}"
-      hx-target="#preview-dialog" hx-swap="innerHTML">
-      <div class="gallery-thumb" data-src="/buckets/{{$.BucketName}}/view/{{.Name}}">
-        <div class="gallery-thumb-placeholder">
-          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-            <circle cx="8.5" cy="8.5" r="1.5"></circle>
-            <polyline points="21 15 16 10 5 21"></polyline>
-          </svg>
+    <div class="gallery-card gallery-image" data-name="{{baseName .Name}}">
+      <div class="gallery-card-body"
+        hx-get="/buckets/{{$.BucketName}}/preview/{{.Name}}"
+        hx-target="#preview-dialog" hx-swap="innerHTML">
+        <div class="gallery-thumb" data-src="/buckets/{{$.BucketName}}/view/{{.Name}}">
+          <div class="gallery-thumb-placeholder">
+            <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-image"></use></svg>
+          </div>
         </div>
+        <span class="gallery-label">{{baseName .Name}}</span>
+        <span class="gallery-size">{{formatSize .Length}}</span>
       </div>
-      <span class="gallery-label">{{baseName .Name}}</span>
-      <span class="gallery-size">{{formatSize .Length}}</span>
+      <div class="gallery-card-actions">
+        <a class="btn-download" href="/buckets/{{$.BucketName}}/view/{{.Name}}" download="{{baseName .Name}}" title="Download File">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-download"></use></svg>
+        </a>
+        <button class="btn-delete-sm" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.Name}}&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete file '{{baseName .Name}}'?" hx-target="#main-content" title="Delete File">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
+        </button>
+      </div>
     </div>
     {{else}}
-    <div class="gallery-card gallery-file"
-      {{if isPreviewable .Name .Length}}hx-get="/buckets/{{$.BucketName}}/preview/{{.Name}}"
-      hx-target="#preview-dialog" hx-swap="innerHTML"{{end}}>
-      <div class="gallery-file-icon">
-        <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
-          <polyline points="13 2 13 9 20 9"></polyline>
-        </svg>
+    <div class="gallery-card gallery-file" data-name="{{baseName .Name}}">
+      <div class="gallery-card-body"
+        {{if isPreviewable .Name .Length}}hx-get="/buckets/{{$.BucketName}}/preview/{{.Name}}"
+        hx-target="#preview-dialog" hx-swap="innerHTML"{{end}}>
+        <div class="gallery-file-icon">
+          <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-file"></use></svg>
+        </div>
+        <span class="gallery-label">{{baseName .Name}}</span>
+        <span class="gallery-size">{{formatSize .Length}}</span>
       </div>
-      <span class="gallery-label">{{baseName .Name}}</span>
-      <span class="gallery-size">{{formatSize .Length}}</span>
+      <div class="gallery-card-actions">
+        <a class="btn-download" href="/buckets/{{$.BucketName}}/view/{{.Name}}" download="{{baseName .Name}}" title="Download File">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-download"></use></svg>
+        </a>
+        <button class="btn-delete-sm" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.Name}}&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete file '{{baseName .Name}}'?" hx-target="#main-content" title="Delete File">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
+        </button>
+      </div>
     </div>
     {{end}}
     {{else}}
       {{if not .Prefixes}}
       <div class="gallery-empty empty-state">
         <div class="empty-icon">
-          <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10"></circle>
-            <line x1="12" y1="8" x2="12" y2="12"></line>
-            <line x1="12" y1="16" x2="12.01" y2="16"></line>
-          </svg>
+          <svg width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-empty"></use></svg>
         </div>
         <p>This folder is empty.</p>
       </div>
@@ -306,4 +342,3 @@
   });
 </script>
 {{end}}
-
