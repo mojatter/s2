@@ -151,12 +151,6 @@ The bind-mounted directory is auto-recognized as a bucket — no `S2_SERVER_BUCK
 go install github.com/mojatter/s2/cmd/s2-server@latest
 ```
 
-Or run with Docker:
-
-```sh
-docker run -p 9000:9000 -p 9001:9001 mojatter/s2-server
-```
-
 ### Install library
 
 ```sh
@@ -184,7 +178,7 @@ Start the server:
 s2-server
 
 # via Docker
-docker run -p 9000:9000 -p 9001:9001 -v /your/data:/var/lib/s2 mojatter/s2-server
+docker run --rm -p 9000:9000 -p 9001:9001 -v $(pwd)/data:/var/lib/s2 mojatter/s2-server
 ```
 
 Then access it with any S3 client:
