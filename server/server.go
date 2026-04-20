@@ -262,9 +262,6 @@ func handleHealthz(_ *Server, w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-func init() {
-	RegisterTemplate("index.html")
-}
 
 // Start starts the S3 API listener and, when cfg.ConsoleListen is set and
 // there are console routes registered, the Web Console listener. Both

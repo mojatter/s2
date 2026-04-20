@@ -6,9 +6,7 @@ import (
 	"html/template"
 	"io/fs"
 	"path"
-	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/mojatter/s2"
@@ -17,46 +15,30 @@ import (
 //go:embed templates/*
 var templatesFS embed.FS
 
-var (
-	templatesMux  sync.Mutex
-	templateNames = []string{
-		"empty.html",
-		"buckets/list.html",
-		"buckets/objects.html",
-		"buckets/preview.html",
-		"index.html",
-	}
-)
-
-func RegisterTemplate(name string) {
-	templatesMux.Lock()
-	defer templatesMux.Unlock()
-
-	if !slices.Contains(templateNames, name) {
-		templateNames = append(templateNames, name)
-	}
-}
-
 func loadTemplates(cfg *Config) (*template.Template, error) {
 	sub, err := fs.Sub(templatesFS, "templates")
 	if err != nil {
 		return nil, err
 	}
 	t := template.New("").Funcs(templateFuncs(cfg))
-	for _, name := range templateNames {
-		if _, err := subTemplate(sub, t, name); err != nil {
-			return nil, err
+	err = fs.WalkDir(sub, ".", func(name string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-	}
-	return t, nil
-}
-
-func subTemplate(sub fs.FS, t *template.Template, name string) (*template.Template, error) {
-	b, err := fs.ReadFile(sub, name)
+		if d.IsDir() {
+			return nil
+		}
+		b, err := fs.ReadFile(sub, name)
+		if err != nil {
+			return err
+		}
+		_, err = t.New(name).Parse(string(b))
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
-	return t.New(name).Parse(string(b))
+	return t, nil
 }
 
 // imageExts is the set of file extensions recognized as images for gallery view.
