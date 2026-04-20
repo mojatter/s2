@@ -8,26 +8,10 @@ import (
 	"github.com/mojatter/s2/server/middleware"
 )
 
-func handleIndex(s *server.Server, w http.ResponseWriter, r *http.Request) {
-	names, err := s.Buckets.Names()
-
-	if err != nil {
+func handleIndex(s *server.Server, w http.ResponseWriter, _ *http.Request) {
+	if err := s.RenderIndex(w); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
 	}
-
-	data := struct {
-		Buckets []string
-	}{
-		Buckets: names,
-	}
-
-	var buf bytes.Buffer
-	if err := s.Template.ExecuteTemplate(&buf, "index.html", data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	_, _ = buf.WriteTo(w)
 }
 
 func handleCreateBucket(s *server.Server, w http.ResponseWriter, r *http.Request) {
@@ -107,6 +91,5 @@ func init() {
 	server.RegisterConsoleHandleFunc("GET /{$}", middleware.BasicAuth(handleIndex))
 	server.RegisterConsoleHandleFunc("POST /buckets", middleware.BasicAuth(handleCreateBucket))
 	server.RegisterConsoleHandleFunc("DELETE /buckets/{name}", middleware.BasicAuth(handleDeleteBucket))
-	server.RegisterTemplate("index.html")
 }
 

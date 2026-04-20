@@ -80,13 +80,6 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		parentPrefix = ""
 	}
 
-	// Non-HTMX requests get redirected to the index page where the
-	// sidebar navigation triggers the htmx load.
-	if r.Header.Get("HX-Request") != "true" {
-		http.Redirect(w, r, "/", http.StatusFound)
-		return
-	}
-
 	data := struct {
 		BucketName    string
 		Objects       []s2.Object
@@ -221,7 +214,7 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 }
 
 func init() {
-	server.RegisterConsoleHandleFunc("GET /buckets/{name}", middleware.BasicAuth(handleObjects))
+	server.RegisterConsoleHandleFunc("GET /buckets/{name}", middleware.BasicAuth(middleware.ServeIndex(handleObjects)))
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/folders", middleware.BasicAuth(handleCreateFolder))
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/upload", middleware.BasicAuth(handleUploadFile))
 	server.RegisterConsoleHandleFunc("DELETE /buckets/{name}/objects", middleware.BasicAuth(handleDeleteObject))

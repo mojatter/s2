@@ -148,15 +148,6 @@ func (s *ObjectsTestSuite) TestHandleObjects() {
 			wantCode:     http.StatusOK,
 			wantContains: []string{"search-chip"},
 		},
-		{
-			caseName:    "full page without HX-Request redirects to index",
-			setup:       func() { s.createBucket("full") },
-			bucketName:  "full",
-			url:         "/buckets/full",
-			htmx:        false,
-			wantCode:    http.StatusFound,
-			wantHeader:  map[string]string{"Location": "/"},
-		},
 	}
 
 	for _, tc := range testCases {
