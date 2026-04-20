@@ -201,7 +201,7 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 // It includes routes registered via RegisterS3HandleFunc and, when
 // cfg.HealthPath is non-empty, a health endpoint at that path.
 func (s *Server) S3Handler() http.Handler {
-	return s.buildMux(s3Handlers)
+	return corsHandler(s.buildMux(s3Handlers))
 }
 
 // ConsoleHandler builds an HTTP handler that serves the Web Console.
