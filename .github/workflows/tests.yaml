@@ -27,7 +27,7 @@ jobs:
         name: Run go test
         run: |
           go mod tidy
-          go test -v ./...
+          go test -race -v ./...
       -
         name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
@@ -38,7 +38,7 @@ jobs:
         run: |
           for dir in s3 gcs azblob s2env cmd/s2-server; do
             echo "=== Testing $dir ==="
-            (cd $dir && go mod tidy && go test -v ./...)
+            (cd $dir && go mod tidy && go test -race -v ./...)
           done
       -
         name: Lint submodules
