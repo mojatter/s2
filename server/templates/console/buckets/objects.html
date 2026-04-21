@@ -54,17 +54,17 @@
 
 <div class="header">
   <div class="welcome-msg">
-    <h1>{{.BucketName}}</h1>
-    <div class="breadcrumbs">
-      <a href="/buckets/{{.BucketName}}" hx-get="/buckets/{{.BucketName}}" hx-target="#main-content" hx-push-url="true">root</a>
-      {{range .Breadcrumbs}}
-      <span class="separator">/</span>
-      <a href="/buckets/{{$.BucketName}}?prefix={{.Prefix}}" hx-get="/buckets/{{$.BucketName}}?prefix={{.Prefix}}" hx-target="#main-content" hx-push-url="true">{{.Name}}</a>
-      {{end}}
-    </div>
+    <h1 title="{{.BucketName}}">{{.BucketName}}</h1>
+  </div>
+  <div class="breadcrumbs">
+    <a href="/buckets/{{.BucketName}}" hx-get="/buckets/{{.BucketName}}" hx-target="#main-content" hx-push-url="true">root</a>
+    {{range .Breadcrumbs}}
+    <span class="separator">/</span>
+    <a href="/buckets/{{$.BucketName}}?prefix={{.Prefix}}" hx-get="/buckets/{{$.BucketName}}?prefix={{.Prefix}}" hx-target="#main-content" hx-push-url="true" title="{{.Name}}">{{.Name}}</a>
+    {{end}}
   </div>
   <div class="toolbar">
-    <button class="btn-primary-sm" onclick="this.nextElementSibling.classList.toggle('active')">
+    <button class="btn btn--sm btn--primary" onclick="this.nextElementSibling.classList.toggle('active')">
       <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-folder-new"></use></svg>
       New Folder
     </button>
@@ -76,7 +76,7 @@
 
     <div class="divider"></div>
 
-    <button class="btn-secondary-sm" onclick="this.nextElementSibling.querySelector('input[type=file]').click()">
+    <button class="btn btn--sm btn--secondary" onclick="this.nextElementSibling.querySelector('input[type=file]').click()">
       <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-upload"></use></svg>
       Upload File
     </button>
@@ -119,7 +119,7 @@
           <th>Name</th>
           <th>Size</th>
           <th>Last Modified</th>
-          <th style="width: 100px;">Actions</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -146,14 +146,14 @@
               <span class="obj-icon folder-icon">
                 <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-folder"></use></svg>
               </span>
-              <a href="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-get="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-target="#main-content" hx-push-url="true">{{baseName .}}/</a>
+              <a href="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-get="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-target="#main-content" hx-push-url="true" title="{{baseName .}}/">{{baseName .}}/</a>
             </div>
           </td>
           <td>-</td>
           <td>-</td>
           <td>
             <div class="actions-cell">
-              <button class="btn-delete-sm" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.}}/&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete folder '{{baseName .}}' and all its contents?" hx-target="#main-content" title="Delete Folder">
+              <button class="btn btn--icon btn--danger" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.}}/&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete folder '{{baseName .}}' and all its contents?" hx-target="#main-content" title="Delete Folder">
                 <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
               </button>
             </div>
@@ -169,7 +169,7 @@
               <span class="obj-icon">
                 <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-file"></use></svg>
               </span>
-              {{if $.Search}}{{trimPrefix $.CurrentPrefix .Name}}{{else}}{{baseName .Name}}{{end}}
+              <span class="obj-name" title="{{if $.Search}}{{trimPrefix $.CurrentPrefix .Name}}{{else}}{{baseName .Name}}{{end}}">{{if $.Search}}{{trimPrefix $.CurrentPrefix .Name}}{{else}}{{baseName .Name}}{{end}}</span>
             </div>
           </td>
           <td>{{formatSize .Length}}</td>
@@ -177,16 +177,16 @@
           <td>
             <div class="actions-cell">
               {{if isPreviewable .Name .Length}}
-              <button class="btn-view" title="Preview File"
+              <button class="btn btn--view" title="Preview File"
                 hx-get="/buckets/{{$.BucketName}}/preview/{{.Name}}"
                 hx-target="#preview-dialog" hx-swap="innerHTML">
                 <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-eye"></use></svg>
               </button>
               {{end}}
-              <a class="btn-download" href="/buckets/{{$.BucketName}}/view/{{.Name}}" download="{{baseName .Name}}" title="Download File">
+              <a class="btn btn--icon btn--ghost" href="/buckets/{{$.BucketName}}/view/{{.Name}}" download="{{baseName .Name}}" title="Download File">
                 <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-download"></use></svg>
               </a>
-              <button class="btn-delete-sm" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.Name}}&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete file '{{baseName .Name}}'?" hx-target="#main-content" title="Delete File">
+              <button class="btn btn--icon btn--danger" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.Name}}&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete file '{{baseName .Name}}'?" hx-target="#main-content" title="Delete File">
                 <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
               </button>
             </div>
@@ -228,7 +228,7 @@
         <span class="gallery-label">{{baseName .}}/</span>
       </a>
       <div class="gallery-card-actions">
-        <button class="btn-delete-sm" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.}}/&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete folder '{{baseName .}}' and all its contents?" hx-target="#main-content" title="Delete Folder">
+        <button class="btn btn--icon btn--danger" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.}}/&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete folder '{{baseName .}}' and all its contents?" hx-target="#main-content" title="Delete Folder">
           <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
         </button>
       </div>
@@ -250,10 +250,10 @@
         <span class="gallery-size">{{formatSize .Length}}</span>
       </div>
       <div class="gallery-card-actions">
-        <a class="btn-download" href="/buckets/{{$.BucketName}}/view/{{.Name}}" download="{{baseName .Name}}" title="Download File">
+        <a class="btn btn--icon btn--ghost" href="/buckets/{{$.BucketName}}/view/{{.Name}}" download="{{baseName .Name}}" title="Download File">
           <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-download"></use></svg>
         </a>
-        <button class="btn-delete-sm" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.Name}}&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete file '{{baseName .Name}}'?" hx-target="#main-content" title="Delete File">
+        <button class="btn btn--icon btn--danger" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.Name}}&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete file '{{baseName .Name}}'?" hx-target="#main-content" title="Delete File">
           <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
         </button>
       </div>
@@ -270,10 +270,10 @@
         <span class="gallery-size">{{formatSize .Length}}</span>
       </div>
       <div class="gallery-card-actions">
-        <a class="btn-download" href="/buckets/{{$.BucketName}}/view/{{.Name}}" download="{{baseName .Name}}" title="Download File">
+        <a class="btn btn--icon btn--ghost" href="/buckets/{{$.BucketName}}/view/{{.Name}}" download="{{baseName .Name}}" title="Download File">
           <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-download"></use></svg>
         </a>
-        <button class="btn-delete-sm" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.Name}}&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete file '{{baseName .Name}}'?" hx-target="#main-content" title="Delete File">
+        <button class="btn btn--icon btn--danger" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.Name}}&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete file '{{baseName .Name}}'?" hx-target="#main-content" title="Delete File">
           <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
         </button>
       </div>

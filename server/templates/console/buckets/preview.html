@@ -1,8 +1,8 @@
 <div class="modal-content">
   <div class="modal-header">
-    <span>{{.Filename}}</span>
+    <span class="modal-filename" title="{{.Filename}}">{{.Filename}}</span>
     <div class="modal-header-actions">
-      <a href="{{.ViewURL}}" class="btn-view" title="Open in new tab" target="_blank">
+      <a href="{{.ViewURL}}" class="btn btn--view" title="Open in new tab" target="_blank">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line>
         </svg>
@@ -25,7 +25,7 @@
     {{else}}
     <div class="preview-unsupported">
       <p>Preview not available for this file type.</p>
-      <a href="{{.ViewURL}}" target="_blank" class="btn-primary-sm">Open in New Tab</a>
+      <a href="{{.ViewURL}}" target="_blank" class="btn btn--sm btn--primary">Open in New Tab</a>
     </div>
     {{end}}
   </div>
