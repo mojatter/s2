@@ -1,0 +1,17 @@
+{{define "action-delete-folder"}}
+<button class="btn btn--icon btn--danger" hx-delete="/buckets/{{.Bucket}}/objects?key={{.Key}}/&prefix={{.Prefix}}" hx-confirm="Are you sure you want to delete folder '{{baseName .Key}}' and all its contents?" hx-target="#main-content" title="Delete Folder">
+  <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
+</button>
+{{end}}
+
+{{define "action-delete-file"}}
+<button class="btn btn--icon btn--danger" hx-delete="/buckets/{{.Bucket}}/objects?key={{.Key}}&prefix={{.Prefix}}" hx-confirm="Are you sure you want to delete file '{{baseName .Key}}'?" hx-target="#main-content" title="Delete File">
+  <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
+</button>
+{{end}}
+
+{{define "action-download"}}
+<a class="btn btn--icon btn--ghost" href="/buckets/{{.Bucket}}/view/{{.Key}}" download="{{baseName .Key}}" title="Download File">
+  <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-download"></use></svg>
+</a>
+{{end}}
