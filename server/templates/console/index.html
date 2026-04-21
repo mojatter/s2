@@ -17,21 +17,30 @@
 <body>
   <div class="layout">
     <aside class="sidebar">
-      <a href="/" class="logo-area">
-        <div class="logo-icon">
-          <svg viewBox="0 0 48 48" width="44" height="44">
-            <rect x="1" y="1" width="46" height="46" rx="11" ry="11" fill="#1e7cf5"/>
-            <rect x="7" y="7" width="34" height="34" rx="6" ry="6" fill="none" stroke="white" stroke-width="2.5"/>
-            <text x="24" y="33" text-anchor="middle" font-family="'Outfit', sans-serif" font-weight="800" font-size="20" fill="white">S2</text>
+      <div class="sidebar-header">
+        <a href="/" class="logo-area">
+          <div class="logo-icon">
+            <svg viewBox="0 0 48 48" width="44" height="44">
+              <rect x="1" y="1" width="46" height="46" rx="11" ry="11" fill="#1e7cf5"/>
+              <rect x="7" y="7" width="34" height="34" rx="6" ry="6" fill="none" stroke="white" stroke-width="2.5"/>
+              <text x="24" y="33" text-anchor="middle" font-family="'Outfit', sans-serif" font-weight="800" font-size="20" fill="white">S2</text>
+            </svg>
+          </div>
+          <span>Simple Storage</span>
+        </a>
+        <button class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle sidebar" aria-label="Toggle sidebar">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
           </svg>
-        </div>
-        <span>Simple Storage</span>
-      </a>
+        </button>
+      </div>
 
       <div class="sidebar-section">
         <div class="section-header">
           <h3>Buckets</h3>
-          <button class="btn-icon-sm" onclick="this.closest('.sidebar-section').querySelector('.new-bucket-form').classList.toggle('active')">
+          <button class="btn btn--icon-xs btn--surface" onclick="this.closest('.sidebar-section').querySelector('.new-bucket-form').classList.toggle('active')">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line>
             </svg>
@@ -39,7 +48,7 @@
         </div>
 
         <form class="new-bucket-form" hx-post="/buckets" hx-target=".bucket-list" hx-swap="outerHTML"
-          hx-on::after-request="if(event.detail.successful){this.reset();this.classList.remove('active')}">
+          hx-on::after-request="if(event.detail.successful){var n=this.querySelector('[name=name]').value;this.reset();this.classList.remove('active');htmx.ajax('GET','/buckets/'+encodeURIComponent(n),{target:'#main-content',pushUrl:true});closeSidebarOnNarrow();}">
           <input type="text" name="name" placeholder="New bucket name..." required>
           <button type="submit">Create</button>
         </form>
@@ -49,6 +58,14 @@
     </aside>
 
     <main class="content">
+      <button class="mobile-sidebar-toggle" onclick="toggleSidebar()" title="Open menu" aria-label="Open menu">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="3" y1="6" x2="21" y2="6"></line>
+          <line x1="3" y1="12" x2="21" y2="12"></line>
+          <line x1="3" y1="18" x2="21" y2="18"></line>
+        </svg>
+      </button>
+
       <div id="main-content">
         {{if .BucketName}}{{template "console/buckets/objects.html" .}}{{else}}{{template "console/empty.html" .}}{{end}}
       </div>
@@ -59,8 +76,38 @@
     </main>
   </div>
 
+  <div class="sidebar-backdrop" onclick="toggleSidebar()"></div>
+
   <dialog id="preview-dialog" onclick="if(event.target===this)this.close()">
   </dialog>
+
+  <script>
+    (function() {
+      var layout = document.querySelector('.layout');
+      if (!layout) return;
+      var narrowQuery = window.matchMedia('(max-width: 900px)');
+      var stored = localStorage.getItem('s2-sidebar-collapsed');
+      var collapsed = stored === null ? narrowQuery.matches : stored === 'true';
+      if (collapsed) {
+        layout.classList.add('layout--sidebar-collapsed');
+      }
+      window.toggleSidebar = function() {
+        var isCollapsed = layout.classList.toggle('layout--sidebar-collapsed');
+        localStorage.setItem('s2-sidebar-collapsed', isCollapsed);
+      };
+      window.closeSidebarOnNarrow = function() {
+        if (!narrowQuery.matches) return;
+        if (layout.classList.contains('layout--sidebar-collapsed')) return;
+        layout.classList.add('layout--sidebar-collapsed');
+        localStorage.setItem('s2-sidebar-collapsed', 'true');
+      };
+      // On narrow, close the drawer when a bucket or the logo is clicked
+      document.addEventListener('click', function(e) {
+        if (!e.target.closest('.bucket-item, .logo-area')) return;
+        closeSidebarOnNarrow();
+      });
+    })();
+  </script>
 
   {{template "scripts:console/buckets/objects.html" .}}
 </body>
