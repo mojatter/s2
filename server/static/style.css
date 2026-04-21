@@ -1218,7 +1218,12 @@ tr:hover td {
 
   .table-controls {
     flex-direction: column;
-    align-items: flex-start;
+    align-items: stretch;
+  }
+
+  .table-controls-left {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .search-input {
