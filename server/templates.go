@@ -147,5 +147,19 @@ func templateFuncs(cfg *Config) template.FuncMap {
 			}
 			return true
 		},
+		"dict": func(values ...any) (map[string]any, error) {
+			if len(values)%2 != 0 {
+				return nil, fmt.Errorf("dict: odd number of args")
+			}
+			m := make(map[string]any, len(values)/2)
+			for i := 0; i < len(values); i += 2 {
+				key, ok := values[i].(string)
+				if !ok {
+					return nil, fmt.Errorf("dict: non-string key at position %d", i)
+				}
+				m[key] = values[i+1]
+			}
+			return m, nil
+		},
 	}
 }

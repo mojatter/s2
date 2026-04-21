@@ -153,9 +153,7 @@
           <td>-</td>
           <td>
             <div class="actions-cell">
-              <button class="btn btn--icon btn--danger" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.}}/&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete folder '{{baseName .}}' and all its contents?" hx-target="#main-content" title="Delete Folder">
-                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
-              </button>
+              {{template "action-delete-folder" (dict "Bucket" $.BucketName "Key" . "Prefix" $.CurrentPrefix)}}
             </div>
           </td>
         </tr>
@@ -183,12 +181,8 @@
                 <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-eye"></use></svg>
               </button>
               {{end}}
-              <a class="btn btn--icon btn--ghost" href="/buckets/{{$.BucketName}}/view/{{.Name}}" download="{{baseName .Name}}" title="Download File">
-                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-download"></use></svg>
-              </a>
-              <button class="btn btn--icon btn--danger" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.Name}}&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete file '{{baseName .Name}}'?" hx-target="#main-content" title="Delete File">
-                <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
-              </button>
+              {{template "action-download" (dict "Bucket" $.BucketName "Key" .Name)}}
+              {{template "action-delete-file" (dict "Bucket" $.BucketName "Key" .Name "Prefix" $.CurrentPrefix)}}
             </div>
           </td>
         </tr>
@@ -228,9 +222,7 @@
         <span class="gallery-label">{{baseName .}}/</span>
       </a>
       <div class="gallery-card-actions">
-        <button class="btn btn--icon btn--danger" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.}}/&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete folder '{{baseName .}}' and all its contents?" hx-target="#main-content" title="Delete Folder">
-          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
-        </button>
+        {{template "action-delete-folder" (dict "Bucket" $.BucketName "Key" . "Prefix" $.CurrentPrefix)}}
       </div>
     </div>
     {{end}}
@@ -250,12 +242,8 @@
         <span class="gallery-size">{{formatSize .Length}}</span>
       </div>
       <div class="gallery-card-actions">
-        <a class="btn btn--icon btn--ghost" href="/buckets/{{$.BucketName}}/view/{{.Name}}" download="{{baseName .Name}}" title="Download File">
-          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-download"></use></svg>
-        </a>
-        <button class="btn btn--icon btn--danger" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.Name}}&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete file '{{baseName .Name}}'?" hx-target="#main-content" title="Delete File">
-          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
-        </button>
+        {{template "action-download" (dict "Bucket" $.BucketName "Key" .Name)}}
+        {{template "action-delete-file" (dict "Bucket" $.BucketName "Key" .Name "Prefix" $.CurrentPrefix)}}
       </div>
     </div>
     {{else}}
@@ -270,12 +258,8 @@
         <span class="gallery-size">{{formatSize .Length}}</span>
       </div>
       <div class="gallery-card-actions">
-        <a class="btn btn--icon btn--ghost" href="/buckets/{{$.BucketName}}/view/{{.Name}}" download="{{baseName .Name}}" title="Download File">
-          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-download"></use></svg>
-        </a>
-        <button class="btn btn--icon btn--danger" hx-delete="/buckets/{{$.BucketName}}/objects?key={{.Name}}&prefix={{$.CurrentPrefix}}" hx-confirm="Are you sure you want to delete file '{{baseName .Name}}'?" hx-target="#main-content" title="Delete File">
-          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-trash"></use></svg>
-        </button>
+        {{template "action-download" (dict "Bucket" $.BucketName "Key" .Name)}}
+        {{template "action-delete-file" (dict "Bucket" $.BucketName "Key" .Name "Prefix" $.CurrentPrefix)}}
       </div>
     </div>
     {{end}}
