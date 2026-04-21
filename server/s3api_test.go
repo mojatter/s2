@@ -277,9 +277,6 @@ func TestStartSkipsNilFactories(t *testing.T) {
 		return true
 	}, 3*time.Second, 10*time.Millisecond)
 
-	assert.True(t, nilCalled, "nil-returning factory should still be invoked")
-	assert.True(t, realCalled, "non-nil factory should be invoked")
-
 	cancel()
 	select {
 	case err := <-errCh:
@@ -287,4 +284,9 @@ func TestStartSkipsNilFactories(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("Start did not return after context cancel")
 	}
+
+	// Asserted after <-errCh: the channel receive establishes happens-before
+	// with the factory writes inside Start, so these reads are race-free.
+	assert.True(t, nilCalled, "nil-returning factory should still be invoked")
+	assert.True(t, realCalled, "non-nil factory should be invoked")
 }
