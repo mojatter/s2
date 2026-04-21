@@ -2,6 +2,7 @@ package buckets
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net/http"
 	"path"
@@ -18,16 +19,12 @@ type Breadcrumb struct {
 	Prefix string
 }
 
-func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	name := r.PathValue("name")
-	prefix := strings.TrimRight(r.URL.Query().Get("prefix"), "/")
-	search := r.URL.Query().Get("search")
-
-	strg, err := s.Buckets.Get(ctx, name)
+// objectsData loads the data needed to render the objects view.
+// Callers are responsible for choosing the full-page vs fragment renderer.
+func objectsData(ctx context.Context, s *server.Server, bucket, prefix, search string) (map[string]any, error) {
+	strg, err := s.Buckets.Get(ctx, bucket)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
+		return nil, err
 	}
 
 	var (
@@ -41,21 +38,18 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		}
 		res, err := strg.List(ctx, s2.ListOptions{Prefix: listPrefix, Recursive: true})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			return nil, err
 		}
 		objs = server.FilterKeep(res.Objects)
 	} else {
 		res, err := strg.List(ctx, s2.ListOptions{Prefix: prefix})
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			return nil, err
 		}
 		objs = server.FilterKeep(res.Objects)
 		prefixes = res.CommonPrefixes
 	}
 
-	// Calculate breadcrumbs
 	var breadcrumbs []Breadcrumb
 	parts := strings.Split(strings.Trim(prefix, "/"), "/")
 	current := ""
@@ -77,12 +71,10 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	parentPrefix := ""
 	if len(breadcrumbs) > 1 {
 		parentPrefix = breadcrumbs[len(breadcrumbs)-2].Prefix
-	} else if len(breadcrumbs) == 1 {
-		parentPrefix = ""
 	}
 
-	data := map[string]any{
-		"BucketName":    name,
+	return map[string]any{
+		"BucketName":    bucket,
 		"Objects":       objs,
 		"Prefixes":      prefixes,
 		"CurrentPrefix": prefix,
@@ -90,21 +82,45 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		"Breadcrumbs":   breadcrumbs,
 		"HasParent":     prefix != "" && prefix != "/",
 		"Search":        search,
-	}
+	}, nil
+}
 
-	if r.Header.Get("HX-Request") != "true" {
-		if err := s.RenderConsoleIndex(w, data); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
+// writeObjectsFragment renders the objects.html fragment for htmx partial swaps.
+// Used by both handleObjects (on HX-Request) and the mutating POST/DELETE
+// handlers to re-render the list after a state change.
+func writeObjectsFragment(ctx context.Context, w http.ResponseWriter, s *server.Server, bucket, prefix, search string) {
+	data, err := objectsData(ctx, s, bucket, prefix, search)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-
 	var buf bytes.Buffer
 	if err := s.Template.ExecuteTemplate(&buf, "console/buckets/objects.html", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	_, _ = buf.WriteTo(w)
+}
+
+func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	name := r.PathValue("name")
+	prefix := strings.TrimRight(r.URL.Query().Get("prefix"), "/")
+	search := r.URL.Query().Get("search")
+
+	if r.Header.Get("HX-Request") == "true" {
+		writeObjectsFragment(ctx, w, s, name, prefix, search)
+		return
+	}
+
+	data, err := objectsData(ctx, s, name, prefix, search)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if err := s.RenderConsoleIndex(w, data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 func handleCreateFolder(s *server.Server, w http.ResponseWriter, r *http.Request) {
@@ -124,13 +140,7 @@ func handleCreateFolder(s *server.Server, w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Re-render objects list
-	r.URL.Path = "/buckets/" + name
-	qs := r.URL.Query()
-	qs.Set("prefix", prefix)
-	r.URL.RawQuery = qs.Encode()
-	r.Header.Set("HX-Request", "true")
-	handleObjects(s, w, r)
+	writeObjectsFragment(ctx, w, s, name, prefix, "")
 }
 
 func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) {
@@ -138,7 +148,6 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	name := r.PathValue("name")
 	prefix := r.FormValue("prefix")
 
-	// Enforce upload size limit
 	maxSize := s.Config.EffectiveMaxUploadSize()
 	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 
@@ -166,13 +175,7 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Re-render objects list
-	r.URL.Path = "/buckets/" + name
-	qs := r.URL.Query()
-	qs.Set("prefix", prefix)
-	r.URL.RawQuery = qs.Encode()
-	r.Header.Set("HX-Request", "true")
-	handleObjects(s, w, r)
+	writeObjectsFragment(ctx, w, s, name, prefix, "")
 }
 
 func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
@@ -202,14 +205,8 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Re-render objects list
 	prefix := r.URL.Query().Get("prefix")
-	r.URL.Path = "/buckets/" + name
-	qs := r.URL.Query()
-	qs.Set("prefix", prefix)
-	r.URL.RawQuery = qs.Encode()
-	r.Header.Set("HX-Request", "true")
-	handleObjects(s, w, r)
+	writeObjectsFragment(ctx, w, s, name, prefix, "")
 }
 
 func init() {
