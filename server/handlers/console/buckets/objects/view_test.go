@@ -231,3 +231,99 @@ func (s *ViewTestSuite) TestHandleMeta() {
 		s.Equal(http.StatusNotFound, w.Code)
 	})
 }
+
+// --- GET /buckets/{name}/preview/{object...} ---
+
+func (s *ViewTestSuite) TestHandlePreview() {
+	testCases := []struct {
+		caseName        string
+		setup           func()
+		bucketName      string
+		objectName      string
+		wantCode        int
+		wantContains    []string
+		wantNotContains []string
+	}{
+		{
+			caseName: "text file embeds content",
+			setup: func() {
+				s.createBucket("prv")
+				s.putObject("prv", "hello.txt", []byte("hello world"))
+			},
+			bucketName:   "prv",
+			objectName:   "hello.txt",
+			wantCode:     http.StatusOK,
+			wantContains: []string{"hello world", "hello.txt"},
+		},
+		{
+			caseName: "image renders via view URL, not inline bytes",
+			setup: func() {
+				s.createBucket("prvi")
+				s.putObject("prvi", "pic.png", []byte("fake-png-bytes"))
+			},
+			bucketName:      "prvi",
+			objectName:      "pic.png",
+			wantCode:        http.StatusOK,
+			wantContains:    []string{"pic.png", "<img"},
+			wantNotContains: []string{"fake-png-bytes"},
+		},
+		{
+			caseName: "pdf renders an iframe",
+			setup: func() {
+				s.createBucket("prvp")
+				s.putObject("prvp", "doc.pdf", []byte("%PDF-fake"))
+			},
+			bucketName:   "prvp",
+			objectName:   "doc.pdf",
+			wantCode:     http.StatusOK,
+			wantContains: []string{"doc.pdf", "<iframe"},
+		},
+		{
+			caseName: "custom metadata appears in the table",
+			setup: func() {
+				s.createBucket("prvm")
+				md := s2.Metadata{"author": "tester"}
+				s.putObject("prvm", "meta.txt", []byte("x"), s2.WithMetadata(md))
+			},
+			bucketName:   "prvm",
+			objectName:   "meta.txt",
+			wantCode:     http.StatusOK,
+			wantContains: []string{"author", "tester"},
+		},
+		{
+			caseName:   "nonexistent bucket",
+			setup:      func() {},
+			bucketName: "nope",
+			objectName: "x.txt",
+			wantCode:   http.StatusNotFound,
+		},
+		{
+			caseName:   "nonexistent object",
+			setup:      func() { s.createBucket("prvx") },
+			bucketName: "prvx",
+			objectName: "missing.txt",
+			wantCode:   http.StatusNotFound,
+		},
+	}
+
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			tc.setup()
+
+			req := httptest.NewRequest("GET", "/buckets/"+tc.bucketName+"/preview/"+tc.objectName, nil)
+			req.SetPathValue("name", tc.bucketName)
+			req.SetPathValue("object", tc.objectName)
+			w := httptest.NewRecorder()
+			handlePreview(s.server, w, req)
+
+			s.Equal(tc.wantCode, w.Code)
+			body := w.Body.String()
+			for _, want := range tc.wantContains {
+				s.Contains(body, want)
+			}
+			for _, notWant := range tc.wantNotContains {
+				s.NotContains(body, notWant)
+			}
+		})
+	}
+}

@@ -1,7 +1,9 @@
 package buckets
 
 import (
+	"bytes"
 	"context"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -207,6 +209,97 @@ func (s *ObjectsTestSuite) TestHandleCreateFolder() {
 
 		s.Equal(http.StatusBadRequest, w.Code)
 	})
+}
+
+// --- POST /buckets/{name}/upload ---
+
+func (s *ObjectsTestSuite) TestHandleUploadFile() {
+	testCases := []struct {
+		caseName   string
+		setup      func()
+		bucketName string
+		prefix     string
+		filename   string
+		content    []byte
+		omitFile   bool
+		wantCode   int
+		wantKey    string // if non-empty, verify this key landed in the bucket
+	}{
+		{
+			caseName:   "success at root",
+			setup:      func() { s.createBucket("up") },
+			bucketName: "up",
+			prefix:     "",
+			filename:   "hello.txt",
+			content:    []byte("hello"),
+			wantCode:   http.StatusOK,
+			wantKey:    "hello.txt",
+		},
+		{
+			caseName: "success with prefix",
+			setup: func() {
+				s.createBucket("upp")
+				s.Require().NoError(s.server.Buckets.CreateFolder(context.Background(), "upp", "docs"))
+			},
+			bucketName: "upp",
+			prefix:     "docs",
+			filename:   "report.txt",
+			content:    []byte("content"),
+			wantCode:   http.StatusOK,
+			wantKey:    "docs/report.txt",
+		},
+		{
+			caseName:   "nonexistent bucket",
+			setup:      func() {},
+			bucketName: "nope",
+			prefix:     "",
+			filename:   "x.txt",
+			content:    []byte("x"),
+			wantCode:   http.StatusNotFound,
+		},
+		{
+			caseName:   "missing file field",
+			setup:      func() { s.createBucket("upn") },
+			bucketName: "upn",
+			prefix:     "",
+			omitFile:   true,
+			wantCode:   http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			tc.setup()
+
+			body := &bytes.Buffer{}
+			mw := multipart.NewWriter(body)
+			s.Require().NoError(mw.WriteField("prefix", tc.prefix))
+			if !tc.omitFile {
+				fw, err := mw.CreateFormFile("file", tc.filename)
+				s.Require().NoError(err)
+				_, err = fw.Write(tc.content)
+				s.Require().NoError(err)
+			}
+
+			s.Require().NoError(mw.Close())
+
+			req := httptest.NewRequest("POST", "/buckets/"+tc.bucketName+"/upload", body)
+			req.Header.Set("Content-Type", mw.FormDataContentType())
+			req.Header.Set("HX-Request", "true")
+			req.SetPathValue("name", tc.bucketName)
+			w := httptest.NewRecorder()
+			handleUploadFile(s.server, w, req)
+
+			s.Equal(tc.wantCode, w.Code)
+			if tc.wantKey != "" {
+				strg, err := s.server.Buckets.Get(context.Background(), tc.bucketName)
+				s.Require().NoError(err)
+				exists, err := strg.Exists(context.Background(), tc.wantKey)
+				s.Require().NoError(err)
+				s.True(exists, "object %q should exist after upload", tc.wantKey)
+			}
+		})
+	}
 }
 
 // --- DELETE /buckets/{name}/objects ---
