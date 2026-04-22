@@ -3,10 +3,10 @@ module github.com/mojatter/s2/s2env
 go 1.25.0
 
 require (
-	github.com/mojatter/s2 v0.5.1
-	github.com/mojatter/s2/azblob v0.8.0
-	github.com/mojatter/s2/gcs v0.8.0
-	github.com/mojatter/s2/s3 v0.8.0
+	github.com/mojatter/s2 v0.9.0
+	github.com/mojatter/s2/azblob v0.9.1
+	github.com/mojatter/s2/gcs v0.9.1
+	github.com/mojatter/s2/s3 v0.9.1
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -95,6 +95,7 @@ replace (
 	github.com/mojatter/s2 => ../
 	github.com/mojatter/s2/azblob => ../azblob
 	github.com/mojatter/s2/gcs => ../gcs
-	github.com/mojatter/s2/s2test => ../s2test
 	github.com/mojatter/s2/s3 => ../s3
 )
+
+retract v0.9.0 // Published with stale require directives; use v0.9.1+.
