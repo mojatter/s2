@@ -66,3 +66,9 @@ Avoid calling the library a "client" — it includes backends like `osfs` and `m
 Past API design decisions and audits live under [`docs/`](docs/). They are not user-facing documentation, but they record *why* certain shapes were chosen and are useful when proposing changes:
 
 - [`docs/api-audit.md`](docs/api-audit.md) — public API audit and verdicts heading into the v0.2 stabilization.
+
+## Releasing
+
+Maintainer-only. See [`docs/releasing.md`](docs/releasing.md) for the
+end-to-end flow (go.mod bumps, tagging, GoReleaser, and known gotchas
+specific to the multi-module workspace).
