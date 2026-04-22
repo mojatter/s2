@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	cloud.google.com/go/storage v1.60.0
-	github.com/mojatter/s2 v0.5.1
+	github.com/mojatter/s2 v0.9.0
 	github.com/stretchr/testify v1.11.1
 	google.golang.org/api v0.265.0
 )
@@ -61,3 +61,5 @@ require (
 )
 
 replace github.com/mojatter/s2 => ../
+
+retract v0.9.0 // Published with stale require directive; use v0.9.1+.

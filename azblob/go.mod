@@ -6,7 +6,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v1.6.4
-	github.com/mojatter/s2 v0.5.1
+	github.com/mojatter/s2 v0.9.0
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -27,3 +27,5 @@ require (
 )
 
 replace github.com/mojatter/s2 => ../
+
+retract v0.9.0 // Published with stale require directive; use v0.9.1+.
