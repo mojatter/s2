@@ -102,7 +102,7 @@ func (s *BucketsTestSuite) TestCreateAndNames() {
 	s.Require().NoError(s.buckets.Create(ctx, "alpha"))
 	s.Require().NoError(s.buckets.Create(ctx, "beta"))
 
-	names, err := s.buckets.Names()
+	names, err := s.buckets.Names(ctx)
 	s.Require().NoError(err)
 	s.Len(names, 2)
 	s.Contains(names, "alpha")
@@ -113,11 +113,11 @@ func (s *BucketsTestSuite) TestExists() {
 	ctx := context.Background()
 	s.Require().NoError(s.buckets.Create(ctx, "exists-test"))
 
-	ok, err := s.buckets.Exists("exists-test")
+	ok, err := s.buckets.Exists(ctx, "exists-test")
 	s.Require().NoError(err)
 	s.True(ok)
 
-	ok, err = s.buckets.Exists("no-such-bucket")
+	ok, err = s.buckets.Exists(ctx, "no-such-bucket")
 	s.Require().NoError(err)
 	s.False(ok)
 }
@@ -146,12 +146,12 @@ func (s *BucketsTestSuite) TestDelete() {
 	ctx := context.Background()
 	s.Require().NoError(s.buckets.Create(ctx, "to-delete"))
 
-	ok, _ := s.buckets.Exists("to-delete")
+	ok, _ := s.buckets.Exists(ctx, "to-delete")
 	s.True(ok)
 
 	s.Require().NoError(s.buckets.Delete(ctx, "to-delete"))
 
-	ok, _ = s.buckets.Exists("to-delete")
+	ok, _ = s.buckets.Exists(ctx, "to-delete")
 	s.False(ok)
 }
 

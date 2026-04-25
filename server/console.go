@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
@@ -25,8 +26,8 @@ func RegisterConsoleHandleFunc(pattern string, handler HandlerFunc) {
 // RenderConsoleIndex renders the full index.html page into w. The
 // current bucket list is added to data under the "Buckets" key before
 // template execution; data may be nil.
-func (s *Server) RenderConsoleIndex(w http.ResponseWriter, data map[string]any) error {
-	names, err := s.Buckets.Names()
+func (s *Server) RenderConsoleIndex(ctx context.Context, w http.ResponseWriter, data map[string]any) error {
+	names, err := s.Buckets.Names(ctx)
 	if err != nil {
 		return err
 	}

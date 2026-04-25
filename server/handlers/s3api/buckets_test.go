@@ -88,7 +88,7 @@ func (s *BucketsTestSuite) TestCreateBucket() {
 
 			s.Equal(tc.wantStatus, w.Code)
 			if tc.wantErrCode == "" {
-				exists, err := s.server.Buckets.Exists(tc.bucket)
+				exists, err := s.server.Buckets.Exists(req.Context(), tc.bucket)
 				s.Require().NoError(err)
 				s.True(exists)
 				return
@@ -113,7 +113,7 @@ func (s *BucketsTestSuite) TestDeleteBucket() {
 
 		s.Equal(http.StatusNoContent, w.Code)
 
-		exists, err := s.server.Buckets.Exists("to-delete")
+		exists, err := s.server.Buckets.Exists(req.Context(), "to-delete")
 		s.Require().NoError(err)
 		s.False(exists)
 	})

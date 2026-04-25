@@ -27,7 +27,7 @@ func (s *s3apiSuite) SetupTest() {
 func (s *s3apiSuite) putObject(bucket, key, content string) {
 	s.T().Helper()
 	ctx := context.Background()
-	if ok, _ := s.server.Buckets.Exists(bucket); !ok {
+	if ok, _ := s.server.Buckets.Exists(ctx, bucket); !ok {
 		s.Require().NoError(s.server.Buckets.Create(ctx, bucket))
 	}
 	strg, err := s.server.Buckets.Get(ctx, bucket)

@@ -101,8 +101,7 @@ func isValidBucketName(name string) bool {
 	return true
 }
 
-func (bs *Buckets) Names() ([]string, error) {
-	ctx := context.Background()
+func (bs *Buckets) Names(ctx context.Context) ([]string, error) {
 	res, err := bs.strg.List(ctx, s2.ListOptions{})
 	if err != nil {
 		return nil, err
@@ -111,7 +110,7 @@ func (bs *Buckets) Names() ([]string, error) {
 }
 
 func (bs *Buckets) Get(ctx context.Context, name string) (s2.Storage, error) {
-	exists, err := bs.Exists(name)
+	exists, err := bs.Exists(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -147,8 +146,8 @@ func (bs *Buckets) CreatedAt(ctx context.Context, name string) time.Time {
 // the s3 backend would need a different implementation because S3
 // has no "directory" primitive; s3 is intended for library-style use
 // against a single bucket, not as a multi-bucket server backend.
-func (bs *Buckets) Exists(name string) (bool, error) {
-	return bs.strg.Exists(context.Background(), name)
+func (bs *Buckets) Exists(ctx context.Context, name string) (bool, error) {
+	return bs.strg.Exists(ctx, name)
 }
 
 func (bs *Buckets) Create(ctx context.Context, name string) error {

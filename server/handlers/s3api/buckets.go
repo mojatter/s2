@@ -8,7 +8,8 @@ import (
 )
 
 func HandleListBuckets(s *server.Server, w http.ResponseWriter, r *http.Request) {
-	names, err := s.Buckets.Names()
+	ctx := r.Context()
+	names, err := s.Buckets.Names(ctx)
 	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
@@ -19,7 +20,7 @@ func HandleListBuckets(s *server.Server, w http.ResponseWriter, r *http.Request)
 	for _, name := range names {
 		buckets = append(buckets, Bucket{
 			Name:         name,
-			CreationDate: s.Buckets.CreatedAt(r.Context(), name),
+			CreationDate: s.Buckets.CreatedAt(ctx, name),
 		})
 	}
 
@@ -51,7 +52,7 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
 
-	exists, err := s.Buckets.Exists(bucketName)
+	exists, err := s.Buckets.Exists(ctx, bucketName)
 	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
@@ -74,7 +75,7 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 func handleHeadBucket(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	bucketName := r.PathValue("bucket")
 
-	exists, err := s.Buckets.Exists(bucketName)
+	exists, err := s.Buckets.Exists(r.Context(), bucketName)
 	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
@@ -91,7 +92,7 @@ func handleHeadBucket(s *server.Server, w http.ResponseWriter, r *http.Request) 
 func handleGetBucketLocation(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	bucketName := r.PathValue("bucket")
 
-	exists, err := s.Buckets.Exists(bucketName)
+	exists, err := s.Buckets.Exists(r.Context(), bucketName)
 	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
