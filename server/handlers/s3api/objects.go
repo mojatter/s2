@@ -1,6 +1,7 @@
 package s3api
 
 import (
+	"context"
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
 	"encoding/hex"
 	"encoding/xml"
@@ -63,89 +64,97 @@ func filterPrefixesByBasename(prefixes []string, listDir, baseFilter string) []s
 	return out
 }
 
-func handleListObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	bucketName := r.PathValue("bucket")
-	query := r.URL.Query()
-	prefix := query.Get("prefix")
-	delimiter := query.Get("delimiter")
-	continuationToken := query.Get("continuation-token")
-	startAfter := query.Get("start-after")
+// listObjectsParams holds the query parameters for ListObjectsV2.
+type listObjectsParams struct {
+	bucketName        string
+	prefix            string
+	delimiter         string
+	continuationToken string
+	startAfter        string
+	maxKeys           int
+}
 
-	maxKeys := defaultMaxKeys
+// after returns the continuation point: continuation-token wins over start-after.
+func (p listObjectsParams) after() string {
+	if p.continuationToken != "" {
+		return p.continuationToken
+	}
+	return p.startAfter
+}
+
+func parseListObjectsParams(r *http.Request) listObjectsParams {
+	query := r.URL.Query()
+	p := listObjectsParams{
+		bucketName:        r.PathValue("bucket"),
+		prefix:            query.Get("prefix"),
+		delimiter:         query.Get("delimiter"),
+		continuationToken: query.Get("continuation-token"),
+		startAfter:        query.Get("start-after"),
+		maxKeys:           defaultMaxKeys,
+	}
 	if v := query.Get("max-keys"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			maxKeys = n
+			p.maxKeys = n
 		}
 	}
+	return p
+}
 
-	// continuation-token takes precedence over start-after
-	after := continuationToken
-	if after == "" {
-		after = startAfter
-	}
-
-	strg, err := s.Buckets.Get(ctx, bucketName)
-	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
-		return
-	}
-
+// listObjects fetches objects (and common prefixes for delimited requests)
+// from storage according to params.
+func listObjects(ctx context.Context, strg s2.Storage, p listObjectsParams) ([]s2.Object, []string, error) {
 	// Fetch extra to detect truncation (+1) and account for hidden .keep files (+1)
-	fetchLimit := maxKeys + 2
+	fetchLimit := p.maxKeys + 2
 
-	var (
-		objs     []s2.Object
-		prefixes []string
-		res      s2.ListResult
-	)
-	if delimiter == "" {
+	if p.delimiter == "" {
 		// Recursive: List already does string-prefix matching, so an
 		// arbitrary S3 prefix (e.g. "im" matching "images/a.png") works as-is.
-		res, err = strg.List(ctx, s2.ListOptions{
-			Prefix:    prefix,
-			After:     after,
+		res, err := strg.List(ctx, s2.ListOptions{
+			Prefix:    p.prefix,
+			After:     p.after(),
 			Limit:     fetchLimit,
 			Recursive: true,
 		})
-		objs = res.Objects
-	} else {
-		// Delimited: S3 prefixes are arbitrary strings, but storage.List has
-		// directory semantics. Split the prefix at the last "/" so we list the
-		// directory portion and filter the entries by the remaining basename.
-		listDir, baseFilter := splitS3Prefix(prefix)
-		res, err = strg.List(ctx, s2.ListOptions{
-			Prefix: listDir,
-			After:  after,
-			Limit:  fetchLimit,
-		})
-		objs = res.Objects
-		prefixes = res.CommonPrefixes
-		if err == nil && baseFilter != "" {
-			objs = filterObjectsByBasename(objs, listDir, baseFilter)
-			prefixes = filterPrefixesByBasename(prefixes, listDir, baseFilter)
+		if err != nil {
+			return nil, nil, err
 		}
+		return res.Objects, nil, nil
 	}
+
+	// Delimited: S3 prefixes are arbitrary strings, but storage.List has
+	// directory semantics. Split the prefix at the last "/" so we list the
+	// directory portion and filter the entries by the remaining basename.
+	listDir, baseFilter := splitS3Prefix(p.prefix)
+	res, err := strg.List(ctx, s2.ListOptions{
+		Prefix: listDir,
+		After:  p.after(),
+		Limit:  fetchLimit,
+	})
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
-		return
+		return nil, nil, err
 	}
-
-	objs = server.FilterKeep(objs)
-	objs = filterMultipart(objs)
-
-	isTruncated := false
-	var nextToken string
-	if maxKeys > 0 && len(objs) > maxKeys {
-		isTruncated = true
-		nextToken = objs[maxKeys-1].Name()
-		objs = objs[:maxKeys]
-	} else if maxKeys == 0 {
-		objs = nil
+	objs := res.Objects
+	prefixes := res.CommonPrefixes
+	if baseFilter != "" {
+		objs = filterObjectsByBasename(objs, listDir, baseFilter)
+		prefixes = filterPrefixesByBasename(prefixes, listDir, baseFilter)
 	}
+	return objs, prefixes, nil
+}
 
+// applyMaxKeys clips objs to maxKeys, returning the cursor for the next page
+// when the input was truncated.
+func applyMaxKeys(objs []s2.Object, maxKeys int) (out []s2.Object, nextToken string, isTruncated bool) {
+	if maxKeys == 0 {
+		return nil, "", false
+	}
+	if len(objs) > maxKeys {
+		return objs[:maxKeys], objs[maxKeys-1].Name(), true
+	}
+	return objs, "", false
+}
+
+func buildListBucketResult(p listObjectsParams, objs []s2.Object, prefixes []string, nextToken string, isTruncated bool) ListBucketResult {
 	contents := make([]Content, 0, len(objs))
 	for _, obj := range objs {
 		contents = append(contents, Content{
@@ -157,30 +166,52 @@ func handleListObjects(s *server.Server, w http.ResponseWriter, r *http.Request)
 		})
 	}
 	commonPrefixes := make([]CommonPrefix, 0, len(prefixes))
-	for _, p := range prefixes {
-		prefixWithDelimiter := p
-		if delimiter != "" && p[len(p)-1] != delimiter[0] {
-			prefixWithDelimiter += delimiter
+	for _, prefix := range prefixes {
+		prefixWithDelimiter := prefix
+		if p.delimiter != "" && prefix[len(prefix)-1] != p.delimiter[0] {
+			prefixWithDelimiter += p.delimiter
 		}
 		commonPrefixes = append(commonPrefixes, CommonPrefix{
 			Prefix: prefixWithDelimiter,
 		})
 	}
-
-	result := ListBucketResult{
-		Name:                  bucketName,
-		Prefix:                prefix,
-		Delimiter:             delimiter,
+	return ListBucketResult{
+		Name:                  p.bucketName,
+		Prefix:                p.prefix,
+		Delimiter:             p.delimiter,
 		KeyCount:              len(objs) + len(prefixes),
-		MaxKeys:               maxKeys,
+		MaxKeys:               p.maxKeys,
 		IsTruncated:           isTruncated,
 		Contents:              contents,
 		CommonPrefixes:        commonPrefixes,
-		ContinuationToken:     continuationToken,
+		ContinuationToken:     p.continuationToken,
 		NextContinuationToken: nextToken,
 	}
+}
 
-	writeXML(w, http.StatusOK, result)
+func handleListObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	p := parseListObjectsParams(r)
+
+	strg, err := s.Buckets.Get(ctx, p.bucketName)
+	if err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+
+	objs, prefixes, err := listObjects(ctx, strg, p)
+	if err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+
+	objs = server.FilterKeep(objs)
+	objs = filterMultipart(objs)
+	objs, nextToken, isTruncated := applyMaxKeys(objs, p.maxKeys)
+
+	writeXML(w, http.StatusOK, buildListBucketResult(p, objs, prefixes, nextToken, isTruncated))
 }
 
 func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
