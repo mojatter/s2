@@ -262,13 +262,14 @@ func TestInitBuckets(t *testing.T) {
 		srv, err := NewServer(context.Background(), cfg)
 		require.NoError(t, err)
 
+		ctx := context.Background()
 		for _, name := range cfg.Buckets {
-			if ok, _ := srv.Buckets.Exists(name); !ok {
-				require.NoError(t, srv.Buckets.Create(context.Background(), name))
+			if ok, _ := srv.Buckets.Exists(ctx, name); !ok {
+				require.NoError(t, srv.Buckets.Create(ctx, name))
 			}
 		}
 
-		names, err := srv.Buckets.Names()
+		names, err := srv.Buckets.Names(ctx)
 		require.NoError(t, err)
 		assert.Contains(t, names, "alpha")
 		assert.Contains(t, names, "bravo")
@@ -279,18 +280,19 @@ func TestInitBuckets(t *testing.T) {
 		cfg.Root = t.TempDir()
 		cfg.Buckets = []string{"existing"}
 
-		srv, err := NewServer(context.Background(), cfg)
+		ctx := context.Background()
+		srv, err := NewServer(ctx, cfg)
 		require.NoError(t, err)
 
-		require.NoError(t, srv.Buckets.Create(context.Background(), "existing"))
+		require.NoError(t, srv.Buckets.Create(ctx, "existing"))
 
 		for _, name := range cfg.Buckets {
-			if ok, _ := srv.Buckets.Exists(name); !ok {
-				require.NoError(t, srv.Buckets.Create(context.Background(), name))
+			if ok, _ := srv.Buckets.Exists(ctx, name); !ok {
+				require.NoError(t, srv.Buckets.Create(ctx, name))
 			}
 		}
 
-		names, err := srv.Buckets.Names()
+		names, err := srv.Buckets.Names(ctx)
 		require.NoError(t, err)
 		assert.Contains(t, names, "existing")
 	})

@@ -2,14 +2,15 @@ package console
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 
 	"github.com/mojatter/s2/server"
 	"github.com/mojatter/s2/server/middleware"
 )
 
-func handleIndex(s *server.Server, w http.ResponseWriter, _ *http.Request) {
-	if err := s.RenderConsoleIndex(w, nil); err != nil {
+func handleIndex(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	if err := s.RenderConsoleIndex(r.Context(), w, nil); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -26,7 +27,7 @@ func handleCreateBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	renderBucketList(s, w)
+	renderBucketList(r.Context(), s, w)
 }
 
 func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request) {
@@ -40,7 +41,7 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	names, err := s.Buckets.Names()
+	names, err := s.Buckets.Names(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -69,8 +70,8 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 }
 
 // renderBucketList renders the sidebar bucket list fragment.
-func renderBucketList(s *server.Server, w http.ResponseWriter) {
-	names, err := s.Buckets.Names()
+func renderBucketList(ctx context.Context, s *server.Server, w http.ResponseWriter) {
+	names, err := s.Buckets.Names(ctx)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

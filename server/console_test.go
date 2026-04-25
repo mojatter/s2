@@ -38,7 +38,7 @@ func TestRenderConsoleIndex(t *testing.T) {
 			}
 
 			w := httptest.NewRecorder()
-			require.NoError(t, srv.RenderConsoleIndex(w, nil))
+			require.NoError(t, srv.RenderConsoleIndex(context.Background(), w, nil))
 
 			body := w.Body.String()
 			for _, want := range tc.wantContains {

@@ -118,7 +118,7 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	if err := s.RenderConsoleIndex(w, data); err != nil {
+	if err := s.RenderConsoleIndex(ctx, w, data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }

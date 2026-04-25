@@ -150,7 +150,7 @@ func Run(args []string) error {
 		return err
 	}
 	for _, name := range cfg.Buckets {
-		if ok, _ := srv.Buckets.Exists(name); ok {
+		if ok, _ := srv.Buckets.Exists(ctx, name); ok {
 			continue
 		}
 		if err := srv.Buckets.Create(ctx, name); err != nil {
