@@ -713,13 +713,32 @@ tr:hover td {
   text-decoration: none;
   color: var(--text);
   position: relative;
+  display: flex;
+  flex-direction: column;
 }
 
 .gallery-card-body {
   display: block;
+  flex: 1;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: inherit;
   cursor: pointer;
   text-decoration: none;
   color: inherit;
+}
+
+.gallery-card-body:disabled {
+  cursor: default;
+}
+
+.gallery-card-body:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+  border-radius: 12px;
 }
 
 .gallery-card-actions {
@@ -732,7 +751,8 @@ tr:hover td {
   transition: opacity 0.15s;
 }
 
-.gallery-card:hover .gallery-card-actions {
+.gallery-card:hover .gallery-card-actions,
+.gallery-card:focus-within .gallery-card-actions {
   opacity: 1;
 }
 

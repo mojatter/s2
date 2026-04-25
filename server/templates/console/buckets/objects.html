@@ -230,7 +230,7 @@
     {{range .Objects}}
     {{if isImage .Name}}
     <div class="gallery-card gallery-image" data-name="{{baseName .Name}}">
-      <div class="gallery-card-body"
+      <button type="button" class="gallery-card-body"
         hx-get="/buckets/{{$.BucketName}}/preview/{{.Name}}"
         hx-target="#preview-dialog" hx-swap="innerHTML">
         <div class="gallery-thumb" data-src="/buckets/{{$.BucketName}}/view/{{.Name}}">
@@ -240,7 +240,7 @@
         </div>
         <span class="gallery-label">{{if $.Search}}{{trimPrefix $.CurrentPrefix .Name}}{{else}}{{baseName .Name}}{{end}}</span>
         <span class="gallery-size">{{formatSize .Length}}</span>
-      </div>
+      </button>
       <div class="gallery-card-actions">
         {{template "action-download" (dict "Bucket" $.BucketName "Key" .Name)}}
         {{template "action-delete-file" (dict "Bucket" $.BucketName "Key" .Name "Prefix" $.CurrentPrefix)}}
@@ -248,15 +248,15 @@
     </div>
     {{else}}
     <div class="gallery-card gallery-file" data-name="{{baseName .Name}}">
-      <div class="gallery-card-body"
+      <button type="button" class="gallery-card-body"
         {{if isPreviewable .Name .Length}}hx-get="/buckets/{{$.BucketName}}/preview/{{.Name}}"
-        hx-target="#preview-dialog" hx-swap="innerHTML"{{end}}>
+        hx-target="#preview-dialog" hx-swap="innerHTML"{{else}}disabled{{end}}>
         <div class="gallery-file-icon">
           <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-file"></use></svg>
         </div>
         <span class="gallery-label">{{if $.Search}}{{trimPrefix $.CurrentPrefix .Name}}{{else}}{{baseName .Name}}{{end}}</span>
         <span class="gallery-size">{{formatSize .Length}}</span>
-      </div>
+      </button>
       <div class="gallery-card-actions">
         {{template "action-download" (dict "Bucket" $.BucketName "Key" .Name)}}
         {{template "action-delete-file" (dict "Bucket" $.BucketName "Key" .Name "Prefix" $.CurrentPrefix)}}
