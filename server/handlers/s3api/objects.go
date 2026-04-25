@@ -280,63 +280,61 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleRangeRequest(w http.ResponseWriter, r *http.Request, obj s2.Object, rangeHeader string) {
-	if !strings.HasPrefix(rangeHeader, "bytes=") {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", obj.Length()))
-		writeError(w, r, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
-		return
+// parseRangeHeader parses an RFC 7233 byte-range header against a total
+// content size and returns the resolved inclusive [start, end] bounds.
+// The third return is false when the header is malformed or cannot be satisfied.
+func parseRangeHeader(header string, total uint64) (uint64, uint64, bool) {
+	spec, ok := strings.CutPrefix(header, "bytes=")
+	if !ok {
+		return 0, 0, false
+	}
+	before, after, found := strings.Cut(spec, "-")
+	if !found {
+		return 0, 0, false
 	}
 
-	spec := rangeHeader[len("bytes="):]
-	var start, end uint64
-	total := obj.Length()
-
-	if before, after, ok := strings.Cut(spec, "-"); ok {
-		if before == "" {
-			// Suffix range: bytes=-N (last N bytes)
-			n, err := strconv.ParseUint(after, 10, 64)
-			if err != nil || n == 0 {
-				w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
-				writeError(w, r, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
-				return
-			}
-			if n > total {
-				n = total
-			}
-			start = total - n
-			end = total - 1
-		} else {
-			s, err := strconv.ParseUint(before, 10, 64)
-			if err != nil || s >= total {
-				w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
-				writeError(w, r, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
-				return
-			}
-			start = s
-			if after == "" {
-				end = total - 1
-			} else {
-				e, err := strconv.ParseUint(after, 10, 64)
-				if err != nil {
-					w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
-					writeError(w, r, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
-					return
-				}
-				if e >= total {
-					e = total - 1
-				}
-				end = e
-			}
+	if before == "" {
+		// Suffix range: bytes=-N (last N bytes)
+		n, err := strconv.ParseUint(after, 10, 64)
+		if err != nil || n == 0 {
+			return 0, 0, false
 		}
-	} else {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
-		writeError(w, r, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
-		return
+		if n > total {
+			n = total
+		}
+		return total - n, total - 1, true
 	}
 
-	if start > end {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
-		writeError(w, r, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+	s, err := strconv.ParseUint(before, 10, 64)
+	if err != nil || s >= total {
+		return 0, 0, false
+	}
+	if after == "" {
+		return s, total - 1, true
+	}
+	e, err := strconv.ParseUint(after, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	if e >= total {
+		e = total - 1
+	}
+	if s > e {
+		return 0, 0, false
+	}
+	return s, e, true
+}
+
+func writeRangeNotSatisfiable(w http.ResponseWriter, r *http.Request, total uint64) {
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", total))
+	writeError(w, r, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
+}
+
+func handleRangeRequest(w http.ResponseWriter, r *http.Request, obj s2.Object, rangeHeader string) {
+	total := obj.Length()
+	start, end, ok := parseRangeHeader(rangeHeader, total)
+	if !ok {
+		writeRangeNotSatisfiable(w, r, total)
 		return
 	}
 
