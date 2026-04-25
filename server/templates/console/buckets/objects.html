@@ -279,16 +279,15 @@
 {{define "scripts:console/buckets/objects.html"}}
 <script>
   function setViewMode(mode, btn) {
-    var listView = document.getElementById('list-view');
-    var galleryView = document.getElementById('gallery-view');
-    if (!listView || !galleryView) return;
+    const listView = document.getElementById('list-view');
+    const galleryView = document.getElementById('gallery-view');
 
-    var btns = document.querySelectorAll('.view-toggle-btn');
+    const btns = document.querySelectorAll('.view-toggle-btn');
     btns.forEach(function(b) { b.classList.remove('active'); });
     if (btn) {
       btn.classList.add('active');
     } else {
-      var idx = mode === 'gallery' ? 1 : 0;
+      const idx = mode === 'gallery' ? 1 : 0;
       if (btns[idx]) btns[idx].classList.add('active');
     }
 
@@ -303,15 +302,15 @@
   }
 
   function initGalleryView() {
-    var thumbs = document.querySelectorAll('.gallery-thumb[data-src]');
+    const thumbs = document.querySelectorAll('.gallery-thumb[data-src]');
     if (thumbs.length > 0) {
-      var observer = new IntersectionObserver(function(entries) {
+      const observer = new IntersectionObserver(function(entries) {
         entries.forEach(function(entry) {
           if (!entry.isIntersecting) return;
-          var el = entry.target;
-          var src = el.getAttribute('data-src');
+          const el = entry.target;
+          const src = el.getAttribute('data-src');
           if (!src) return;
-          var img = new Image();
+          const img = new Image();
           img.onload = function() {
             el.innerHTML = '';
             el.appendChild(img);
@@ -326,12 +325,12 @@
       thumbs.forEach(function(el) { observer.observe(el); });
     }
 
-    var mode = localStorage.getItem('s2-view-mode') || 'list';
+    const mode = localStorage.getItem('s2-view-mode') || 'list';
     setViewMode(mode);
   }
 
   document.addEventListener('htmx:afterSettle', function(evt) {
-    var id = evt.detail.target.id;
+    const id = evt.detail.target.id;
     if (id === 'main-content') {
       initGalleryView();
     } else if (id === 'preview-dialog') {
