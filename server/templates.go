@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"io/fs"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -43,19 +44,35 @@ func loadTemplates(cfg *Config) (*template.Template, error) {
 	return t, nil
 }
 
+// The ext sets below use []string + slices.Contains. map[string]bool (O(1))
+// and sorted []string + slices.BinarySearch (O(log N)) were both considered,
+// but with <30 entries per set the lookup cost is negligible and plain
+// slices read cleanest.
+
 // imageExts is the set of file extensions recognized as images for gallery view.
-var imageExts = map[string]bool{
-	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".svg": true, ".bmp": true, ".ico": true,
+var imageExts = []string{
+	".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico",
 }
 
 // videoExts is the set of file extensions recognized as video for preview.
-var videoExts = map[string]bool{
-	".mp4": true, ".webm": true, ".ogg": true,
+var videoExts = []string{
+	".mp4", ".webm", ".ogg",
 }
 
 // audioExts is the set of file extensions recognized as audio for preview.
-var audioExts = map[string]bool{
-	".mp3": true, ".wav": true, ".aac": true, ".flac": true,
+var audioExts = []string{
+	".mp3", ".wav", ".aac", ".flac",
+}
+
+// textPreviewExts is the set of file extensions rendered as text in the
+// preview pane. These are subject to the MaxPreviewSize limit.
+var textPreviewExts = []string{
+	".txt", ".md", ".json", ".xml", ".csv", ".log",
+	".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+	".html", ".css", ".js", ".ts",
+	".go", ".py", ".rb", ".rs", ".java",
+	".c", ".h", ".cpp", ".sh", ".sql",
+	".makefile", ".dockerfile",
 }
 
 // PreviewType returns the preview category for the given file extension:
@@ -63,49 +80,19 @@ var audioExts = map[string]bool{
 func PreviewType(ext string) string {
 	ext = strings.ToLower(ext)
 	switch {
-	case imageExts[ext]:
+	case slices.Contains(imageExts, ext):
 		return "image"
-	case videoExts[ext]:
+	case slices.Contains(videoExts, ext):
 		return "video"
-	case audioExts[ext]:
+	case slices.Contains(audioExts, ext):
 		return "audio"
 	case ext == ".pdf":
 		return "pdf"
-	case textPreviewExts[ext]:
+	case slices.Contains(textPreviewExts, ext):
 		return "text"
 	default:
 		return ""
 	}
-}
-
-// previewableExts is the set of file extensions that can be previewed in the Web Console.
-var previewableExts = map[string]bool{
-	// Images
-	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".svg": true, ".bmp": true, ".ico": true,
-	// Video
-	".mp4": true, ".webm": true, ".ogg": true,
-	// Audio
-	".mp3": true, ".wav": true, ".aac": true, ".flac": true,
-	// PDF
-	".pdf": true,
-	// Text / Code
-	".txt": true, ".md": true, ".json": true, ".xml": true, ".csv": true, ".log": true,
-	".yaml": true, ".yml": true, ".toml": true, ".ini": true, ".cfg": true, ".conf": true,
-	".html": true, ".css": true, ".js": true, ".ts": true,
-	".go": true, ".py": true, ".rb": true, ".rs": true, ".java": true,
-	".c": true, ".h": true, ".cpp": true, ".sh": true, ".sql": true,
-	".makefile": true, ".dockerfile": true,
-}
-
-// textPreviewExts is the subset of previewableExts that are rendered as text.
-// These are subject to the MaxPreviewSize limit.
-var textPreviewExts = map[string]bool{
-	".txt": true, ".md": true, ".json": true, ".xml": true, ".csv": true, ".log": true,
-	".yaml": true, ".yml": true, ".toml": true, ".ini": true, ".cfg": true, ".conf": true,
-	".html": true, ".css": true, ".js": true, ".ts": true,
-	".go": true, ".py": true, ".rb": true, ".rs": true, ".java": true,
-	".c": true, ".h": true, ".cpp": true, ".sh": true, ".sql": true,
-	".makefile": true, ".dockerfile": true,
 }
 
 // templateFuncs returns the FuncMap exposed to every template loaded
@@ -135,14 +122,14 @@ func templateFuncs(cfg *Config) template.FuncMap {
 			return strings.TrimPrefix(key, prefix+"/")
 		},
 		"isImage": func(name string) bool {
-			return imageExts[strings.ToLower(path.Ext(name))]
+			return slices.Contains(imageExts, strings.ToLower(path.Ext(name)))
 		},
 		"isPreviewable": func(name string, size uint64) bool {
-			ext := strings.ToLower(path.Ext(name))
-			if !previewableExts[ext] {
+			pt := PreviewType(strings.ToLower(path.Ext(name)))
+			if pt == "" {
 				return false
 			}
-			if textPreviewExts[ext] && s2.MustInt64(size) > cfg.MaxPreviewSize {
+			if pt == "text" && s2.MustInt64(size) > cfg.MaxPreviewSize {
 				return false
 			}
 			return true
