@@ -48,7 +48,7 @@
         </div>
 
         <form class="new-bucket-form" hx-post="/buckets" hx-target=".bucket-list" hx-swap="outerHTML"
-          hx-on::after-request="if(event.detail.successful){var n=this.querySelector('[name=name]').value;this.reset();this.classList.remove('active');htmx.ajax('GET','/buckets/'+encodeURIComponent(n),{target:'#main-content',pushUrl:true});closeSidebarOnNarrow();}">
+          hx-on::after-request="afterBucketCreate(this, event)">
           <input type="text" name="name" placeholder="New bucket name..." required>
           <button type="submit">Create</button>
         </form>
@@ -100,6 +100,14 @@
         if (layout.classList.contains('layout--sidebar-collapsed')) return;
         layout.classList.add('layout--sidebar-collapsed');
         localStorage.setItem('s2-sidebar-collapsed', 'true');
+      };
+      window.afterBucketCreate = function(form, event) {
+        if (!event.detail.successful) return;
+        var name = form.elements.name.value;
+        form.reset();
+        form.classList.remove('active');
+        htmx.ajax('GET', '/buckets/' + encodeURIComponent(name), {target: '#main-content', pushUrl: true});
+        closeSidebarOnNarrow();
       };
       // On narrow, close the drawer when a bucket or the logo is clicked
       document.addEventListener('click', function(e) {
