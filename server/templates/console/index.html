@@ -83,16 +83,15 @@
 
   <script>
     (function() {
-      var layout = document.querySelector('.layout');
-      if (!layout) return;
-      var narrowQuery = window.matchMedia('(max-width: 900px)');
-      var stored = localStorage.getItem('s2-sidebar-collapsed');
-      var collapsed = stored === null ? narrowQuery.matches : stored === 'true';
+      const layout = document.querySelector('.layout');
+      const narrowQuery = window.matchMedia('(max-width: 900px)');
+      const stored = localStorage.getItem('s2-sidebar-collapsed');
+      const collapsed = stored === null ? narrowQuery.matches : stored === 'true';
       if (collapsed) {
         layout.classList.add('layout--sidebar-collapsed');
       }
       window.toggleSidebar = function() {
-        var isCollapsed = layout.classList.toggle('layout--sidebar-collapsed');
+        const isCollapsed = layout.classList.toggle('layout--sidebar-collapsed');
         localStorage.setItem('s2-sidebar-collapsed', isCollapsed);
       };
       window.closeSidebarOnNarrow = function() {
@@ -103,7 +102,7 @@
       };
       window.afterBucketCreate = function(form, event) {
         if (!event.detail.successful) return;
-        var name = form.elements.name.value;
+        const name = form.elements.name.value;
         form.reset();
         form.classList.remove('active');
         htmx.ajax('GET', '/buckets/' + encodeURIComponent(name), {target: '#main-content', pushUrl: true});
