@@ -71,12 +71,12 @@ func (s *BucketsTestSuite) TestCreateBucket() {
 		},
 		{
 			// DefaultConfig.HealthPath = "/healthz" reserves the bucket name "healthz".
-			// Buckets.Create returns ErrReservedBucketName, which currently has no
-			// specific S3 mapping and falls through to InternalError + 500.
+			// Buckets.Create returns ErrReservedBucketName, which s2ErrorToS3Error
+			// maps to InvalidBucketName + 400.
 			caseName:    "reserved name",
 			bucket:      "healthz",
-			wantStatus:  http.StatusInternalServerError,
-			wantErrCode: "InternalError",
+			wantStatus:  http.StatusBadRequest,
+			wantErrCode: "InvalidBucketName",
 		},
 	}
 	for _, tc := range testCases {
