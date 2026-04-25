@@ -3,7 +3,11 @@ WORKDIR /app
 # DefaultRoot is overridden via -ldflags so the Docker image defaults to
 # /var/lib/s2 while a bare "go install" binary keeps the friendlier
 # relative "./data" default (see server/config.go).
-RUN --mount=target=. GOOS=linux CGO_ENABLED=0 \
+# GOWORK=off disables workspace mode so the build does not try to update
+# go.work.sum on the read-only --mount; production builds use the
+# published module versions from cmd/s2-server/go.mod, not workspace
+# replacements.
+RUN --mount=target=. GOOS=linux CGO_ENABLED=0 GOWORK=off \
     cd cmd/s2-server && \
     go build \
       -ldflags "-s -w -X github.com/mojatter/s2/server.DefaultRoot=/var/lib/s2" \
