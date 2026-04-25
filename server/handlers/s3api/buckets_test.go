@@ -58,16 +58,46 @@ func (s *BucketsTestSuite) TestListBuckets() {
 // --- CreateBucket ---
 
 func (s *BucketsTestSuite) TestCreateBucket() {
-	req := httptest.NewRequest("PUT", "/new-bucket", nil)
-	req.SetPathValue("bucket", "new-bucket")
-	w := httptest.NewRecorder()
-	handleCreateBucket(s.server, w, req)
+	testCases := []struct {
+		caseName    string
+		bucket      string
+		wantStatus  int
+		wantErrCode string
+	}{
+		{
+			caseName:   "success",
+			bucket:     "new-bucket",
+			wantStatus: http.StatusOK,
+		},
+		{
+			// DefaultConfig.HealthPath = "/healthz" reserves the bucket name "healthz".
+			// Buckets.Create returns ErrReservedBucketName, which currently has no
+			// specific S3 mapping and falls through to InternalError + 500.
+			caseName:    "reserved name",
+			bucket:      "healthz",
+			wantStatus:  http.StatusInternalServerError,
+			wantErrCode: "InternalError",
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			req := httptest.NewRequest("PUT", "/"+tc.bucket, nil)
+			req.SetPathValue("bucket", tc.bucket)
+			w := httptest.NewRecorder()
+			handleCreateBucket(s.server, w, req)
 
-	s.Equal(http.StatusOK, w.Code)
-
-	exists, err := s.server.Buckets.Exists("new-bucket")
-	s.Require().NoError(err)
-	s.True(exists)
+			s.Equal(tc.wantStatus, w.Code)
+			if tc.wantErrCode == "" {
+				exists, err := s.server.Buckets.Exists(tc.bucket)
+				s.Require().NoError(err)
+				s.True(exists)
+				return
+			}
+			var errResp ErrorResponse
+			s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+			s.Equal(tc.wantErrCode, errResp.Code)
+		})
+	}
 }
 
 // --- DeleteBucket ---

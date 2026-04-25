@@ -396,6 +396,34 @@ func (s *ObjectsTestSuite) TestGetObject() {
 		s.Equal(http.StatusOK, w.Code)
 		s.Equal("nested", w.Body.String())
 	})
+
+	s.Run("trailing-slash GET dispatches to ListObjects", func() {
+		s.putObject("ts", "x.txt", "x")
+
+		req := httptest.NewRequest("GET", "/ts/", nil)
+		req.SetPathValue("bucket", "ts")
+		req.SetPathValue("key", "")
+		w := httptest.NewRecorder()
+		handleGetObject(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		var result ListBucketResult
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+		s.Equal("ts", result.Name)
+	})
+
+	s.Run("trailing-slash HEAD dispatches to HeadBucket", func() {
+		s.createBucket("ts2")
+
+		req := httptest.NewRequest("HEAD", "/ts2/", nil)
+		req.SetPathValue("bucket", "ts2")
+		req.SetPathValue("key", "")
+		w := httptest.NewRecorder()
+		handleGetObject(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		s.Empty(w.Body.String())
+	})
 }
 
 // --- HeadObject ---
