@@ -7,4 +7,5 @@ use (
 	./gcs
 	./s2env
 	./s3
+	./server
 )
