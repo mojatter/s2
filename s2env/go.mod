@@ -96,5 +96,3 @@ replace (
 	github.com/mojatter/s2/gcs => ../gcs
 	github.com/mojatter/s2/s3 => ../s3
 )
-
-retract v0.9.0 // Published with stale require directives; use v0.9.1+.

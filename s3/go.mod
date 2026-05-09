@@ -33,5 +33,3 @@ require (
 )
 
 replace github.com/mojatter/s2 => ../
-
-retract v0.9.0 // Published with stale require directive; use v0.9.1+.
