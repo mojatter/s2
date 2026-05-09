@@ -1,6 +1,6 @@
 module github.com/mojatter/s2/s3
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.7
