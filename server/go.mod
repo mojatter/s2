@@ -6,7 +6,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.41.7
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.16
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.101.0
-	github.com/mojatter/s2 v0.10.0
+	github.com/mojatter/s2 v0.11.0
 	github.com/stretchr/testify v1.11.1
 )
 

@@ -6,7 +6,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.41.7
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.101.0
-	github.com/mojatter/s2 v0.10.0
+	github.com/mojatter/s2 v0.11.0
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -33,5 +33,3 @@ require (
 )
 
 replace github.com/mojatter/s2 => ../
-
-retract v0.9.0 // Published with stale require directive; use v0.9.1+.
