@@ -41,7 +41,7 @@ jobs:
       -
         name: Run govulncheck (submodules)
         run: |
-          for dir in s3 gcs azblob s2env s2test; do
+          for dir in s3 gcs azblob s2env s2test server; do
             echo "=== govulncheck $dir ==="
             (cd $dir && govulncheck ./...)
           done
