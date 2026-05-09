@@ -38,7 +38,7 @@ jobs:
         run: |
           for dir in s3 gcs azblob s2env server cmd/s2-server; do
             echo "=== Testing $dir ==="
-            (cd $dir && go mod tidy && go test -race -v ./...)
+            (cd $dir && go test -race -v ./...)
           done
       -
         name: Lint submodules
