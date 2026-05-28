@@ -1,6 +1,6 @@
 module github.com/mojatter/s2
 
-go 1.25.0
+go 1.25.8
 
 require (
 	github.com/mojatter/wfs v0.5.0
