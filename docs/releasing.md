@@ -21,46 +21,51 @@ The repo ships several independently tagged Go modules:
 Only the root tag (`v*`) triggers CI / GoReleaser. The submodule tags
 are publication-only, for `go get`.
 
-## Release flow (example: v0.11.0)
+## Release flow (example: v0.11.1)
 
-### 1. Bump submodule `go.mod` files
+The flow is **two PRs**. The five modules that carry `replace`
+directives are bumped and tagged first; `cmd/s2-server` (which has no
+`replace`) follows once those tags are published. This is what v0.11.0
+(#119 → #120) and v0.11.1 (#130 → #131) actually did — a single PR that
+also bumps `cmd/s2-server` would fail the e2e build (see step 3).
 
-Open a single PR that bumps every submodule's intra-repo requires
-to the new version:
+### 1. Bump the replace-module `go.mod` files
+
+Open a PR that bumps the intra-repo requires to the new version in the
+five modules that have `replace` directives:
 
 - `s3/go.mod`, `gcs/go.mod`, `azblob/go.mod`, `server/go.mod`: bump
-  `github.com/mojatter/s2` to `v0.11.0`
-- `s2env/go.mod`: also bump `s3`, `gcs`, `azblob` to `v0.11.0`
-- `cmd/s2-server/go.mod`: bump `github.com/mojatter/s2`, `s3`, `gcs`,
-  `azblob`, `server` to `v0.11.0`
-- Run `go mod tidy` in each module locally to refresh `go.sum`
+  `github.com/mojatter/s2` to `v0.11.1`
+- `s2env/go.mod`: also bump `s3`, `gcs`, `azblob` to `v0.11.1`
 
-CI does not run `go mod tidy` in the per-submodule loop, so it is
-fine that the new tags do not yet exist on `proxy.golang.org`. `go
-test` resolves intra-repo deps via `go.work`. `cmd/s2-server` has no
-`replace` directives, but the workspace still covers it during CI.
+Do **not** bump `cmd/s2-server` here — it is handled in step 3.
+
+`go.sum` does not change: the `replace` directives resolve these
+modules locally, and CI resolves them through `go.work`, so the PR is
+green before any new tag exists. Don't run `go mod tidy` on the branch
+(it fails until the tags are published); just edit the `require` lines.
 
 Merge the PR.
 
-### 2. Tag and push
+### 2. Tag and push (six tags)
 
-Create the seven tags at the merge commit:
+Create six tags at the merge commit — the root tag plus the five
+bumped submodules (**not** `cmd/s2-server`):
 
 ```sh
-git tag -a v0.11.0               -m "Release v0.11.0"
-git tag -a s3/v0.11.0             -m "Release s3/v0.11.0"
-git tag -a gcs/v0.11.0            -m "Release gcs/v0.11.0"
-git tag -a azblob/v0.11.0         -m "Release azblob/v0.11.0"
-git tag -a s2env/v0.11.0          -m "Release s2env/v0.11.0"
-git tag -a server/v0.11.0         -m "Release server/v0.11.0"
-git tag -a cmd/s2-server/v0.11.0  -m "Release cmd/s2-server/v0.11.0"
+git tag -a v0.11.1        -m "Release v0.11.1"
+git tag -a s3/v0.11.1     -m "Release s3/v0.11.1"
+git tag -a gcs/v0.11.1    -m "Release gcs/v0.11.1"
+git tag -a azblob/v0.11.1 -m "Release azblob/v0.11.1"
+git tag -a s2env/v0.11.1  -m "Release s2env/v0.11.1"
+git tag -a server/v0.11.1 -m "Release server/v0.11.1"
 ```
 
 Push the submodule tags first, then the root tag **separately**:
 
 ```sh
-git push origin s3/v0.11.0 gcs/v0.11.0 azblob/v0.11.0 s2env/v0.11.0 server/v0.11.0 cmd/s2-server/v0.11.0
-git push origin v0.11.0
+git push origin s3/v0.11.1 gcs/v0.11.1 azblob/v0.11.1 s2env/v0.11.1 server/v0.11.1
+git push origin v0.11.1
 ```
 
 The root tag must be pushed alone. Pushing multiple tags in a single
@@ -68,13 +73,54 @@ The root tag must be pushed alone. Pushing multiple tags in a single
 submodule tags are safe to batch because they do not match any
 workflow trigger.
 
-### 3. Replace the auto-generated release notes
+The root tag triggers GoReleaser. At this commit `cmd/s2-server` still
+requires the **previous** release's intra-repo versions (it is bumped
+in step 3), so the binary links the previous version of the library
+code. That is fine when the change is a dependency/security bump pinned
+directly in `cmd/s2-server/go.mod` (e.g. `golang.org/x/net`): MVS picks
+the higher version from `cmd/s2-server`'s own requires regardless of
+the library versions. If a release changes library *code* the binary
+must ship, do step 3 first and push the root tag afterwards, so the
+GoReleaser build sees the bumped requires.
+
+### 3. Bump `cmd/s2-server` (after the tags are published)
+
+`cmd/s2-server` has no `replace` directives, so its `GOWORK=off` build
+— the e2e image (`server/Dockerfile` builds `cmd/s2-server`) and the
+GoReleaser binary — resolves intra-repo deps from `proxy.golang.org`.
+It can only require the new version once steps 1–2 have published the
+tags; bumping it earlier breaks the e2e build, which cannot fetch the
+not-yet-published version.
+
+Open a follow-up PR (the tags now exist, so `go get` resolves them):
+
+```sh
+cd cmd/s2-server
+GOWORK=off go get \
+  github.com/mojatter/s2@v0.11.1 \
+  github.com/mojatter/s2/s3@v0.11.1 \
+  github.com/mojatter/s2/gcs@v0.11.1 \
+  github.com/mojatter/s2/azblob@v0.11.1 \
+  github.com/mojatter/s2/server@v0.11.1
+GOWORK=off go mod tidy
+```
+
+Merge it, then tag at the merge commit and push:
+
+```sh
+git tag -a cmd/s2-server/v0.11.1 -m "Release cmd/s2-server/v0.11.1"
+git push origin cmd/s2-server/v0.11.1
+```
+
+`cmd/s2-server/v*` is publication-only and triggers no workflow.
+
+### 4. Replace the auto-generated release notes
 
 GoReleaser fills the GitHub Release with a generated changelog. Replace
 it with a hand-written version:
 
 ```sh
-gh release edit v0.11.0 --notes "$(cat <<'EOF'
+gh release edit v0.11.1 --notes "$(cat <<'EOF'
 ## Highlights
 ...
 ## Changes
@@ -82,7 +128,7 @@ gh release edit v0.11.0 --notes "$(cat <<'EOF'
 ## Upgrading
 ...
 ## Full Changelog
-https://github.com/mojatter/s2/compare/v0.10.0...v0.11.0
+https://github.com/mojatter/s2/compare/v0.11.0...v0.11.1
 EOF
 )"
 ```
@@ -119,9 +165,10 @@ the new tags are published. But:
   new tags exist. Run it after pushing tags, or skip it (CI will
   accept your branch).
 - The GoReleaser binary build relies on `cmd/s2-server/go.mod`'s
-  pinned requires. Step 1 above bumps them; if you skip that, the
-  binary will resolve intra-repo paths through the previous version's
-  proxy contents.
+  pinned requires, which are bumped in step 3 (after tagging). At the
+  root tag the binary therefore still links the previous library
+  version; step 2 explains why that is acceptable for
+  dependency/security bumps and when to reorder.
 
 ### Multi-tag push can miss webhooks
 
