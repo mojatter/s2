@@ -3,6 +3,15 @@ updates:
   - package-ecosystem: gomod
     directories:
       - /
+    schedule:
+      interval: weekly
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
+
+  - package-ecosystem: gomod
+    directories:
       - /azblob
       - /cmd/s2-server
       - /gcs
