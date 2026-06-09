@@ -3,10 +3,10 @@ module github.com/mojatter/s2/gcs
 go 1.25.8
 
 require (
-	cloud.google.com/go/storage v1.62.2
+	cloud.google.com/go/storage v1.62.3
 	github.com/mojatter/s2 v0.11.1
 	github.com/stretchr/testify v1.11.1
-	google.golang.org/api v0.282.0
+	google.golang.org/api v0.283.0
 )
 
 require (
