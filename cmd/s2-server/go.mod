@@ -3,11 +3,11 @@ module github.com/mojatter/s2/cmd/s2-server
 go 1.25.8
 
 require (
-	github.com/mojatter/s2 v0.11.1
-	github.com/mojatter/s2/azblob v0.11.1
-	github.com/mojatter/s2/gcs v0.11.1
-	github.com/mojatter/s2/s3 v0.11.1
-	github.com/mojatter/s2/server v0.11.1
+	github.com/mojatter/s2 v0.11.2
+	github.com/mojatter/s2/azblob v0.11.2
+	github.com/mojatter/s2/gcs v0.11.2
+	github.com/mojatter/s2/s3 v0.11.2
+	github.com/mojatter/s2/server v0.11.2
 )
 
 require (
@@ -59,7 +59,7 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.16 // indirect
 	github.com/googleapis/gax-go/v2 v2.22.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
-	github.com/mojatter/wfs v0.5.0 // indirect
+	github.com/mojatter/wfs v0.5.1 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	github.com/spiffe/go-spiffe/v2 v2.6.0 // indirect
