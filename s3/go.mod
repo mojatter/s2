@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/aws/aws-sdk-go-v2 v1.42.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.25
-	github.com/aws/aws-sdk-go-v2/service/s3 v1.103.3
+	github.com/aws/aws-sdk-go-v2/service/s3 v1.104.0
 	github.com/mojatter/s2 v0.11.1
 	github.com/stretchr/testify v1.11.1
 )
