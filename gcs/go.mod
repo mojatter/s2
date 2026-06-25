@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go/storage v1.62.3
 	github.com/mojatter/s2 v0.11.2
 	github.com/stretchr/testify v1.11.1
-	google.golang.org/api v0.285.0
+	google.golang.org/api v0.286.0
 )
 
 require (
