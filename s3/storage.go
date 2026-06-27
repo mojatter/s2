@@ -8,6 +8,7 @@ import (
 	"io"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
@@ -47,8 +48,45 @@ func init() {
 	s2.RegisterNewStorageFunc(s2.TypeS3, NewStorage)
 }
 
+// LoadOptionsFunc supplies additional AWS config load options for a given
+// s2.Config. It may inspect cfg and return nil, nil when it has nothing to
+// add for that cfg.
+type LoadOptionsFunc func(cfg s2.Config) ([]func(*awsconfig.LoadOptions) error, error)
+
+var (
+	loadOptionsMux   sync.Mutex
+	extraLoadOptions LoadOptionsFunc
+)
+
+// RegisterLoadOptionsFunc registers fn to supply additional AWS config load
+// options when NewStorage builds the AWS config for an S3 storage. This is
+// the extension point for credential mechanisms s2 does not implement
+// itself (e.g. Cognito Identity, STS AssumeRole, custom federation): build
+// the resolution logic outside s2 and register it here instead of forking
+// NewStorage.
+//
+// Registering again replaces any previously registered fn.
+func RegisterLoadOptionsFunc(fn LoadOptionsFunc) {
+	loadOptionsMux.Lock()
+	defer loadOptionsMux.Unlock()
+
+	extraLoadOptions = fn
+}
+
+// UnregisterLoadOptionsFunc removes a previously registered
+// RegisterLoadOptionsFunc hook. Primarily useful in tests that swap
+// credential strategies.
+func UnregisterLoadOptionsFunc() {
+	loadOptionsMux.Lock()
+	defer loadOptionsMux.Unlock()
+
+	extraLoadOptions = nil
+}
+
 // NewStorage creates a new S3 storage with the default AWS configuration.
-// If cfg.S3 is non-nil, its fields override the AWS SDK defaults.
+// If cfg.S3 is non-nil, its fields override the AWS SDK defaults. See
+// RegisterLoadOptionsFunc for plugging in credential mechanisms beyond
+// cfg.S3's static AccessKeyID/SecretAccessKey.
 func NewStorage(ctx context.Context, cfg s2.Config) (s2.Storage, error) {
 	if cfg.Root == "" {
 		return nil, ErrRequiredConfigRoot
@@ -70,6 +108,17 @@ func NewStorage(ctx context.Context, cfg s2.Config) (s2.Storage, error) {
 				}),
 			))
 		}
+	}
+
+	loadOptionsMux.Lock()
+	fn := extraLoadOptions
+	loadOptionsMux.Unlock()
+	if fn != nil {
+		extra, err := fn(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve registered AWS config load options: %w", err)
+		}
+		opts = append(opts, extra...)
 	}
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
