@@ -13,6 +13,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/mojatter/s2"
@@ -395,6 +396,92 @@ func (s *StorageTestSuite) TestNewStorage() {
 			s.NotNil(st.client)
 		})
 	}
+}
+
+func (s *StorageTestSuite) TestRegisterLoadOptionsFunc() {
+	s.T().Cleanup(func() { UnregisterLoadOptionsFunc() })
+
+	testCases := []struct {
+		caseName    string
+		fn          LoadOptionsFunc
+		cfg         s2.Config
+		wantRegion  string
+		wantAccess  string
+		wantSession string
+	}{
+		{
+			caseName: "applies registered credentials and region",
+			fn: func(cfg s2.Config) ([]func(*awsconfig.LoadOptions) error, error) {
+				return []func(*awsconfig.LoadOptions) error{
+					awsconfig.WithRegion("ap-northeast-1"),
+					awsconfig.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
+						return aws.Credentials{
+							AccessKeyID:     "REGISTERED",
+							SecretAccessKey: "REGISTERED-SECRET",
+							SessionToken:    "REGISTERED-SESSION",
+						}, nil
+					})),
+				}, nil
+			},
+			cfg:         s2.Config{Type: s2.TypeS3, Root: "my-bucket"},
+			wantRegion:  "ap-northeast-1",
+			wantAccess:  "REGISTERED",
+			wantSession: "REGISTERED-SESSION",
+		},
+		{
+			caseName: "nil, nil leaves AWS SDK defaults in place",
+			fn: func(cfg s2.Config) ([]func(*awsconfig.LoadOptions) error, error) {
+				return nil, nil
+			},
+			cfg: s2.Config{Type: s2.TypeS3, Root: "my-bucket"},
+		},
+	}
+
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			RegisterLoadOptionsFunc(tc.fn)
+
+			strg, err := NewStorage(context.Background(), tc.cfg)
+			s.Require().NoError(err)
+
+			st := strg.(*storage)
+			client, ok := st.client.(*s3.Client)
+			s.Require().True(ok)
+
+			opts := client.Options()
+			if tc.wantRegion != "" {
+				s.Equal(tc.wantRegion, opts.Region)
+			}
+			if tc.wantAccess != "" {
+				creds, err := opts.Credentials.Retrieve(context.Background())
+				s.Require().NoError(err)
+				s.Equal(tc.wantAccess, creds.AccessKeyID)
+				s.Equal(tc.wantSession, creds.SessionToken)
+			}
+		})
+	}
+}
+
+func (s *StorageTestSuite) TestRegisterLoadOptionsFuncError() {
+	s.T().Cleanup(func() { UnregisterLoadOptionsFunc() })
+
+	RegisterLoadOptionsFunc(func(cfg s2.Config) ([]func(*awsconfig.LoadOptions) error, error) {
+		return nil, fmt.Errorf("boom")
+	})
+
+	_, err := NewStorage(context.Background(), s2.Config{Type: s2.TypeS3, Root: "my-bucket"})
+	s.Require().Error(err)
+	s.ErrorContains(err, "boom")
+}
+
+func (s *StorageTestSuite) TestUnregisterLoadOptionsFunc() {
+	RegisterLoadOptionsFunc(func(cfg s2.Config) ([]func(*awsconfig.LoadOptions) error, error) {
+		return nil, fmt.Errorf("should not be called after unregister")
+	})
+	UnregisterLoadOptionsFunc()
+
+	_, err := NewStorage(context.Background(), s2.Config{Type: s2.TypeS3, Root: "my-bucket"})
+	s.Require().NoError(err)
 }
 
 func (s *StorageTestSuite) TestType() {
