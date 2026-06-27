@@ -3,11 +3,11 @@ module github.com/mojatter/s2/cmd/s2-server
 go 1.25.8
 
 require (
-	github.com/mojatter/s2 v0.11.2
-	github.com/mojatter/s2/azblob v0.11.2
-	github.com/mojatter/s2/gcs v0.11.2
-	github.com/mojatter/s2/s3 v0.11.2
-	github.com/mojatter/s2/server v0.11.2
+	github.com/mojatter/s2 v0.12.0
+	github.com/mojatter/s2/azblob v0.12.0
+	github.com/mojatter/s2/gcs v0.12.0
+	github.com/mojatter/s2/s3 v0.12.0
+	github.com/mojatter/s2/server v0.12.0
 )
 
 require (
