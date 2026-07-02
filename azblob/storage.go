@@ -221,7 +221,14 @@ func (s *azblobStorage) PutMetadata(ctx context.Context, name string, metadata s
 }
 
 func (s *azblobStorage) Copy(ctx context.Context, src, dst string) error {
-	return s.client.copyBlob(ctx, s.container, s.key(src), s.key(dst))
+	err := s.client.copyBlob(ctx, s.container, s.key(src), s.key(dst))
+	// CopyFromURL fetches the source over HTTP rather than resolving it as a
+	// blob reference, so a missing source surfaces as CannotVerifyCopySource
+	// rather than BlobNotFound.
+	if bloberror.HasCode(err, bloberror.CannotVerifyCopySource) {
+		return fmt.Errorf("%w: %s", s2.ErrNotExist, src)
+	}
+	return mapNotExist(err, src)
 }
 
 func (s *azblobStorage) Delete(_ context.Context, name string) error {

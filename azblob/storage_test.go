@@ -3,6 +3,7 @@ package azblob
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -29,9 +30,14 @@ type mockBlob struct {
 }
 
 type mockAzblobClient struct {
-	mu      sync.RWMutex
-	blobs   map[string]*mockBlob // keyed by "container/key"
-	svcURL  string
+	mu     sync.RWMutex
+	blobs  map[string]*mockBlob // keyed by "container/key"
+	svcURL string
+	// copyBlobErr, when set, is returned by copyBlob instead of the usual
+	// lookup-based result. Used to simulate errors real Azure returns that
+	// the mock's simple map lookup cannot reproduce, e.g.
+	// CannotVerifyCopySource for a CopyFromURL whose source is missing.
+	copyBlobErr error
 }
 
 func newMockAzblobClient() *mockAzblobClient {
@@ -133,6 +139,9 @@ func (m *mockAzblobClient) setMetadata(_ context.Context, container, blobName st
 }
 
 func (m *mockAzblobClient) copyBlob(_ context.Context, container, src, dst string) error {
+	if m.copyBlobErr != nil {
+		return m.copyBlobErr
+	}
 	b, ok := m.get(container, src)
 	if !ok {
 		return newBlobNotFoundError()
@@ -257,8 +266,8 @@ func (s *StorageTestSuite) TestNewStorageError() {
 
 	s.Run("no account name or connection string", func() {
 		_, err := NewStorage(context.Background(), s2.Config{
-			Type:  s2.TypeAzblob,
-			Root:  "my-container",
+			Type:   s2.TypeAzblob,
+			Root:   "my-container",
 			Azblob: &s2.AzblobConfig{},
 		})
 		s.Require().ErrorIs(err, ErrRequiredAccountName)
@@ -275,8 +284,8 @@ func (s *StorageTestSuite) TestNewStorage() {
 		{
 			caseName: "container only",
 			cfg: s2.Config{
-				Type:  s2.TypeAzblob,
-				Root:  "my-container",
+				Type:   s2.TypeAzblob,
+				Root:   "my-container",
 				Azblob: &s2.AzblobConfig{AccountName: "test", AccountKey: "dGVzdA=="},
 			},
 			wantContainer: "my-container",
@@ -285,8 +294,8 @@ func (s *StorageTestSuite) TestNewStorage() {
 		{
 			caseName: "container with prefix",
 			cfg: s2.Config{
-				Type:  s2.TypeAzblob,
-				Root:  "my-container/some/prefix",
+				Type:   s2.TypeAzblob,
+				Root:   "my-container/some/prefix",
 				Azblob: &s2.AzblobConfig{AccountName: "test", AccountKey: "dGVzdA=="},
 			},
 			wantContainer: "my-container",
@@ -295,8 +304,8 @@ func (s *StorageTestSuite) TestNewStorage() {
 		{
 			caseName: "root with slashes trimmed",
 			cfg: s2.Config{
-				Type:  s2.TypeAzblob,
-				Root:  "/my-container/pfx/",
+				Type:   s2.TypeAzblob,
+				Root:   "/my-container/pfx/",
 				Azblob: &s2.AzblobConfig{AccountName: "test", AccountKey: "dGVzdA=="},
 			},
 			wantContainer: "my-container",
@@ -536,7 +545,17 @@ func (s *StorageTestSuite) TestCopy() {
 	s.Run("not found", func() {
 		_, strg := s.testMockStorage()
 		err := strg.Copy(context.Background(), "not-found.txt", "dst.txt")
-		s.Error(err)
+		s.True(errors.Is(err, s2.ErrNotExist), "got %v, want s2.ErrNotExist", err)
+	})
+
+	s.Run("source unreachable (CannotVerifyCopySource)", func() {
+		// Real Azure's CopyFromURL fetches the source over HTTP rather than
+		// resolving it as a blob reference, so a missing source surfaces as
+		// CannotVerifyCopySource rather than BlobNotFound.
+		m, strg := s.testMockStorage()
+		m.copyBlobErr = &azcore.ResponseError{ErrorCode: "CannotVerifyCopySource"}
+		err := strg.Copy(context.Background(), "a.txt", "dst.txt")
+		s.True(errors.Is(err, s2.ErrNotExist), "got %v, want s2.ErrNotExist", err)
 	})
 }
 
