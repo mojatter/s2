@@ -287,7 +287,7 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 func (s *storage) Delete(ctx context.Context, name string) error {
 	// Ignore metadata deletion errors (file may not have metadata)
 	_ = wfs.RemoveFile(s.fsys, metaPath(name))
-	if err := wfs.RemoveFile(s.fsys, name); err != nil {
+	if err := wfs.RemoveFile(s.fsys, name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("failed to delete %q: %w", name, err)
 	}
 	return nil
