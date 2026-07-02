@@ -9,13 +9,21 @@ jobs:
   tests:
     uses: ./.github/workflows/tests.yaml
 
-  e2e:
-    uses: ./.github/workflows/e2e.yaml
-
+  # e2e is intentionally NOT a dependency of `release`. The tagged commit
+  # already ran e2e when it was pushed to main (see e2e.yaml's own
+  # `push: branches: [main]` trigger), so re-running it here only checks
+  # one narrow, unrelated thing: whether cmd/s2-server/go.mod has been
+  # bumped to reference the library tags just published. For releases that
+  # touch library code, that bump (release-s2 skill Step 3) always lands
+  # in a later, separate PR/commit, so this job would be red on every such
+  # release regardless of whether the release is actually broken.
+  # GoReleaser's own build (below) does not depend on cmd/s2-server/go.mod
+  # either: it runs `go build` without GOWORK=off, so go.work resolves
+  # every intra-repo dependency from local source and always produces a
+  # correct binary/Docker image. See docs/releasing.md.
   release:
     needs:
       - tests
-      - e2e
     runs-on: ubuntu-latest
     permissions:
       contents: write
