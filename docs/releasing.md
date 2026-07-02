@@ -47,13 +47,19 @@ green before any new tag exists. Don't run `go mod tidy` on the branch
 
 Merge the PR.
 
-### 2. Tag and push (six tags)
+### 2. Tag the five submodules, push (root tag not yet)
 
-Create six tags at the merge commit — the root tag plus the five
-bumped submodules (**not** `cmd/s2-server`):
+Before tagging anything, decide: does this release contain library
+*code* (not just a dependency bump) that `cmd/s2-server`'s binary must
+actually run — e.g. a fix under `fs/`, `server/`, or root package code?
+If unsure, treat it as yes. This decides whether the root tag goes out
+now (below) or after step 3 (see the decision gate at the end of this
+section).
+
+Create the five submodule tags at the merge commit (**not** root,
+**not** `cmd/s2-server`):
 
 ```sh
-git tag -a v0.11.1        -m "Release v0.11.1"
 git tag -a s3/v0.11.1     -m "Release s3/v0.11.1"
 git tag -a gcs/v0.11.1    -m "Release gcs/v0.11.1"
 git tag -a azblob/v0.11.1 -m "Release azblob/v0.11.1"
@@ -61,38 +67,53 @@ git tag -a s2env/v0.11.1  -m "Release s2env/v0.11.1"
 git tag -a server/v0.11.1 -m "Release server/v0.11.1"
 ```
 
-Push the submodule tags first, then the root tag **separately**:
+Push them, batched:
 
 ```sh
 git push origin s3/v0.11.1 gcs/v0.11.1 azblob/v0.11.1 s2env/v0.11.1 server/v0.11.1
-git push origin v0.11.1
 ```
 
-The root tag must be pushed alone. Pushing multiple tags in a single
-`git push` has occasionally failed to fire GitHub Actions. The
-submodule tags are safe to batch because they do not match any
-workflow trigger.
+**Decision gate — root tag now, or after step 3?**
 
-The root tag triggers GoReleaser. At this commit `cmd/s2-server` still
-requires the **previous** release's intra-repo versions (it is bumped
-in step 3), so the binary links the previous version of the library
-code. That is fine when the change is a dependency/security bump pinned
-directly in `cmd/s2-server/go.mod` (e.g. `golang.org/x/net`): MVS picks
-the higher version from `cmd/s2-server`'s own requires regardless of
-the library versions. If a release changes library *code* the binary
-must ship, do step 3 first and push the root tag afterwards, so the
-GoReleaser build sees the bumped requires.
+- **Pure dependency/security bump** (nothing under `cmd/s2-server`'s
+  own linked library code changed in a way the binary must pick up) →
+  push the root tag now:
 
-### 3. Bump `cmd/s2-server` (after the tags are published)
+  ```sh
+  git tag -a v0.11.1 -m "Release v0.11.1"
+  git push origin v0.11.1
+  ```
+
+  The root tag must be pushed alone — pushing multiple tags in a
+  single `git push` has occasionally failed to fire GitHub Actions.
+  This triggers GoReleaser. At this commit `cmd/s2-server` still
+  requires the **previous** release's intra-repo versions (it is
+  bumped in step 3), so the binary links the previous version of the
+  library code. That is fine here: the dependency is pinned directly
+  in `cmd/s2-server/go.mod` (e.g. `golang.org/x/net`), and MVS picks
+  the higher version from `cmd/s2-server`'s own requires regardless of
+  the library versions. Proceed to step 3 whenever.
+
+- **Ships library code `cmd/s2-server`'s binary must include** → do
+  **not** push the root tag yet. Go to step 3 first, merge it, and
+  push the root tag from there instead. Pushing root here would make
+  the release workflow's own e2e job build `cmd/s2-server` against the
+  *old*, not-yet-bumped code, fail, and silently skip the GoReleaser
+  job — producing no binary/Docker image for that tag. Tags are
+  immutable once `proxy.golang.org` caches them, so recovering costs a
+  whole extra patch version, not just a retry (see Gotchas below).
+
+### 3. Bump `cmd/s2-server` (after the submodule tags are published)
 
 `cmd/s2-server` has no `replace` directives, so its `GOWORK=off` build
 — the e2e image (`server/Dockerfile` builds `cmd/s2-server`) and the
 GoReleaser binary — resolves intra-repo deps from `proxy.golang.org`.
 It can only require the new version once steps 1–2 have published the
-tags; bumping it earlier breaks the e2e build, which cannot fetch the
-not-yet-published version.
+submodule tags; bumping it earlier breaks the e2e build, which cannot
+fetch the not-yet-published version.
 
-Open a follow-up PR (the tags now exist, so `go get` resolves them):
+Open a follow-up PR (the submodule tags now exist, so `go get`
+resolves them):
 
 ```sh
 cd cmd/s2-server
@@ -105,14 +126,22 @@ GOWORK=off go get \
 GOWORK=off go mod tidy
 ```
 
-Merge it, then tag at the merge commit and push:
+Merge it, then tag `cmd/s2-server` at the merge commit and push
+(publication-only, no workflow):
 
 ```sh
 git tag -a cmd/s2-server/v0.11.1 -m "Release cmd/s2-server/v0.11.1"
 git push origin cmd/s2-server/v0.11.1
 ```
 
-`cmd/s2-server/v*` is publication-only and triggers no workflow.
+If the root tag was deliberately deferred (library-code case in step
+2), push it now, at this same merge commit, so the release workflow's
+e2e job builds `cmd/s2-server` with the fix already in place:
+
+```sh
+git tag -a v0.11.1 -m "Release v0.11.1"
+git push origin v0.11.1
+```
 
 ### 4. Replace the auto-generated release notes
 
@@ -152,6 +181,18 @@ curl -sI https://proxy.golang.org/github.com/mojatter/s2/s3/@v/v0.11.0.info
 A `200 OK` means the content is cached. If you tagged with a stale
 `go.mod`, the recovery path is to cut a new patch version (`v0.11.1`)
 and add `retract v0.11.0` to the respective `go.mod`.
+
+**Incident (2026-07-02, v0.12.1/v0.12.2):** a bugfix release (the
+`fs.Storage.Delete` no-op fix) pushed the root tag right after step 2,
+before step 3. The release workflow's e2e job built `cmd/s2-server`
+from the still-unbumped `go.mod` — pre-fix code — failed, and the
+GoReleaser job (`needs: [tests, e2e]`) was silently *skipped*, not
+failed. No GitHub Release or Docker image was published for v0.12.1,
+and that tag couldn't be reused. Recovery required a full extra patch
+version (v0.12.2): the `cmd/s2-server` bump PR was merged first, then
+the root tag was cut at that later commit. The decision gate in step 2
+above exists so this ordering mistake is caught before any tag is
+pushed, not after.
 
 ### `GOWORK=off` paths bypass the workspace
 
