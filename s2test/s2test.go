@@ -364,6 +364,11 @@ func TestStorageDelete(ctx context.Context, strg s2.Storage) error {
 		errorf("Delete(%q): object still exists", name)
 	}
 
+	// Deleting a non-existent object is a no-op and must not error.
+	if err := strg.Delete(ctx, name); err != nil {
+		errorf("Delete(%q) on already-deleted object returned %v, want nil", name, err)
+	}
+
 	// Recursive delete
 	files := []string{
 		"s2test-delrec/a.txt",
