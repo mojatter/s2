@@ -3,6 +3,7 @@ package s3
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -723,7 +724,7 @@ func (s *StorageTestSuite) TestCopy() {
 	s.Run("not found", func() {
 		_, strg := s.testMockClient()
 		err := strg.Copy(context.Background(), "not-found.txt", "dst.txt")
-		s.Error(err)
+		s.True(errors.Is(err, s2.ErrNotExist), "got %v, want s2.ErrNotExist", err)
 	})
 }
 
