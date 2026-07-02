@@ -339,6 +339,15 @@ func TestStorageCopyMove(ctx context.Context, strg s2.Storage) error {
 		}
 	}
 
+	// Copy/Move of a missing source must report ErrNotExist.
+	missing := "s2test-copymove-missing.txt"
+	if err := strg.Copy(ctx, missing, "s2test-copymove-missing-dst.txt"); !errors.Is(err, s2.ErrNotExist) {
+		errorf("Copy(%q, ...) on missing source returned %v, want ErrNotExist", missing, err)
+	}
+	if err := s2.Move(ctx, strg, missing, "s2test-copymove-missing-dst.txt"); !errors.Is(err, s2.ErrNotExist) {
+		errorf("Move(%q, ...) on missing source returned %v, want ErrNotExist", missing, err)
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("TestStorageCopyMove found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
 	}

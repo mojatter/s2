@@ -15,6 +15,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/mojatter/s2"
 )
 
@@ -288,17 +289,35 @@ func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
 	return len(listOut.Contents) > 0, nil
 }
 
-// isNotFoundErr is the not-found check shared by Exists and any
-// caller that needs to map an AWS SDK error back to s2.ErrNotExist.
-// The aws-sdk-go-v2 surface returns a typed error for HeadObject 404s,
-// but other paths hit string-shaped errors, so we cover both.
+// isNotFoundErr is the not-found check shared by Exists, Copy, and any
+// caller that needs to map an AWS SDK error back to s2.ErrNotExist. The
+// aws-sdk-go-v2 surface returns a typed error for HeadObject 404s (no
+// response body to carry an error code) and a generic smithy.APIError
+// with code "NoSuchKey" for paths that do have a body (e.g. a
+// CopyObject whose source is missing), so we cover both structurally.
+// Deliberately no substring fallback: a loose match on "NotFound" or
+// "404" in the error text would misclassify unrelated errors — e.g. an
+// object literally named "404.png", or an internal error whose message
+// happens to mention a status code — as a missing object.
 func isNotFoundErr(err error) bool {
+	if err == nil {
+		return false
+	}
 	var nf *s3types.NotFound
 	if errors.As(err, &nf) {
 		return true
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "NotFound") || strings.Contains(msg, "404")
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchKey"
+}
+
+// mapNotExist wraps err as s2.ErrNotExist when it indicates name is
+// missing, and returns err unchanged otherwise (including nil).
+func mapNotExist(err error, name string) error {
+	if isNotFoundErr(err) {
+		return fmt.Errorf("%w: %s", s2.ErrNotExist, name)
+	}
+	return err
 }
 
 func (s *storage) Put(ctx context.Context, obj s2.Object) error {
@@ -348,7 +367,7 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 		Key:        aws.String(path.Join(s.prefix, dst)),
 		CopySource: aws.String(path.Join(s.bucket, s.prefix, src)),
 	})
-	return err
+	return mapNotExist(err, src)
 }
 
 func (s *storage) Delete(ctx context.Context, name string) error {

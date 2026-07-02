@@ -209,7 +209,7 @@ func (s *gcsStorage) PutMetadata(ctx context.Context, name string, metadata s2.M
 func (s *gcsStorage) Copy(ctx context.Context, src, dst string) error {
 	srcObj := s.client.bucket(s.bucket).object(s.key(src))
 	dstObj := s.client.bucket(s.bucket).object(s.key(dst))
-	return srcObj.copyTo(ctx, dstObj)
+	return mapNotExist(srcObj.copyTo(ctx, dstObj), src)
 }
 
 func (s *gcsStorage) Delete(_ context.Context, name string) error {
