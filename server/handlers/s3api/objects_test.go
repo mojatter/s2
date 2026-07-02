@@ -891,7 +891,7 @@ func (s *ObjectsTestSuite) TestDeleteObject() {
 		s.Equal(http.StatusNotFound, getW.Code)
 	})
 
-	s.Run("non-existing key returns error", func() {
+	s.Run("non-existing key is a no-op", func() {
 		s.createBucket("di")
 
 		req := httptest.NewRequest("DELETE", "/di/ghost.txt", nil)
@@ -900,8 +900,8 @@ func (s *ObjectsTestSuite) TestDeleteObject() {
 		w := httptest.NewRecorder()
 		handleDeleteObject(s.server, w, req)
 
-		// fs backend returns error for missing keys
-		s.NotEqual(http.StatusNoContent, w.Code)
+		// S3 DeleteObject is idempotent: deleting a missing key succeeds.
+		s.Equal(http.StatusNoContent, w.Code)
 	})
 }
 
@@ -950,7 +950,7 @@ func (s *ObjectsTestSuite) TestDeleteObjects() {
 		s.Empty(result.Errors)
 	})
 
-	s.Run("nonexistent key reports error", func() {
+	s.Run("nonexistent key is reported as deleted", func() {
 		s.createBucket("de")
 
 		body := `<Delete><Object><Key>ghost.txt</Key></Object></Delete>`
@@ -962,9 +962,11 @@ func (s *ObjectsTestSuite) TestDeleteObjects() {
 		s.Equal(http.StatusOK, w.Code)
 		var result DeleteObjectsResult
 		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
-		s.Empty(result.Deleted)
-		s.Len(result.Errors, 1)
-		s.Equal("ghost.txt", result.Errors[0].Key)
+		// S3 DeleteObjects is idempotent: a missing key is reported as
+		// deleted, not as an error.
+		s.Len(result.Deleted, 1)
+		s.Equal("ghost.txt", result.Deleted[0].Key)
+		s.Empty(result.Errors)
 	})
 
 	s.Run("nonexistent bucket", func() {
