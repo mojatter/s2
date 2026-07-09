@@ -7,12 +7,18 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/chromedp/chromedp"
 	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/server"
 	"github.com/stretchr/testify/suite"
+
+	_ "github.com/mojatter/s2/server/handlers/console"                 // registers GET /static/{filepath...}
+	_ "github.com/mojatter/s2/server/handlers/console/buckets/objects" // registers GET /buckets/{name}/view/{object...}
 )
 
 type objectsSuite struct {
@@ -348,5 +354,87 @@ func (s *ObjectsTestSuite) TestHandleDeleteObject() {
 		handleDeleteObject(s.server, w, req)
 
 		s.Equal(http.StatusBadRequest, w.Code)
+	})
+}
+
+// tinyPNG is a 1x1 transparent PNG, used as gallery thumbnail fixture content.
+var tinyPNG = []byte{
+	0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+	0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+	0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
+	0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x64, 0x60, 0x00, 0x00,
+	0x00, 0x06, 0x00, 0x03, 0x36, 0x05, 0x24, 0xdf, 0x00, 0x00, 0x00, 0x00,
+	0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+}
+
+// TestGalleryView_ThumbnailAndPersistenceAcrossReload drives a real headless
+// Chrome against the Web Console to catch the class of bug where gallery
+// thumbnail lazy-loading and view-mode persistence only run on htmx-driven
+// navigation but silently no-op on a full page load/reload. Requires a local
+// Chrome/Chromium; skipped with `go test -short`.
+func (s *ObjectsTestSuite) TestGalleryView_ThumbnailAndPersistenceAcrossReload() {
+	if testing.Short() {
+		s.T().Skip("skipping browser test in short mode")
+	}
+
+	s.createBucket("gallery")
+	ctx := context.Background()
+	strg, err := s.server.Buckets.Get(ctx, "gallery")
+	s.Require().NoError(err)
+	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("photo.png", tinyPNG)))
+
+	ts := httptest.NewServer(s.server.ConsoleHandler())
+	defer ts.Close()
+
+	// --no-sandbox avoids Chrome sandbox-init failures seen on some CI
+	// runners; not needed locally but harmless there.
+	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:], chromedp.NoSandbox)
+	// chromedp's auto-detection tries "chromium"/"chromium-browser" before
+	// "google-chrome". On GitHub's ubuntu-latest runner, chromium is a snap
+	// shim that fails to launch headless (actions/runner-images#12096);
+	// google-chrome works, so prefer it explicitly when present. Falls back
+	// to chromedp's own auto-detect elsewhere (e.g. macOS's Chrome.app).
+	if p, err := exec.LookPath("google-chrome"); err == nil {
+		allocOpts = append(allocOpts, chromedp.ExecPath(p))
+	}
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocOpts...)
+	defer cancelAlloc()
+
+	browserCtx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+	// CI runners need headroom for a cold Chrome start; 5s was enough
+	// locally but flaked in CI with "chrome failed to start".
+	browserCtx, cancelTimeout := context.WithTimeout(browserCtx, 15*time.Second)
+	defer cancelTimeout()
+
+	pageURL := ts.URL + "/buckets/gallery?prefix="
+
+	s.Run("thumbnail loads after switching to gallery view", func() {
+		s.Require().NoError(chromedp.Run(browserCtx,
+			chromedp.Navigate(pageURL),
+			chromedp.WaitVisible(`button[title="Gallery View"]`),
+			chromedp.Click(`button[title="Gallery View"]`),
+			chromedp.WaitVisible(`.gallery-thumb img`),
+		))
+	})
+
+	s.Run("gallery view and thumbnail survive a full reload", func() {
+		s.Require().NoError(chromedp.Run(browserCtx,
+			chromedp.Reload(),
+			chromedp.WaitVisible(`#gallery-view.gallery-grid`),
+		))
+
+		var galleryDisplay string
+		s.Require().NoError(chromedp.Run(browserCtx,
+			chromedp.EvaluateAsDevTools(
+				`getComputedStyle(document.getElementById('gallery-view')).display`,
+				&galleryDisplay,
+			),
+		))
+		s.NotEqual("none", galleryDisplay)
+
+		s.Require().NoError(chromedp.Run(browserCtx,
+			chromedp.WaitVisible(`.gallery-thumb img`),
+		))
 	})
 }
