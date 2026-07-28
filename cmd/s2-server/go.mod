@@ -1,13 +1,13 @@
 module github.com/mojatter/s2/cmd/s2-server
 
-go 1.25.8
+go 1.26
 
 require (
-	github.com/mojatter/s2 v0.12.4
-	github.com/mojatter/s2/azblob v0.12.4
-	github.com/mojatter/s2/gcs v0.12.4
-	github.com/mojatter/s2/s3 v0.12.4
-	github.com/mojatter/s2/server v0.12.4
+	github.com/mojatter/s2 v0.12.6
+	github.com/mojatter/s2/azblob v0.12.6
+	github.com/mojatter/s2/gcs v0.12.6
+	github.com/mojatter/s2/s3 v0.12.6
+	github.com/mojatter/s2/server v0.12.6
 )
 
 require (
@@ -46,7 +46,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.45.0 // indirect
 	github.com/aws/smithy-go v1.27.4 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/chromedp/chromedp v0.16.0 // indirect
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
