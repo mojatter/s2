@@ -149,7 +149,10 @@ func TestCORSHandler(t *testing.T) {
 			assert.Equal(t, tc.wantHandlerHit, handlerHit)
 			assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
 			assert.NotEmpty(t, w.Header().Get("Access-Control-Allow-Methods"))
-			assert.NotEmpty(t, w.Header().Get("Access-Control-Allow-Headers"))
+			// Access-Control-Allow-Headers: "*" alone does not cover the
+			// Authorization request header per the Fetch spec, so it must
+			// be listed explicitly for browser SigV4 requests to work.
+			assert.Contains(t, w.Header().Get("Access-Control-Allow-Headers"), "Authorization")
 		})
 	}
 }
