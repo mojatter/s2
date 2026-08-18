@@ -30,7 +30,7 @@ func corsHandler(next http.Handler) http.Handler {
 		h := w.Header()
 		h.Set("Access-Control-Allow-Origin", "*")
 		h.Set("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE, HEAD, OPTIONS")
-		h.Set("Access-Control-Allow-Headers", "*")
+		h.Set("Access-Control-Allow-Headers", "Authorization, *")
 		h.Set("Access-Control-Max-Age", "86400")
 
 		if r.Method == http.MethodOptions {
