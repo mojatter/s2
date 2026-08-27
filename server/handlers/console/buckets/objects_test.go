@@ -215,6 +215,31 @@ func (s *ObjectsTestSuite) TestHandleCreateFolder() {
 
 		s.Equal(http.StatusBadRequest, w.Code)
 	})
+
+	s.Run("explicit deny on the exact key is not bypassed by a wildcard allow", func() {
+		s.createBucket("fld3")
+
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{server.ActionPutObject}, Resource: []string{"arn:aws:s3:::fld3/*"}},
+			{Effect: "Deny", Action: []string{server.ActionPutObject}, Resource: []string{"arn:aws:s3:::fld3/secret"}},
+		}}}
+
+		form := url.Values{"prefix": {""}, "folder_name": {"secret"}}
+		req := httptest.NewRequest("POST", "/buckets/fld3/folders", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.SetPathValue("name", "fld3")
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handleCreateFolder(s.server, w, req)
+
+		s.Equal(http.StatusForbidden, w.Code)
+
+		strg, err := s.server.Buckets.Get(context.Background(), "fld3")
+		s.Require().NoError(err)
+		exists, err := strg.Exists(context.Background(), "secret/.keep")
+		s.Require().NoError(err)
+		s.False(exists)
+	})
 }
 
 // --- POST /buckets/{name}/upload ---
@@ -306,6 +331,39 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			}
 		})
 	}
+
+	s.Run("explicit deny on the exact filename is not bypassed by a wildcard allow", func() {
+		s.createBucket("upd")
+
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{server.ActionPutObject}, Resource: []string{"arn:aws:s3:::upd/*"}},
+			{Effect: "Deny", Action: []string{server.ActionPutObject}, Resource: []string{"arn:aws:s3:::upd/secret.txt"}},
+		}}}
+
+		body := &bytes.Buffer{}
+		mw := multipart.NewWriter(body)
+		s.Require().NoError(mw.WriteField("prefix", ""))
+		fw, err := mw.CreateFormFile("file", "secret.txt")
+		s.Require().NoError(err)
+		_, err = fw.Write([]byte("leaked"))
+		s.Require().NoError(err)
+		s.Require().NoError(mw.Close())
+
+		req := httptest.NewRequest("POST", "/buckets/upd/upload", body)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		req.SetPathValue("name", "upd")
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handleUploadFile(s.server, w, req)
+
+		s.Equal(http.StatusForbidden, w.Code)
+
+		strg, err := s.server.Buckets.Get(context.Background(), "upd")
+		s.Require().NoError(err)
+		exists, err := strg.Exists(context.Background(), "secret.txt")
+		s.Require().NoError(err)
+		s.False(exists)
+	})
 }
 
 // --- DELETE /buckets/{name}/objects ---
@@ -354,6 +412,35 @@ func (s *ObjectsTestSuite) TestHandleDeleteObject() {
 		handleDeleteObject(s.server, w, req)
 
 		s.Equal(http.StatusBadRequest, w.Code)
+	})
+
+	s.Run("recursive delete aborts entirely when one descendant is denied", func() {
+		s.createBucket("delp")
+		s.server.Buckets.CreateFolder(context.Background(), "delp", "dir")
+		s.putObject("delp", "dir/keep.txt", "must survive")
+		s.putObject("delp", "dir/other.txt", "data")
+
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{server.ActionDeleteObject}, Resource: []string{"arn:aws:s3:::delp/dir/*"}},
+			{Effect: "Deny", Action: []string{server.ActionDeleteObject}, Resource: []string{"arn:aws:s3:::delp/dir/keep.txt"}},
+		}}}
+
+		req := httptest.NewRequest("DELETE", "/buckets/delp/objects?key=dir/&prefix=", nil)
+		req.SetPathValue("name", "delp")
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handleDeleteObject(s.server, w, req)
+
+		s.Equal(http.StatusForbidden, w.Code)
+
+		strg, err := s.server.Buckets.Get(context.Background(), "delp")
+		s.Require().NoError(err)
+		exists, err := strg.Exists(context.Background(), "dir/keep.txt")
+		s.Require().NoError(err)
+		s.True(exists, "keep.txt must survive since it was explicitly denied")
+		exists, err = strg.Exists(context.Background(), "dir/other.txt")
+		s.Require().NoError(err)
+		s.True(exists, "other.txt must also survive: the whole operation aborts on any denial")
 	})
 }
 

@@ -46,6 +46,7 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	names = server.FilterBucketNames(server.UserFromContext(r.Context()), names)
 
 	data := struct{ Buckets []string }{Buckets: names}
 
@@ -76,6 +77,7 @@ func renderBucketList(ctx context.Context, s *server.Server, w http.ResponseWrit
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	names = server.FilterBucketNames(server.UserFromContext(ctx), names)
 
 	data := struct{ Buckets []string }{Buckets: names}
 
@@ -93,4 +95,3 @@ func init() {
 	server.RegisterConsoleHandleFunc("POST /buckets", middleware.BasicAuth(handleCreateBucket))
 	server.RegisterConsoleHandleFunc("DELETE /buckets/{name}", middleware.BasicAuth(handleDeleteBucket))
 }
-

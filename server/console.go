@@ -31,6 +31,7 @@ func (s *Server) RenderConsoleIndex(ctx context.Context, w http.ResponseWriter, 
 	if err != nil {
 		return err
 	}
+	names = FilterBucketNames(UserFromContext(ctx), names)
 	if data == nil {
 		data = map[string]any{}
 	}

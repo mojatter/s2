@@ -61,6 +61,25 @@ func (s *IndexTestSuite) TestHandleIndex() {
 		s.Contains(body, "alpha")
 		s.Contains(body, "beta")
 	})
+
+	s.Run("filtered by policy", func() {
+		s.createBucket("visible")
+		s.createBucket("denied-bucket")
+
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{"s3:ListBucket"}, Resource: []string{"arn:aws:s3:::visible"}},
+		}}}
+
+		req := httptest.NewRequest("GET", "/", nil)
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handleIndex(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		body := w.Body.String()
+		s.Contains(body, "visible")
+		s.NotContains(body, "denied-bucket")
+	})
 }
 
 // --- POST /buckets ---
@@ -89,6 +108,27 @@ func (s *IndexTestSuite) TestHandleCreateBucket() {
 		handleCreateBucket(s.server, w, req)
 
 		s.Equal(http.StatusBadRequest, w.Code)
+	})
+
+	s.Run("rendered bucket list is filtered by policy", func() {
+		s.createBucket("denied-bucket")
+
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{"s3:CreateBucket"}, Resource: []string{"arn:aws:s3:::*"}},
+			{Effect: "Allow", Action: []string{"s3:ListBucket"}, Resource: []string{"arn:aws:s3:::just-created"}},
+		}}}
+
+		form := url.Values{"name": {"just-created"}}
+		req := httptest.NewRequest("POST", "/buckets", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handleCreateBucket(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		body := w.Body.String()
+		s.Contains(body, "just-created")
+		s.NotContains(body, "denied-bucket")
 	})
 }
 
@@ -119,5 +159,27 @@ func (s *IndexTestSuite) TestHandleDeleteBucket() {
 		handleDeleteBucket(s.server, w, req)
 
 		s.Equal(http.StatusBadRequest, w.Code)
+	})
+
+	s.Run("remaining bucket list is filtered by policy", func() {
+		s.createBucket("to-delete-2")
+		s.createBucket("visible")
+		s.createBucket("denied-bucket")
+
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{"s3:DeleteBucket"}, Resource: []string{"arn:aws:s3:::*"}},
+			{Effect: "Allow", Action: []string{"s3:ListBucket"}, Resource: []string{"arn:aws:s3:::visible"}},
+		}}}
+
+		req := httptest.NewRequest("DELETE", "/buckets/to-delete-2", nil)
+		req.SetPathValue("name", "to-delete-2")
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handleDeleteBucket(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		body := w.Body.String()
+		s.Contains(body, "visible")
+		s.NotContains(body, "denied-bucket")
 	})
 }

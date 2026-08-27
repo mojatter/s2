@@ -73,6 +73,12 @@ type Config struct {
 	User string `json:"user"`
 	// Password is the password for authentication (Basic Auth password for Web Console, Secret Access Key for S3 API).
 	Password string `json:"password"`
+	// Users is a list of additional principals for multi-user auth. SigV4
+	// and BasicAuth check these in addition to the legacy single User/
+	// Password pair above; each entry's Policy (if set) governs what that
+	// principal may do. Config-file only -- there is no environment
+	// variable equivalent.
+	Users []User `json:"users,omitempty"`
 	// Buckets is a list of bucket names to create on startup if they don't already exist.
 	Buckets []string `json:"buckets"`
 }
@@ -123,6 +129,28 @@ func (cfg *Config) Validate() error {
 		}
 		if cfg.HealthPath == "/" {
 			return fmt.Errorf("server: HealthPath %q must have at least one path segment", cfg.HealthPath)
+		}
+	}
+
+	seen := make(map[string]bool, len(cfg.Users)+1)
+	if cfg.User != "" {
+		seen[cfg.User] = true
+	}
+	for i, u := range cfg.Users {
+		if u.AccessKeyID == "" {
+			return fmt.Errorf("server: users[%d]: access_key_id must not be empty", i)
+		}
+		if u.SecretAccessKey == "" {
+			return fmt.Errorf("server: users[%d] (%s): secret_access_key must not be empty", i, u.AccessKeyID)
+		}
+		if seen[u.AccessKeyID] {
+			return fmt.Errorf("server: duplicate access_key_id %q", u.AccessKeyID)
+		}
+		seen[u.AccessKeyID] = true
+		if u.Policy != nil {
+			if err := u.Policy.Validate(); err != nil {
+				return fmt.Errorf("server: users[%d] (%s): %w", i, u.AccessKeyID, err)
+			}
 		}
 	}
 	return nil

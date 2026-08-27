@@ -135,6 +135,10 @@ func handleCreateFolder(s *server.Server, w http.ResponseWriter, r *http.Request
 	}
 
 	key := path.Join(prefix, folderName)
+	if !server.AllowedS3Action(server.UserFromContext(ctx), server.ActionPutObject, name, key) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 	if err := s.Buckets.CreateFolder(ctx, name, key); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -169,6 +173,10 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	}
 
 	key := path.Join(prefix, header.Filename)
+	if !server.AllowedS3Action(server.UserFromContext(ctx), server.ActionPutObject, name, key) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 	obj := s2.NewObjectReader(key, file, s2.MustUint64(header.Size))
 	if err := strg.Put(ctx, obj); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -194,6 +202,24 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 	}
 
 	if strings.HasSuffix(key, "/") {
+		// ConsoleAction defers authorization entirely for a recursive
+		// folder delete (the affected keys are only known once we list
+		// the prefix here), so check every descendant individually before
+		// deleting any of them -- a single denied key aborts the whole
+		// operation rather than silently deleting the rest.
+		if user := server.UserFromContext(ctx); user != nil && user.Policy != nil {
+			res, err := strg.List(ctx, s2.ListOptions{Prefix: key, Recursive: true})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			for _, obj := range server.FilterKeep(res.Objects) {
+				if !server.AllowedS3Action(user, server.ActionDeleteObject, name, obj.Name()) {
+					http.Error(w, "Forbidden", http.StatusForbidden)
+					return
+				}
+			}
+		}
 		if err := strg.DeleteRecursive(ctx, key); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

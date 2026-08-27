@@ -53,6 +53,26 @@ func (s *BucketsTestSuite) TestListBuckets() {
 			s.True(b.CreationDate.Year() >= 2025, "CreationDate should be a recent timestamp")
 		}
 	})
+
+	s.Run("filtered by policy", func() {
+		s.createBucket("visible")
+		s.createBucket("denied-bucket")
+
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{"s3:ListBucket"}, Resource: []string{"arn:aws:s3:::visible"}},
+		}}}
+
+		req := httptest.NewRequest("GET", "/", nil)
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		HandleListBuckets(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		var result ListAllMyBucketsResult
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+		s.Len(result.Buckets, 1)
+		s.Equal("visible", result.Buckets[0].Name)
+	})
 }
 
 // --- CreateBucket ---

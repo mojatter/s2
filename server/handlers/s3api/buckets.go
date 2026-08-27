@@ -15,6 +15,7 @@ func HandleListBuckets(s *server.Server, w http.ResponseWriter, r *http.Request)
 		writeError(w, r, code, msg, status)
 		return
 	}
+	names = server.FilterBucketNames(server.UserFromContext(ctx), names)
 
 	buckets := make([]Bucket, 0, len(names))
 	for _, name := range names {

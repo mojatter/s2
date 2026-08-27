@@ -153,10 +153,10 @@ func (s *ObjectsTestSuite) TestListObjects() {
 		s.putObject("nda", "docs/c.txt", "c")
 
 		testCases := []struct {
-			caseName       string
-			prefix         string
-			wantContents   []string
-			wantPrefixes   []string
+			caseName     string
+			prefix       string
+			wantContents []string
+			wantPrefixes []string
 		}{
 			{
 				caseName:     "partial prefix matches subdir as common prefix",
@@ -624,9 +624,9 @@ func (s *ObjectsTestSuite) TestPutObject_AWSChunked() {
 	const chunkSize = 64 * 1024
 
 	testCases := []struct {
-		caseName    string
-		setHeaders  func(r *http.Request)
-		key         string
+		caseName   string
+		setHeaders func(r *http.Request)
+		key        string
 	}{
 		{
 			caseName: "Content-Encoding aws-chunked",
@@ -715,7 +715,7 @@ func (s *ObjectsTestSuite) TestMetadata() {
 		s.Equal("alice", getW.Header().Get("x-amz-meta-author"))
 		s.Equal("42", getW.Header().Get("x-amz-meta-version"))
 		// Internal metadata key should not leak
-		s.Empty(getW.Header().Get("x-amz-meta-"+etagMetadataKey))
+		s.Empty(getW.Header().Get("x-amz-meta-" + etagMetadataKey))
 	})
 
 	s.Run("no metadata headers", func() {
@@ -866,6 +866,35 @@ func (s *ObjectsTestSuite) TestCopyObject() {
 
 		s.Equal(http.StatusNotFound, w.Code)
 	})
+
+	s.Run("source without GetObject rights is denied even with PutObject on destination", func() {
+		s.putObject("private-bkt", "secret.txt", "top secret")
+		s.createBucket("scratch")
+
+		// Only s3:PutObject on scratch/* -- no read rights anywhere,
+		// including on the copy source in private-bkt.
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{server.ActionPutObject}, Resource: []string{"arn:aws:s3:::scratch/*"}},
+		}}}
+
+		req := httptest.NewRequest("PUT", "/scratch/leak.txt", nil)
+		req.SetPathValue("bucket", "scratch")
+		req.SetPathValue("key", "leak.txt")
+		req.Header.Set("x-amz-copy-source", "/private-bkt/secret.txt")
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handlePutObject(s.server, w, req)
+
+		s.Equal(http.StatusForbidden, w.Code)
+
+		// leak.txt must not have been created.
+		getReq := httptest.NewRequest("GET", "/scratch/leak.txt", nil)
+		getReq.SetPathValue("bucket", "scratch")
+		getReq.SetPathValue("key", "leak.txt")
+		getW := httptest.NewRecorder()
+		handleGetObject(s.server, getW, getReq)
+		s.Equal(http.StatusNotFound, getW.Code)
+	})
 }
 
 // --- DeleteObject ---
@@ -991,6 +1020,39 @@ func (s *ObjectsTestSuite) TestDeleteObjects() {
 		var errResp ErrorResponse
 		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
 		s.Equal("MalformedXML", errResp.Code)
+	})
+
+	s.Run("policy scoped to a prefix authorizes matching keys and denies others", func() {
+		s.putObject("dpol", "tmp/a.txt", "1")
+		s.putObject("dpol", "keep/b.txt", "2")
+
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{server.ActionDeleteObject}, Resource: []string{"arn:aws:s3:::dpol/tmp/*"}},
+		}}}
+
+		body := `<Delete><Object><Key>tmp/a.txt</Key></Object><Object><Key>keep/b.txt</Key></Object></Delete>`
+		req := httptest.NewRequest("POST", "/dpol?delete", strings.NewReader(body))
+		req.SetPathValue("bucket", "dpol")
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handleDeleteObjects(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		var result DeleteObjectsResult
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+		s.Len(result.Deleted, 1)
+		s.Equal("tmp/a.txt", result.Deleted[0].Key)
+		s.Len(result.Errors, 1)
+		s.Equal("keep/b.txt", result.Errors[0].Key)
+		s.Equal("AccessDenied", result.Errors[0].Code)
+
+		// keep/b.txt must survive the denied delete.
+		getReq := httptest.NewRequest("GET", "/dpol/keep/b.txt", nil)
+		getReq.SetPathValue("bucket", "dpol")
+		getReq.SetPathValue("key", "keep/b.txt")
+		getW := httptest.NewRecorder()
+		handleGetObject(s.server, getW, getReq)
+		s.Equal(http.StatusOK, getW.Code)
 	})
 
 	s.Run("dispatched via handleBucketPOST", func() {

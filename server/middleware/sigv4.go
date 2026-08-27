@@ -25,31 +25,53 @@ const (
 )
 
 // SigV4 returns a handler that enforces AWS Signature Version 4 authentication for S3 API routes.
-// Authentication is skipped when User is not configured.
+// Authentication is skipped when no credentials are configured (AuthEnabled false).
 // Requests with X-Amz-Date outside ±15 minutes of server time are rejected.
+//
+// After a successful signature verification, if the matched User carries a
+// Policy, the request's S3 action/resource (see S3Action) is checked against
+// it; a denied request gets a 403 AccessDenied response distinct from the
+// SignatureDoesNotMatch used for verification failures. The matched User is
+// stashed on the request context (server.WithUser) so handlers such as
+// HandleListBuckets can filter their results by the same policy.
 func SigV4(next server.HandlerFunc) server.HandlerFunc {
 	return func(srv *server.Server, w http.ResponseWriter, r *http.Request) {
-		if srv.Config.User == "" {
+		if !srv.Config.AuthEnabled() {
 			next(srv, w, r)
 			return
 		}
+
+		lookup := func(accessKeyID string) (*server.User, bool) {
+			u := srv.Config.LookupUser(accessKeyID)
+			return u, u != nil
+		}
+
 		// AWS prefers the Authorization header when both are present.
 		// Fall back to query-string (presigned URL) verification when the header is absent.
+		var matched *server.User
 		var err error
 		if r.Header.Get("Authorization") == "" && r.URL.Query().Get("X-Amz-Algorithm") != "" {
-			err = verifyPresignedV4(r, srv.Config.User, srv.Config.Password, time.Now().UTC())
+			matched, err = verifyPresignedV4(r, lookup, time.Now().UTC())
 		} else {
-			err = verifySignatureV4(r, srv.Config.User, srv.Config.Password)
+			matched, err = verifySignatureV4(r, lookup)
 		}
 		if err != nil {
 			writeS3AuthError(w, r, err.Error())
 			return
 		}
-		next(srv, w, r)
+
+		bucket, key := r.PathValue("bucket"), r.PathValue("key")
+		action, resource := server.S3Action(r, bucket, key)
+		if !server.Authorized(matched, action, resource) {
+			writeS3AccessDeniedError(w, r)
+			return
+		}
+
+		next(srv, w, r.WithContext(server.WithUser(r.Context(), matched)))
 	}
 }
 
-func writeS3AuthError(w http.ResponseWriter, r *http.Request, message string) {
+func writeS3Error(w http.ResponseWriter, r *http.Request, code, message string, status int) {
 	type ErrorResponse struct {
 		XMLName   xml.Name `xml:"Error"`
 		Code      string   `xml:"Code"`
@@ -58,13 +80,13 @@ func writeS3AuthError(w http.ResponseWriter, r *http.Request, message string) {
 		RequestID string   `xml:"RequestId"`
 	}
 	resp := ErrorResponse{
-		Code:      "SignatureDoesNotMatch",
+		Code:      code,
 		Message:   message,
 		Resource:  r.URL.Path,
 		RequestID: "s2-request-id",
 	}
 	w.Header().Set("Content-Type", "application/xml")
-	w.WriteHeader(http.StatusForbidden)
+	w.WriteHeader(status)
 	_, _ = fmt.Fprint(w, xml.Header)
 	enc := xml.NewEncoder(w)
 	if err := enc.Encode(resp); err != nil {
@@ -72,14 +94,25 @@ func writeS3AuthError(w http.ResponseWriter, r *http.Request, message string) {
 	}
 }
 
+func writeS3AuthError(w http.ResponseWriter, r *http.Request, message string) {
+	writeS3Error(w, r, "SignatureDoesNotMatch", message, http.StatusForbidden)
+}
+
+func writeS3AccessDeniedError(w http.ResponseWriter, r *http.Request) {
+	writeS3Error(w, r, "AccessDenied", "Access Denied", http.StatusForbidden)
+}
+
 // verifySignatureV4 verifies the AWS Signature Version 4 of an HTTP request.
-func verifySignatureV4(r *http.Request, accessKeyID, secretAccessKey string) error {
+// lookup resolves the request's access key ID to the matching User, or
+// ok=false for an unrecognized access key. On success, the matched User is
+// returned directly rather than threaded back through a captured variable.
+func verifySignatureV4(r *http.Request, lookup func(accessKeyID string) (user *server.User, ok bool)) (*server.User, error) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
-		return fmt.Errorf("missing Authorization header")
+		return nil, fmt.Errorf("missing Authorization header")
 	}
 	if !strings.HasPrefix(authHeader, "AWS4-HMAC-SHA256 ") {
-		return fmt.Errorf("unsupported authorization scheme")
+		return nil, fmt.Errorf("unsupported authorization scheme")
 	}
 
 	parts := parseAuthHeader(authHeader[len("AWS4-HMAC-SHA256 "):])
@@ -87,33 +120,34 @@ func verifySignatureV4(r *http.Request, accessKeyID, secretAccessKey string) err
 	signedHeadersStr := parts["SignedHeaders"]
 	signature := parts["Signature"]
 	if credential == "" || signedHeadersStr == "" || signature == "" {
-		return fmt.Errorf("malformed Authorization header")
+		return nil, fmt.Errorf("malformed Authorization header")
 	}
 
 	// Credential = <access-key>/<date>/<region>/<service>/aws4_request
 	credParts := strings.SplitN(credential, "/", 5)
 	if len(credParts) != 5 {
-		return fmt.Errorf("malformed Credential")
+		return nil, fmt.Errorf("malformed Credential")
 	}
 	reqAccessKey := credParts[0]
 	date := credParts[1]
 	region := credParts[2]
 	service := credParts[3]
 
-	if subtle.ConstantTimeCompare([]byte(reqAccessKey), []byte(accessKeyID)) != 1 {
-		return fmt.Errorf("invalid access key")
+	user, ok := lookup(reqAccessKey)
+	if !ok {
+		return nil, fmt.Errorf("invalid access key")
 	}
 
 	datetime := r.Header.Get("X-Amz-Date")
 	if datetime == "" {
-		return fmt.Errorf("missing X-Amz-Date header")
+		return nil, fmt.Errorf("missing X-Amz-Date header")
 	}
 	reqTime, err := time.Parse("20060102T150405Z", datetime)
 	if err != nil {
-		return fmt.Errorf("invalid X-Amz-Date: %w", err)
+		return nil, fmt.Errorf("invalid X-Amz-Date: %w", err)
 	}
 	if diff := time.Since(reqTime).Abs(); diff > sigV4MaxClockSkew {
-		return fmt.Errorf("request timestamp too skewed: %v", diff.Round(time.Second))
+		return nil, fmt.Errorf("request timestamp too skewed: %v", diff.Round(time.Second))
 	}
 
 	signedHeaders := strings.Split(signedHeadersStr, ";")
@@ -126,22 +160,24 @@ func verifySignatureV4(r *http.Request, accessKeyID, secretAccessKey string) err
 	scope := date + "/" + region + "/" + service + "/aws4_request"
 	stringToSign := "AWS4-HMAC-SHA256\n" + datetime + "\n" + scope + "\n" + hashSHA256(canonReq)
 
-	signingKey := buildSigningKey(secretAccessKey, date, region, service)
+	signingKey := buildSigningKey(user.SecretAccessKey, date, region, service)
 	expected := hex.EncodeToString(hmacSHA256(signingKey, []byte(stringToSign)))
 
 	if subtle.ConstantTimeCompare([]byte(expected), []byte(signature)) != 1 {
-		return fmt.Errorf("signature mismatch")
+		return nil, fmt.Errorf("signature mismatch")
 	}
-	return nil
+	return user, nil
 }
 
 // verifyPresignedV4 verifies an AWS Signature Version 4 presigned URL request.
 // The signature is carried in query parameters (X-Amz-*) instead of the Authorization header,
 // and the body is treated as UNSIGNED-PAYLOAD per the presigned-URL spec.
-func verifyPresignedV4(r *http.Request, accessKeyID, secretAccessKey string, now time.Time) error {
+// lookup resolves the request's access key ID to the matching User, or
+// ok=false for an unrecognized access key.
+func verifyPresignedV4(r *http.Request, lookup func(accessKeyID string) (user *server.User, ok bool), now time.Time) (*server.User, error) {
 	q := r.URL.Query()
 	if algo := q.Get("X-Amz-Algorithm"); algo != "AWS4-HMAC-SHA256" {
-		return fmt.Errorf("unsupported X-Amz-Algorithm: %q", algo)
+		return nil, fmt.Errorf("unsupported X-Amz-Algorithm: %q", algo)
 	}
 	credential := q.Get("X-Amz-Credential")
 	datetime := q.Get("X-Amz-Date")
@@ -149,33 +185,34 @@ func verifyPresignedV4(r *http.Request, accessKeyID, secretAccessKey string, now
 	signedHeadersStr := q.Get("X-Amz-SignedHeaders")
 	signature := q.Get("X-Amz-Signature")
 	if credential == "" || datetime == "" || expiresStr == "" || signedHeadersStr == "" || signature == "" {
-		return fmt.Errorf("missing presigned query parameters")
+		return nil, fmt.Errorf("missing presigned query parameters")
 	}
 
 	// Credential = <access-key>/<date>/<region>/<service>/aws4_request
 	credParts := strings.SplitN(credential, "/", 5)
 	if len(credParts) != 5 {
-		return fmt.Errorf("malformed Credential")
+		return nil, fmt.Errorf("malformed Credential")
 	}
 	reqAccessKey := credParts[0]
 	date := credParts[1]
 	region := credParts[2]
 	service := credParts[3]
 
-	if subtle.ConstantTimeCompare([]byte(reqAccessKey), []byte(accessKeyID)) != 1 {
-		return fmt.Errorf("invalid access key")
+	user, ok := lookup(reqAccessKey)
+	if !ok {
+		return nil, fmt.Errorf("invalid access key")
 	}
 
 	reqTime, err := time.Parse("20060102T150405Z", datetime)
 	if err != nil {
-		return fmt.Errorf("invalid X-Amz-Date: %w", err)
+		return nil, fmt.Errorf("invalid X-Amz-Date: %w", err)
 	}
 	expires, err := strconv.Atoi(expiresStr)
 	if err != nil || expires <= 0 {
-		return fmt.Errorf("invalid X-Amz-Expires: %q", expiresStr)
+		return nil, fmt.Errorf("invalid X-Amz-Expires: %q", expiresStr)
 	}
 	if now.After(reqTime.Add(time.Duration(expires) * time.Second)) {
-		return fmt.Errorf("presigned URL expired")
+		return nil, fmt.Errorf("presigned URL expired")
 	}
 
 	signedHeaders := strings.Split(signedHeadersStr, ";")
@@ -186,13 +223,13 @@ func verifyPresignedV4(r *http.Request, accessKeyID, secretAccessKey string, now
 	scope := date + "/" + region + "/" + service + "/aws4_request"
 	stringToSign := "AWS4-HMAC-SHA256\n" + datetime + "\n" + scope + "\n" + hashSHA256(canonReq)
 
-	signingKey := buildSigningKey(secretAccessKey, date, region, service)
+	signingKey := buildSigningKey(user.SecretAccessKey, date, region, service)
 	expected := hex.EncodeToString(hmacSHA256(signingKey, []byte(stringToSign)))
 
 	if subtle.ConstantTimeCompare([]byte(expected), []byte(signature)) != 1 {
-		return fmt.Errorf("signature mismatch")
+		return nil, fmt.Errorf("signature mismatch")
 	}
-	return nil
+	return user, nil
 }
 
 // stripQueryParam removes all occurrences of name from a raw (unparsed) query string,
