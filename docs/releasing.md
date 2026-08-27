@@ -191,6 +191,22 @@ resolves via `go.work` from local source, so it never depends on
 `cmd/s2-server/go.mod`'s pins. Only `go install
 .../cmd/s2-server@vX.Y.Z` does now, and it doesn't gate `release`.
 
+### `server/Dockerfile`'s Go version must satisfy `go.work`, not just `cmd/s2-server/go.mod`
+
+Before e2e switched to `GOWORK=/app/go.work` (above), `server/Dockerfile`
+always built with `GOWORK=off`, so its `FROM golang:X.Y-alpine` only had
+to satisfy `cmd/s2-server/go.mod`'s own `go` directive — independent of
+`go.work`'s. Now that the e2e compose builds resolve in workspace mode,
+that same base image must also satisfy `go.work`'s `go` directive, the
+same constraint GoReleaser's build already has.
+
+Practical effect: if a release bumps `go.work`'s `go` directive (any
+module's `go` directive moving up forces the workspace minimum up),
+bump `server/Dockerfile`'s `FROM golang` line in the **same** PR that
+bumps `go.work` — step 1, not step 3. Waiting until step 3 (when
+`cmd/s2-server/go.mod` happens to catch up) leaves e2e on `main` broken
+from the moment the step 1 PR merges.
+
 ### Multi-tag push can miss webhooks
 
 Pushing several tags in one `git push` has occasionally failed to
