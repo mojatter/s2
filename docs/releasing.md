@@ -80,25 +80,27 @@ git push origin v0.11.1
 The root tag must be pushed alone — pushing multiple tags in a single
 `git push` has occasionally failed to fire GitHub Actions. Pushing the
 root tag triggers the release workflow: `tests` (unit tests + lint)
-gates GoReleaser, but e2e does not (see below), so this always
-produces a correct GitHub Release / Docker image. Proceed to step 3
-whenever.
+gates GoReleaser; e2e isn't part of this workflow at all, so this
+always produces a correct GitHub Release / Docker image. Proceed to
+step 3 whenever.
 
 #### Why the root tag doesn't need to wait for step 3
 
 GoReleaser builds without `GOWORK=off`, so `go.work` resolves everything
 from local source, not `cmd/s2-server/go.mod`'s pins. The published
-binary/Docker image is always correct. Only `go install
-.../cmd/s2-server@vX.Y.Z` and the e2e Docker build (which sets
-`GOWORK=off` on purpose) depend on step 3 — and neither gates the release.
+binary/Docker image is always correct. The e2e Docker build
+(`server/Dockerfile`) also builds with `go.work` in scope (see
+"`GOWORK=off` paths bypass the workspace" below), so it doesn't depend
+on step 3 either. Only `go install .../cmd/s2-server@vX.Y.Z` does — and
+it doesn't gate the release.
 
 ### 3. Bump `cmd/s2-server` (after the submodule tags are published)
 
-`cmd/s2-server` has no `replace` directives, so its `GOWORK=off` build
-— the e2e image (`server/Dockerfile` builds `cmd/s2-server`) — resolves
-intra-repo deps from `proxy.golang.org`. It can only require the new
-version once steps 1–2 have published the tags; bumping it earlier
-breaks that resolution.
+`cmd/s2-server` has no `replace` directives, so a plain `GOWORK=off`
+build of it resolves intra-repo deps from `proxy.golang.org`. It can
+only require the new version once steps 1–2 have published the tags;
+bumping it earlier breaks that resolution — this fails at `go get`/`go
+mod tidy` time, on your machine, before you can even open the PR.
 
 Open a follow-up PR (the tags now exist, so `go get` resolves them):
 
@@ -163,18 +165,47 @@ and add `retract v0.11.0` to the respective `go.mod`.
 
 ### `GOWORK=off` paths bypass the workspace
 
-`go mod tidy` and the e2e Docker build (`server/Dockerfile`, which sets
-`GOWORK=off`) both ignore `go.work` and resolve intra-repo deps through
+`go mod tidy` ignores `go.work` and resolves intra-repo deps through
 `proxy.golang.org`. CI is configured to use `go test` without a
 preceding `go mod tidy`, so the bump PR passes even before the new tags
 are published. Running `go mod tidy` locally on the bump branch will
 fail until the new tags exist — run it after pushing tags (that's what
 step 3 does), or skip it entirely (CI will accept your branch).
 
-GoReleaser's own build does **not** use `GOWORK=off` — it resolves via
-`go.work` from local source, so it never depends on
-`cmd/s2-server/go.mod`'s pins. Only the e2e Docker image and
-`go install .../cmd/s2-server@vX.Y.Z` do, and neither gates `release`.
+`server/Dockerfile` defaults to `GOWORK=off` too — that's what `go
+install .../cmd/s2-server@vX.Y.Z` depends on, and why it needs step 3.
+But the e2e compose builds (`s2test/e2e/docker-compose.yml`) override
+this to `GOWORK=/app/go.work`, so e2e exercises in-repo module changes
+before they're tagged/released — this was added so a PR can add a
+feature and its e2e coverage together instead of splitting across the
+step-3 boundary. One side effect: e2e no longer fails when
+`cmd/s2-server/go.mod` is stale relative to the tags steps 1–2 just
+published (previously it did, as an unenforced byproduct of
+`GOWORK=off` — see the 2026-07-02 incident below). That's an acceptable
+trade: `release` never depended on that failure either, and a stale
+`cmd/s2-server/go.mod` still fails loudly at `go get`/`go mod tidy`
+time in step 3 itself.
+
+GoReleaser's own build does **not** use `GOWORK=off` either — it
+resolves via `go.work` from local source, so it never depends on
+`cmd/s2-server/go.mod`'s pins. Only `go install
+.../cmd/s2-server@vX.Y.Z` does now, and it doesn't gate `release`.
+
+### `server/Dockerfile`'s Go version must satisfy `go.work`, not just `cmd/s2-server/go.mod`
+
+Before e2e switched to `GOWORK=/app/go.work` (above), `server/Dockerfile`
+always built with `GOWORK=off`, so its `FROM golang:X.Y-alpine` only had
+to satisfy `cmd/s2-server/go.mod`'s own `go` directive — independent of
+`go.work`'s. Now that the e2e compose builds resolve in workspace mode,
+that same base image must also satisfy `go.work`'s `go` directive, the
+same constraint GoReleaser's build already has.
+
+Practical effect: if a release bumps `go.work`'s `go` directive (any
+module's `go` directive moving up forces the workspace minimum up),
+bump `server/Dockerfile`'s `FROM golang` line in the **same** PR that
+bumps `go.work` — step 1, not step 3. Waiting until step 3 (when
+`cmd/s2-server/go.mod` happens to catch up) leaves e2e on `main` broken
+from the moment the step 1 PR merges.
 
 ### Multi-tag push can miss webhooks
 
@@ -196,3 +227,8 @@ Fix (#149): drop `e2e` from `release`'s `needs:`. It never protected the
 artifact (GoReleaser doesn't use `GOWORK=off`) and the same commit
 already passed e2e on its regular `main` push. That's why step 2 no
 longer needs a decision gate.
+
+Update: since e2e's server images switched to `GOWORK=/app/go.work`
+(see "`GOWORK=off` paths bypass the workspace" above), this specific
+failure mode — e2e red during the step 2 → step 3 window — no longer
+occurs at all, on top of no longer being gated on.

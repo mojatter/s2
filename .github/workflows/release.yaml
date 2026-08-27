@@ -11,16 +11,14 @@ jobs:
 
   # e2e is intentionally NOT a dependency of `release`. The tagged commit
   # already ran e2e when it was pushed to main (see e2e.yaml's own
-  # `push: branches: [main]` trigger), so re-running it here only checks
-  # one narrow, unrelated thing: whether cmd/s2-server/go.mod has been
-  # bumped to reference the library tags just published. For releases that
-  # touch library code, that bump (release-s2 skill Step 3) always lands
-  # in a later, separate PR/commit, so this job would be red on every such
-  # release regardless of whether the release is actually broken.
-  # GoReleaser's own build (below) does not depend on cmd/s2-server/go.mod
-  # either: it runs `go build` without GOWORK=off, so go.work resolves
-  # every intra-repo dependency from local source and always produces a
-  # correct binary/Docker image. See docs/releasing.md.
+  # `push: branches: [main]` trigger). e2e's server images build with
+  # go.work in scope (see s2test/e2e/docker-compose.yml), so they no
+  # longer depend on cmd/s2-server/go.mod having been bumped to the
+  # tags this release just published — but gating on e2e still buys
+  # nothing here: GoReleaser's own build (below) doesn't depend on
+  # cmd/s2-server/go.mod either, since it runs `go build` without
+  # GOWORK=off and resolves every intra-repo dependency from local
+  # source via go.work. See docs/releasing.md.
   release:
     needs:
       - tests

@@ -1,13 +1,20 @@
 FROM golang:1.26-alpine AS builder
+# Source is COPYed rather than bind-mounted so that GOWORK=on (see below)
+# can freely rewrite go.work.sum inside the image layer without ever
+# touching the host checkout.
+COPY . /app
 WORKDIR /app/cmd/s2-server
 # DefaultRoot is overridden via -ldflags so the Docker image defaults to
 # /var/lib/s2 while a bare "go install" binary keeps the friendlier
 # relative "./data" default (see server/config.go).
-# GOWORK=off disables workspace mode so the build does not try to update
-# go.work.sum on the read-only --mount; production builds use the
-# published module versions from cmd/s2-server/go.mod, not workspace
-# replacements.
-RUN --mount=target=/app GOOS=linux CGO_ENABLED=0 GOWORK=off \
+# GOWORK is off by default so production builds use the published module
+# versions from cmd/s2-server/go.mod, not workspace replacements - this
+# is what a "go install" of the tagged release would actually resolve to.
+# E2E builds (see s2test/e2e) override this to /app/go.work via the
+# GOWORK build arg so they exercise in-repo module changes that haven't
+# been tagged/released yet.
+ARG GOWORK=off
+RUN GOOS=linux CGO_ENABLED=0 GOWORK=${GOWORK} \
     go build \
       -ldflags "-s -w -X github.com/mojatter/s2/server.DefaultRoot=/var/lib/s2" \
       -o /s2-server .
