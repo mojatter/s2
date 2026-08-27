@@ -3,6 +3,8 @@ services:
     build:
       context: ../..
       dockerfile: server/Dockerfile
+      args:
+        GOWORK: "/app/go.work"
     environment:
       S2_SERVER_LISTEN: ":9000"
       S2_SERVER_USER: "testkey"
@@ -15,6 +17,8 @@ services:
     build:
       context: ../..
       dockerfile: server/Dockerfile
+      args:
+        GOWORK: "/app/go.work"
     environment:
       S2_SERVER_LISTEN: ":9000"
       S2_SERVER_TYPE: "memfs"

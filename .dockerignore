@@ -1,0 +1,23 @@
+.git
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Editor/IDE
+.idea/
+.vscode/
+.claude/
+
+# goreleaser
+dist/
+
+# build output
+bin/
+
+# default data directory
+data/
+
+.DS_Store
