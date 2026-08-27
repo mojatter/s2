@@ -29,6 +29,8 @@ services:
     build:
       context: ../..
       dockerfile: server/Dockerfile
+      args:
+        GOWORK: "/app/go.work"
     environment:
       S2_SERVER_CONFIG: "/etc/s2/config.json"
     volumes:
