@@ -3,6 +3,7 @@ set -eu
 
 ENDPOINT="http://s2:9000"
 ENDPOINT_MEM="http://s2-mem:9000"
+ENDPOINT_USERS="http://s2-users:9000"
 
 aws_s3() {
   aws s3 --endpoint-url "$ENDPOINT" "$@"
@@ -29,8 +30,29 @@ wait_for_server() {
   exit 1
 }
 
+wait_for_server_as() {
+  name="$1"
+  key="$2"
+  secret="$3"
+  ep="$4"
+  echo "==> Waiting for $name..."
+  i=0
+  while [ "$i" -lt 30 ]; do
+    if AWS_ACCESS_KEY_ID="$key" AWS_SECRET_ACCESS_KEY="$secret" \
+        aws s3api --endpoint-url "$ep" list-buckets >/dev/null 2>&1; then
+      echo "    $name is ready."
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  echo "FAIL: $name did not become ready"
+  exit 1
+}
+
 wait_for_server "s2 (osfs)" "$ENDPOINT"
 wait_for_server "s2-mem" "$ENDPOINT_MEM"
+wait_for_server_as "s2-users" "rootkey" "rootsecret" "$ENDPOINT_USERS"
 
 passed=0
 failed=0
@@ -243,6 +265,67 @@ run_test "Memfs_MultipartUploadStreams" sh -c '
   src=$(sha256sum /tmp/mp.bin | cut -d" " -f1)
   dst=$(sha256sum /tmp/mp.out | cut -d" " -f1)
   [ "$src" = "$dst" ]
+'
+
+# === Multi-user auth + IAM policy (s2-users) ===
+# rootkey has no Policy attached (legacy full-access user); readonlykey is
+# restricted to s3:ListAllMyBuckets / s3:ListBucket / s3:GetObject via the
+# policy in users-config.json (mirrors the read-only example from
+# https://github.com/mojatter/s2/issues/162).
+
+run_test "Users_RootCreateBucket" sh -c '
+  AWS_ACCESS_KEY_ID=rootkey AWS_SECRET_ACCESS_KEY=rootsecret \
+    aws s3api --endpoint-url "'"$ENDPOINT_USERS"'" create-bucket --bucket users-bucket
+'
+
+run_test "Users_RootPutObject" sh -c '
+  echo -n "root-owned object" | \
+  AWS_ACCESS_KEY_ID=rootkey AWS_SECRET_ACCESS_KEY=rootsecret \
+    aws s3 --endpoint-url "'"$ENDPOINT_USERS"'" cp - s3://users-bucket/hello.txt
+'
+
+run_test "Users_ReadOnlyListBuckets" sh -c '
+  out=$(AWS_ACCESS_KEY_ID=readonlykey AWS_SECRET_ACCESS_KEY=readonlysecret \
+    aws s3api --endpoint-url "'"$ENDPOINT_USERS"'" list-buckets --query "Buckets[].Name" --output text)
+  echo "$out" | grep -q "users-bucket"
+'
+
+run_test "Users_ReadOnlyListBucket" sh -c '
+  out=$(AWS_ACCESS_KEY_ID=readonlykey AWS_SECRET_ACCESS_KEY=readonlysecret \
+    aws s3api --endpoint-url "'"$ENDPOINT_USERS"'" list-objects-v2 --bucket users-bucket --query "Contents[].Key" --output text)
+  echo "$out" | grep -q "hello.txt"
+'
+
+run_test "Users_ReadOnlyGetObject" sh -c '
+  out=$(AWS_ACCESS_KEY_ID=readonlykey AWS_SECRET_ACCESS_KEY=readonlysecret \
+    aws s3 --endpoint-url "'"$ENDPOINT_USERS"'" cp s3://users-bucket/hello.txt -)
+  [ "$out" = "root-owned object" ]
+'
+
+run_test "Users_ReadOnlyPutObjectDenied" sh -c '
+  ! echo -n "should not be allowed" | \
+  AWS_ACCESS_KEY_ID=readonlykey AWS_SECRET_ACCESS_KEY=readonlysecret \
+    aws s3 --endpoint-url "'"$ENDPOINT_USERS"'" cp - s3://users-bucket/denied.txt
+'
+
+run_test "Users_ReadOnlyDeleteObjectDenied" sh -c '
+  ! AWS_ACCESS_KEY_ID=readonlykey AWS_SECRET_ACCESS_KEY=readonlysecret \
+    aws s3api --endpoint-url "'"$ENDPOINT_USERS"'" delete-object --bucket users-bucket --key hello.txt
+'
+
+run_test "Users_ReadOnlyCreateBucketDenied" sh -c '
+  ! AWS_ACCESS_KEY_ID=readonlykey AWS_SECRET_ACCESS_KEY=readonlysecret \
+    aws s3api --endpoint-url "'"$ENDPOINT_USERS"'" create-bucket --bucket should-not-exist
+'
+
+run_test "Users_UnknownAccessKeyRejected" sh -c '
+  ! AWS_ACCESS_KEY_ID=nosuchkey AWS_SECRET_ACCESS_KEY=whatever \
+    aws s3api --endpoint-url "'"$ENDPOINT_USERS"'" list-buckets
+'
+
+run_test "Users_RootStillHasFullAccess" sh -c '
+  AWS_ACCESS_KEY_ID=rootkey AWS_SECRET_ACCESS_KEY=rootsecret \
+    aws s3api --endpoint-url "'"$ENDPOINT_USERS"'" delete-object --bucket users-bucket --key hello.txt
 '
 
 # Cleanup

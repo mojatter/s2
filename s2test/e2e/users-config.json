@@ -1,0 +1,24 @@
+{
+  "listen": ":9000",
+  "type": "osfs",
+  "root": "/var/lib/s2",
+  "user": "rootkey",
+  "password": "rootsecret",
+  "users": [
+    {
+      "access_key_id": "readonlykey",
+      "secret_access_key": "readonlysecret",
+      "policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "ReadOnly",
+            "Effect": "Allow",
+            "Action": ["s3:ListAllMyBuckets", "s3:ListBucket", "s3:GetObject"],
+            "Resource": ["arn:aws:s3:::*"]
+          }
+        ]
+      }
+    }
+  ]
+}
