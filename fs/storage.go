@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/url"
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/mojatter/s2"
@@ -143,6 +144,7 @@ func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, erro
 		res.Objects = append(res.Objects, newObjectFileInfo(s.fsys, name, info))
 		limit--
 		if limit <= 0 {
+			res.NextAfter = name
 			break
 		}
 	}
@@ -150,7 +152,13 @@ func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, erro
 }
 
 func (s *storage) listRecursive(prefix, after string, limit int) (s2.ListResult, error) {
-	res := s2.ListResult{Objects: make([]s2.Object, 0, limit)}
+	// fs.WalkDir's visit order is pre-order by directory, not lexicographic
+	// by full path (e.g. "backup/2024.log" is visited before sibling file
+	// "backup-old.txt", even though "backup-old.txt" sorts first as a full
+	// path). Collect everything first and sort below, rather than capping
+	// at limit mid-walk, which could return objects out of order and,
+	// combined with an after cursor, permanently skip unvisited ones.
+	var objs []s2.Object
 	err := fs.WalkDir(s.fsys, ".", func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -174,15 +182,18 @@ func (s *storage) listRecursive(prefix, after string, limit int) (s2.ListResult,
 		if isTempFile(d.Name()) {
 			return nil
 		}
-		res.Objects = append(res.Objects, newObjectFileInfo(s.fsys, name, info))
-		limit--
-		if limit <= 0 {
-			return fs.SkipDir
-		}
+		objs = append(objs, newObjectFileInfo(s.fsys, name, info))
 		return nil
 	})
 	if err != nil {
 		return s2.ListResult{}, err
+	}
+	sort.Slice(objs, func(i, j int) bool { return objs[i].Name() < objs[j].Name() })
+
+	res := s2.ListResult{Objects: objs}
+	if len(objs) > limit {
+		res.Objects = objs[:limit]
+		res.NextAfter = res.Objects[limit-1].Name()
 	}
 	return res, nil
 }

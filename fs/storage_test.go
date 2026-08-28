@@ -367,6 +367,87 @@ func (s *StorageTestSuite) TestListRecursiveAfter() {
 	}
 }
 
+// TestListNextAfter verifies that List sets NextAfter when a Limit
+// truncates the result, for both flat and recursive listings, and that
+// following NextAfter across pages yields every object exactly once with
+// no duplicates or gaps.
+func (s *StorageTestSuite) TestListNextAfter() {
+	testCases := []struct {
+		caseName  string
+		recursive bool
+		want      []string
+	}{
+		{caseName: "flat", recursive: false, want: []string{"a.txt", "b.txt"}},
+		{caseName: "recursive", recursive: true, want: []string{"a.txt", "b.txt", "cc/c1.txt", "cc/c2.txt"}},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			strg := &storage{fsys: s.testMemFS()}
+			ctx := context.Background()
+
+			// Limit: 1 forces a new page per object, so a flat listing's
+			// final page (which only has the "cc" CommonPrefix left, no
+			// more Objects) is expected to come back empty before
+			// NextAfter finally goes empty too.
+			var got []string
+			after := ""
+			pages := 0
+			for {
+				res, err := strg.List(ctx, s2.ListOptions{Limit: 1, After: after, Recursive: tc.recursive})
+				s.Require().NoError(err)
+				for _, obj := range res.Objects {
+					got = append(got, obj.Name())
+				}
+				pages++
+				s.Require().Less(pages, 10, "pagination did not terminate")
+				if res.NextAfter == "" {
+					break
+				}
+				after = res.NextAfter
+			}
+			s.Equal(tc.want, got)
+		})
+	}
+}
+
+// TestListRecursivePaginationOrder guards against fs.WalkDir's traversal
+// order being mistaken for lexicographic order: WalkDir descends into a
+// directory's full subtree before moving to the next sibling, so a
+// directory name that sorts before a sibling file (e.g. "backup" <
+// "backup-old.txt") gets its entire contents visited before that sibling,
+// even though as full paths the sibling sorts first ("backup-old.txt" <
+// "backup/2024-01-01.log", since '-' < '/'). Pagination that trusted
+// WalkDir's raw visit order for NextAfter would permanently skip
+// "backup-old.txt" once the walk reached "backup"'s contents first.
+func (s *StorageTestSuite) TestListRecursivePaginationOrder() {
+	fsys := memfs.New()
+	_, err := fsys.WriteFile("backup-old.txt", []byte("x"), fs.ModePerm)
+	s.Require().NoError(err)
+	_, err = fsys.WriteFile("backup/2024-01-01.log", []byte("y"), fs.ModePerm)
+	s.Require().NoError(err)
+
+	strg := &storage{fsys: fsys}
+	ctx := context.Background()
+
+	var got []string
+	after := ""
+	pages := 0
+	for {
+		res, err := strg.List(ctx, s2.ListOptions{Limit: 1, After: after, Recursive: true})
+		s.Require().NoError(err)
+		for _, obj := range res.Objects {
+			got = append(got, obj.Name())
+		}
+		pages++
+		s.Require().Less(pages, 10, "pagination did not terminate")
+		if res.NextAfter == "" {
+			break
+		}
+		after = res.NextAfter
+	}
+	s.Equal([]string{"backup-old.txt", "backup/2024-01-01.log"}, got)
+}
+
 // TestListRecursiveAfter_WalkDirError verifies that an error passed to the
 // WalkDir callback (e.g. a failed ReadDir on a subdirectory) is propagated
 // instead of being silently ignored. This covers the err != nil guard added
@@ -417,7 +498,6 @@ func (s *StorageTestSuite) TestGet() {
 		})
 	}
 }
-
 
 func (s *StorageTestSuite) TestPut() {
 	testCases := []struct {
@@ -776,7 +856,7 @@ func benchGetObject(b *testing.B, typ s2.Type) {
 // rotating-key writes. s2's atomicWrite always fsyncs before rename;
 // see BenchmarkPutObjectMemFS for numbers that exclude the durability
 // cost.
-func BenchmarkPutObject(b *testing.B)    { benchPutObject(b, s2.TypeOSFS) }
-func BenchmarkGetObject(b *testing.B)    { benchGetObject(b, s2.TypeOSFS) }
+func BenchmarkPutObject(b *testing.B)      { benchPutObject(b, s2.TypeOSFS) }
+func BenchmarkGetObject(b *testing.B)      { benchGetObject(b, s2.TypeOSFS) }
 func BenchmarkPutObjectMemFS(b *testing.B) { benchPutObject(b, s2.TypeMemFS) }
 func BenchmarkGetObjectMemFS(b *testing.B) { benchGetObject(b, s2.TypeMemFS) }
