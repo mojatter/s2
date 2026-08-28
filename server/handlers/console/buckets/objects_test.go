@@ -402,9 +402,10 @@ func (s *ObjectsTestSuite) TestGalleryView_ThumbnailAndPersistenceAcrossReload()
 
 	browserCtx, cancel := chromedp.NewContext(allocCtx)
 	defer cancel()
-	// CI runners need headroom for a cold Chrome start; 5s was enough
-	// locally but flaked in CI with "chrome failed to start".
-	browserCtx, cancelTimeout := context.WithTimeout(browserCtx, 15*time.Second)
+	// This deadline covers the whole test (both s.Run subtests share
+	// browserCtx). 15s was enough locally but flaked in CI with "chrome
+	// failed to start: context deadline exceeded" on a busy runner.
+	browserCtx, cancelTimeout := context.WithTimeout(browserCtx, 30*time.Second)
 	defer cancelTimeout()
 
 	pageURL := ts.URL + "/buckets/gallery?prefix="
