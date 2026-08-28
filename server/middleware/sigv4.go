@@ -5,9 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"encoding/xml"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
@@ -71,35 +69,12 @@ func SigV4(next server.HandlerFunc) server.HandlerFunc {
 	}
 }
 
-func writeS3Error(w http.ResponseWriter, r *http.Request, code, message string, status int) {
-	type ErrorResponse struct {
-		XMLName   xml.Name `xml:"Error"`
-		Code      string   `xml:"Code"`
-		Message   string   `xml:"Message"`
-		Resource  string   `xml:"Resource"`
-		RequestID string   `xml:"RequestId"`
-	}
-	resp := ErrorResponse{
-		Code:      code,
-		Message:   message,
-		Resource:  r.URL.Path,
-		RequestID: "s2-request-id",
-	}
-	w.Header().Set("Content-Type", "application/xml")
-	w.WriteHeader(status)
-	_, _ = fmt.Fprint(w, xml.Header)
-	enc := xml.NewEncoder(w)
-	if err := enc.Encode(resp); err != nil {
-		slog.Error("Failed to encode XML", "error", err)
-	}
-}
-
 func writeS3AuthError(w http.ResponseWriter, r *http.Request, message string) {
-	writeS3Error(w, r, "SignatureDoesNotMatch", message, http.StatusForbidden)
+	server.WriteS3Error(w, r, "SignatureDoesNotMatch", message, http.StatusForbidden)
 }
 
 func writeS3AccessDeniedError(w http.ResponseWriter, r *http.Request) {
-	writeS3Error(w, r, "AccessDenied", "Access Denied", http.StatusForbidden)
+	server.WriteS3Error(w, r, "AccessDenied", "Access Denied", http.StatusForbidden)
 }
 
 // verifySignatureV4 verifies the AWS Signature Version 4 of an HTTP request.

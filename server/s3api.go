@@ -1,10 +1,45 @@
 package server
 
 import (
+	"encoding/xml"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 )
+
+// S3ErrorResponse is the XML response body for an S3 API error, shared by
+// both server/handlers/s3api (application-level errors) and
+// server/middleware (SigV4 authentication/authorization errors) so the
+// two don't drift into subtly different error shapes.
+type S3ErrorResponse struct {
+	XMLName   xml.Name `xml:"Error"`
+	Code      string   `xml:"Code"`
+	Message   string   `xml:"Message"`
+	Resource  string   `xml:"Resource"`
+	RequestID string   `xml:"RequestId"`
+}
+
+// WriteS3Error writes code/message as an S3ErrorResponse with the given
+// HTTP status.
+func WriteS3Error(w http.ResponseWriter, r *http.Request, code, message string, status int) {
+	WriteXML(w, status, S3ErrorResponse{
+		Code:      code,
+		Message:   message,
+		Resource:  r.URL.Path,
+		RequestID: "s2-request-id",
+	})
+}
+
+// WriteXML writes v as an XML response body with the given HTTP status.
+func WriteXML(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(status)
+	_, _ = fmt.Fprint(w, xml.Header)
+	if err := xml.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("Failed to encode XML", "error", err)
+	}
+}
 
 // s3Handlers holds the routes registered via RegisterS3HandleFunc,
 // served by S3Handler().

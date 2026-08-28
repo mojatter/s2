@@ -202,25 +202,50 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 	}
 
 	if strings.HasSuffix(key, "/") {
-		// ConsoleAction defers authorization entirely for a recursive
-		// folder delete (the affected keys are only known once we list
-		// the prefix here), so check every descendant individually before
-		// deleting any of them -- a single denied key aborts the whole
-		// operation rather than silently deleting the rest.
-		if user := server.UserFromContext(ctx); user != nil && user.Policy != nil {
-			res, err := strg.List(ctx, s2.ListOptions{Prefix: key, Recursive: true})
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
+		user := server.UserFromContext(ctx)
+		if user != nil && user.Policy != nil {
+			// ConsoleAction defers authorization entirely for a recursive
+			// folder delete (the affected keys are only known once we
+			// list the prefix here). Collect and check every descendant
+			// across all pages first -- List caps a page at 1000 objects,
+			// so a single-page check would silently skip anything past
+			// that -- and only delete the exact checked set afterward,
+			// rather than calling DeleteRecursive (which would re-list
+			// independently and could sweep in an object written after
+			// the check ran).
+			//
+			// .keep folder markers are deliberately not filtered out here
+			// (unlike elsewhere): they're still checked and deleted like
+			// any other object under the same wildcard grant, so a folder
+			// the caller is authorized to clear doesn't linger empty
+			// afterward the way it would if its marker survived.
+			var keys []string
+			after := ""
+			for {
+				res, err := strg.List(ctx, s2.ListOptions{Prefix: key, Recursive: true, After: after})
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				for _, obj := range res.Objects {
+					if !server.AllowedS3Action(user, server.ActionDeleteObject, name, obj.Name()) {
+						http.Error(w, "Forbidden", http.StatusForbidden)
+						return
+					}
+					keys = append(keys, obj.Name())
+				}
+				if res.NextAfter == "" {
+					break
+				}
+				after = res.NextAfter
 			}
-			for _, obj := range server.FilterKeep(res.Objects) {
-				if !server.AllowedS3Action(user, server.ActionDeleteObject, name, obj.Name()) {
-					http.Error(w, "Forbidden", http.StatusForbidden)
+			for _, k := range keys {
+				if err := strg.Delete(ctx, k); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
 			}
-		}
-		if err := strg.DeleteRecursive(ctx, key); err != nil {
+		} else if err := strg.DeleteRecursive(ctx, key); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

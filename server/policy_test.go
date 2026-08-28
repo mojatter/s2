@@ -225,7 +225,10 @@ func TestAuthorized(t *testing.T) {
 	}{
 		{caseName: "nil user is always allowed", user: nil, action: "s3:DeleteBucket", resource: "arn:aws:s3:::bucket", want: true},
 		{caseName: "user with no policy is always allowed", user: &User{}, action: "s3:DeleteBucket", resource: "arn:aws:s3:::bucket", want: true},
-		{caseName: "empty action skips the check even for a restrictive policy", user: scopedUser, action: "", resource: "", want: true},
+		{caseName: "actionSkip passes even for a restrictive policy", user: scopedUser, action: actionSkip, resource: "", want: true},
+		{caseName: "actionDeferred passes even for a restrictive policy", user: scopedUser, action: actionDeferred, resource: "", want: true},
+		{caseName: "unclassified empty action is denied, not treated as skip/defer", user: scopedUser, action: "", resource: "", want: false},
+		{caseName: "unclassified empty action is denied even for a full-access user", user: nil, action: "", resource: "", want: false},
 		{caseName: "scoped policy allows a matching action/resource", user: scopedUser, action: "s3:GetObject", resource: "arn:aws:s3:::bucket/key", want: true},
 		{caseName: "scoped policy denies a non-matching action", user: scopedUser, action: "s3:DeleteObject", resource: "arn:aws:s3:::bucket/key", want: false},
 	}
@@ -361,6 +364,36 @@ func TestStringOrSliceUnmarshalJSON(t *testing.T) {
 	}
 }
 
+// TestStringOrSliceUnmarshalJSONRejectsNull guards against "Action": null
+// (or Resource) producing stringOrSlice{""} -- a one-element slice with an
+// empty string, which Validate's len(...) == 0 check wouldn't catch,
+// silently making an inert Deny statement never apply.
+func TestStringOrSliceUnmarshalJSONRejectsNull(t *testing.T) {
+	var got stringOrSlice
+	err := json.Unmarshal([]byte(`null`), &got)
+	assert.Error(t, err)
+}
+
+// TestPolicyValidateRejectsNullActionOrResource is the end-to-end version
+// of TestStringOrSliceUnmarshalJSONRejectsNull: a full policy document
+// with "Action": null must fail to even parse (and therefore fail
+// Config.LoadFile), not silently validate as an inert statement.
+func TestPolicyValidateRejectsNullActionOrResource(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		input    string
+	}{
+		{caseName: "null action", input: `{"Statement":[{"Effect":"Deny","Action":null,"Resource":"arn:aws:s3:::secret/*"}]}`},
+		{caseName: "null resource", input: `{"Statement":[{"Effect":"Deny","Action":"s3:GetObject","Resource":null}]}`},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			var p Policy
+			assert.Error(t, json.Unmarshal([]byte(tc.input), &p))
+		})
+	}
+}
+
 func TestWildcardMatch(t *testing.T) {
 	testCases := []struct {
 		caseName string
@@ -429,6 +462,39 @@ func TestS3Action(t *testing.T) {
 			wantResource: "arn:aws:s3:::mybucket",
 		},
 		{
+			// A trailing slash matches Go ServeMux's "/{bucket}/{key...}"
+			// pattern with an empty key (handleDeleteObject), not the
+			// bucket-level "/{bucket}" pattern (handleDeleteBucket) --
+			// even though PathValue("key") is "" either way. Classifying
+			// this as DeleteBucket would authorize a different operation
+			// than the one that actually runs.
+			caseName:     "delete with trailing slash routes to object handler, not bucket handler",
+			method:       http.MethodDelete,
+			url:          "/mybucket/",
+			bucket:       "mybucket",
+			key:          "",
+			wantAction:   "s3:DeleteObject",
+			wantResource: "arn:aws:s3:::mybucket/",
+		},
+		{
+			caseName:     "get with trailing slash routes to object handler, not bucket handler",
+			method:       http.MethodGet,
+			url:          "/mybucket/",
+			bucket:       "mybucket",
+			key:          "",
+			wantAction:   "s3:GetObject",
+			wantResource: "arn:aws:s3:::mybucket/",
+		},
+		{
+			caseName:     "put with trailing slash routes to object handler, not bucket handler",
+			method:       http.MethodPut,
+			url:          "/mybucket/",
+			bucket:       "mybucket",
+			key:          "",
+			wantAction:   "s3:PutObject",
+			wantResource: "arn:aws:s3:::mybucket/",
+		},
+		{
 			caseName:     "get bucket location",
 			method:       http.MethodGet,
 			url:          "/mybucket?location",
@@ -460,7 +526,7 @@ func TestS3Action(t *testing.T) {
 			// The affected keys are only known once the handler decodes
 			// the request body, so S3Action defers entirely to
 			// handleDeleteObjects' per-key AllowedS3Action checks.
-			wantAction:   "",
+			wantAction:   actionDeferred,
 			wantResource: "",
 		},
 		{
@@ -556,18 +622,25 @@ func TestConsoleAction(t *testing.T) {
 		wantResource string
 	}{
 		{
-			caseName:     "index bucket list",
+			// GET / is the console's only entry point (login landing
+			// page + bucket sidebar data source), so it must never be
+			// blocked by a policy check -- FilterBucketNames handles
+			// visibility instead. See ConsoleAction's doc comment.
+			caseName:     "index bucket list has no single up-front resource",
 			method:       http.MethodGet,
 			url:          "/",
-			wantAction:   "s3:ListAllMyBuckets",
-			wantResource: "arn:aws:s3:::*",
+			wantAction:   actionDeferred,
+			wantResource: "",
 		},
 		{
-			caseName:     "create bucket",
+			// The bucket name lives in the form body, not the URL, so
+			// ConsoleAction defers to handleCreateBucket's
+			// AllowedS3BucketAction check on the real name.
+			caseName:     "create bucket has no single up-front resource",
 			method:       http.MethodPost,
 			url:          "/buckets",
-			wantAction:   "s3:CreateBucket",
-			wantResource: "arn:aws:s3:::*",
+			wantAction:   actionDeferred,
+			wantResource: "",
 		},
 		{
 			caseName:     "delete bucket",
@@ -593,7 +666,7 @@ func TestConsoleAction(t *testing.T) {
 			method:       http.MethodPost,
 			url:          "/buckets/mybucket/folders",
 			pathValues:   map[string]string{"name": "mybucket"},
-			wantAction:   "",
+			wantAction:   actionDeferred,
 			wantResource: "",
 		},
 		{
@@ -603,7 +676,7 @@ func TestConsoleAction(t *testing.T) {
 			method:       http.MethodPost,
 			url:          "/buckets/mybucket/upload",
 			pathValues:   map[string]string{"name": "mybucket"},
-			wantAction:   "",
+			wantAction:   actionDeferred,
 			wantResource: "",
 		},
 		{
@@ -623,7 +696,7 @@ func TestConsoleAction(t *testing.T) {
 			method:       http.MethodDelete,
 			url:          "/buckets/mybucket/objects?key=folder/",
 			pathValues:   map[string]string{"name": "mybucket"},
-			wantAction:   "",
+			wantAction:   actionDeferred,
 			wantResource: "",
 		},
 		{
@@ -654,7 +727,7 @@ func TestConsoleAction(t *testing.T) {
 			caseName:     "static asset bypasses check",
 			method:       http.MethodGet,
 			url:          "/static/app.css",
-			wantAction:   "",
+			wantAction:   actionSkip,
 			wantResource: "",
 		},
 	}

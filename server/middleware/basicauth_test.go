@@ -89,10 +89,18 @@ func TestBasicAuthMultiUser(t *testing.T) {
 	readOnlyPolicy := &server.Policy{Statement: []server.Statement{
 		{Effect: "Allow", Action: []string{"s3:ListAllMyBuckets", "s3:ListBucket", "s3:GetObject"}, Resource: []string{"arn:aws:s3:::*"}},
 	}}
+	// noListAllBucketsPolicy deliberately omits s3:ListAllMyBuckets, unlike
+	// readOnlyPolicy above -- GET / must still succeed for this user since
+	// it's the console's only entry point (see ConsoleAction's doc
+	// comment on the GET / case).
+	noListAllBucketsPolicy := &server.Policy{Statement: []server.Statement{
+		{Effect: "Allow", Action: []string{"s3:ListBucket", "s3:GetObject"}, Resource: []string{"arn:aws:s3:::visible"}},
+	}}
 	cfg := &server.Config{
 		Users: []server.User{
 			{AccessKeyID: "userA", SecretAccessKey: "secretA"},
 			{AccessKeyID: "userB", SecretAccessKey: "secretB", Policy: readOnlyPolicy},
+			{AccessKeyID: "userC", SecretAccessKey: "secretC", Policy: noListAllBucketsPolicy},
 		},
 	}
 
@@ -146,6 +154,14 @@ func TestBasicAuthMultiUser(t *testing.T) {
 			name:       "mybucket",
 			authUser:   "userA",
 			authPass:   "secretA",
+			wantStatus: http.StatusOK,
+		},
+		{
+			caseName:   "user without s3:ListAllMyBuckets can still reach the console home page",
+			method:     http.MethodGet,
+			url:        "/",
+			authUser:   "userC",
+			authPass:   "secretC",
 			wantStatus: http.StatusOK,
 		},
 	}

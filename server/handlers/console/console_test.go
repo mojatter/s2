@@ -130,6 +130,26 @@ func (s *IndexTestSuite) TestHandleCreateBucket() {
 		s.Contains(body, "just-created")
 		s.NotContains(body, "denied-bucket")
 	})
+
+	s.Run("explicit deny on the exact bucket name is not bypassed by a wildcard allow", func() {
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{"s3:CreateBucket"}, Resource: []string{"arn:aws:s3:::*"}},
+			{Effect: "Deny", Action: []string{"s3:CreateBucket"}, Resource: []string{"arn:aws:s3:::secrets"}},
+		}}}
+
+		form := url.Values{"name": {"secrets"}}
+		req := httptest.NewRequest("POST", "/buckets", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handleCreateBucket(s.server, w, req)
+
+		s.Equal(http.StatusForbidden, w.Code)
+
+		exists, err := s.server.Buckets.Exists(req.Context(), "secrets")
+		s.Require().NoError(err)
+		s.False(exists)
+	})
 }
 
 // --- DELETE /buckets/{name} ---

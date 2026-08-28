@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/subtle"
 )
 
 // User is one configured principal: a credential pair plus the policy that
@@ -19,13 +18,18 @@ type User struct {
 // first and falling back to the legacy single User/Password fields
 // (synthesized as a full-access User with a nil Policy) if no Users entry
 // matches. It returns nil if accessKeyID matches neither.
+//
+// accessKeyID is compared with plain == rather than constant-time
+// comparison: it's a public identifier, not a secret -- it travels
+// unencrypted in the SigV4 Authorization header/query string. The actual
+// secret (password/signature) is compared in constant time downstream.
 func (cfg *Config) LookupUser(accessKeyID string) *User {
 	for i := range cfg.Users {
-		if subtle.ConstantTimeCompare([]byte(cfg.Users[i].AccessKeyID), []byte(accessKeyID)) == 1 {
+		if cfg.Users[i].AccessKeyID == accessKeyID {
 			return &cfg.Users[i]
 		}
 	}
-	if cfg.User != "" && subtle.ConstantTimeCompare([]byte(cfg.User), []byte(accessKeyID)) == 1 {
+	if cfg.User != "" && cfg.User == accessKeyID {
 		return &User{AccessKeyID: cfg.User, SecretAccessKey: cfg.Password}
 	}
 	return nil
@@ -47,7 +51,7 @@ func FilterBucketNames(user *User, names []string) []string {
 	}
 	out := make([]string, 0, len(names))
 	for _, name := range names {
-		if user.Policy.Allowed("s3:ListBucket", bucketARN(name)) {
+		if user.Policy.Allowed(ActionListBucket, bucketARN(name)) {
 			out = append(out, name)
 		}
 	}

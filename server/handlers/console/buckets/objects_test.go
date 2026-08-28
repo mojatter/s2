@@ -3,6 +3,7 @@ package buckets
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -441,6 +442,43 @@ func (s *ObjectsTestSuite) TestHandleDeleteObject() {
 		exists, err = strg.Exists(context.Background(), "dir/other.txt")
 		s.Require().NoError(err)
 		s.True(exists, "other.txt must also survive: the whole operation aborts on any denial")
+	})
+
+	s.Run("denial past the first list page (1000 objects) is still honored", func() {
+		s.createBucket("delbig")
+		s.server.Buckets.CreateFolder(context.Background(), "delbig", "dir")
+
+		const total = 1200
+		for i := range total {
+			s.putObject("delbig", fmt.Sprintf("dir/obj-%04d.txt", i), "data")
+		}
+		// Lexicographically last, so it only appears once List's default
+		// 1000-item page is exhausted and a second page is fetched.
+		deniedKey := fmt.Sprintf("dir/obj-%04d.txt", total-1)
+
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{server.ActionDeleteObject}, Resource: []string{"arn:aws:s3:::delbig/dir/*"}},
+			{Effect: "Deny", Action: []string{server.ActionDeleteObject}, Resource: []string{"arn:aws:s3:::delbig/" + deniedKey}},
+		}}}
+
+		req := httptest.NewRequest("DELETE", "/buckets/delbig/objects?key=dir/&prefix=", nil)
+		req.SetPathValue("name", "delbig")
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handleDeleteObject(s.server, w, req)
+
+		s.Equal(http.StatusForbidden, w.Code)
+
+		strg, err := s.server.Buckets.Get(context.Background(), "delbig")
+		s.Require().NoError(err)
+		exists, err := strg.Exists(context.Background(), deniedKey)
+		s.Require().NoError(err)
+		s.True(exists, "the denied object beyond the first page must survive")
+		// Nothing should have been deleted either, since the check runs
+		// to completion across all pages before any delete happens.
+		exists, err = strg.Exists(context.Background(), "dir/obj-0000.txt")
+		s.Require().NoError(err)
+		s.True(exists, "even an allowed object from the first page must survive: the whole operation aborts on any denial")
 	})
 }
 

@@ -3,6 +3,8 @@ package s3api
 import (
 	"encoding/xml"
 	"time"
+
+	"github.com/mojatter/s2/server"
 )
 
 // ListAllMyBucketsResult represents the XML response for ListBuckets.
@@ -127,11 +129,8 @@ type CompleteMultipartUploadResult struct {
 	ETag     string   `xml:"ETag"`
 }
 
-// ErrorResponse represents the XML response for S3 errors.
-type ErrorResponse struct {
-	XMLName   xml.Name `xml:"Error"`
-	Code      string   `xml:"Code"`
-	Message   string   `xml:"Message"`
-	Resource  string   `xml:"Resource"`
-	RequestID string   `xml:"RequestId"`
-}
+// ErrorResponse represents the XML response for S3 errors. It's an alias
+// for server.S3ErrorResponse, which server/middleware also uses for SigV4
+// auth/authz errors, so the two error paths can't drift into subtly
+// different XML shapes.
+type ErrorResponse = server.S3ErrorResponse

@@ -22,6 +22,14 @@ func handleCreateBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 		http.Error(w, "bucket name is required", http.StatusBadRequest)
 		return
 	}
+	// ConsoleAction can only check a wildcard placeholder resource for
+	// this route (the bucket doesn't exist in the URL and isn't known
+	// until the form above is parsed), so re-check the real name here --
+	// a Deny scoped to this specific bucket name must still apply.
+	if !server.AllowedS3BucketAction(server.UserFromContext(r.Context()), server.ActionCreateBucket, name) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 	if err := s.Buckets.Create(r.Context(), name); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

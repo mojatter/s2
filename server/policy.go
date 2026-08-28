@@ -10,22 +10,36 @@ import (
 // S3 IAM action names, shared between S3Action and ConsoleAction so a typo
 // in one mapping can't silently drift from the other.
 const (
-	actionListAllMyBuckets  = "s3:ListAllMyBuckets"
-	actionCreateBucket      = "s3:CreateBucket"
+	actionListAllMyBuckets = "s3:ListAllMyBuckets"
+	// ActionCreateBucket is exported: the console's handleCreateBucket
+	// checks a form-parsed bucket name directly via AllowedS3BucketAction.
+	ActionCreateBucket      = "s3:CreateBucket"
 	actionDeleteBucket      = "s3:DeleteBucket"
-	actionListBucket        = "s3:ListBucket"
 	actionGetBucketLocation = "s3:GetBucketLocation"
-	// ActionGetObject is exported for handlers that must authorize a
-	// resource distinct from the request's own bucket/key (e.g.
-	// handleCopyObject's read of its copy-source object), which S3Action
-	// can't check generically since it only derives the destination.
+	// ActionListBucket is exported for FilterBucketNames' per-bucket check.
+	ActionListBucket = "s3:ListBucket"
+	// ActionGetObject is exported: handleCopyObject checks its copy-source
+	// object, which S3Action's destination-only mapping doesn't cover.
 	ActionGetObject = "s3:GetObject"
 	ActionPutObject = "s3:PutObject"
-	// ActionDeleteObject is exported for handlers that must authorize
-	// individual resources parsed from a request body (e.g.
-	// handleDeleteObjects' per-key batch delete), which SigV4 can't check
-	// generically since the keys aren't known until the body is decoded.
+	// ActionDeleteObject is exported for per-key checks on resources
+	// S3Action/ConsoleAction can't see up front (batch delete, recursive
+	// folder delete).
 	ActionDeleteObject = "s3:DeleteObject"
+
+	// actionSkip and actionDeferred are sentinels S3Action/ConsoleAction
+	// return instead of a bare "" when no single resource can be checked
+	// up front. Authorized passes both through; any other "" means a
+	// request matched no dispatch case, so a route added without
+	// updating either function fails closed instead of silently open.
+	//   - actionSkip: no user data, no check needed (static assets).
+	//   - actionDeferred: the resource isn't known until the handler
+	//     parses the body/prefix, or the response is filtered rather
+	//     than allow/deny'd as a whole (e.g. the console home page). The
+	//     handler checks itself via AllowedS3Action/AllowedS3BucketAction
+	//     or FilterBucketNames.
+	actionSkip     = "s2:Skip"
+	actionDeferred = "s2:Deferred"
 )
 
 // Policy is an AWS-IAM-shaped authorization policy attached to a User. It
@@ -67,6 +81,13 @@ type Statement struct {
 type stringOrSlice []string
 
 func (s *stringOrSlice) UnmarshalJSON(data []byte) error {
+	// A JSON null unmarshals into a string as a silent no-op, not an
+	// error, which would let "Action": null through as stringOrSlice{""}
+	// -- non-empty, so Validate's len check wouldn't catch it, and an
+	// inert Deny would silently never apply. Reject null explicitly.
+	if string(data) == "null" {
+		return fmt.Errorf("must not be null")
+	}
 	var single string
 	if err := json.Unmarshal(data, &single); err == nil {
 		*s = stringOrSlice{single}
@@ -189,33 +210,43 @@ func bucketARN(bucket string) string {
 
 // objectARN returns the ARN for an object-level S3 resource.
 func objectARN(bucket, key string) string {
-	return "arn:aws:s3:::" + bucket + "/" + key
+	return bucketARN(bucket) + "/" + key
 }
 
-// AllowedS3Action reports whether user may perform action on the given
-// bucket/key object resource. A nil user or a user with no Policy attached
-// (full access, including the legacy single-credential user) is always
-// allowed.
-//
-// This is for handlers that authorize a resource SigV4 couldn't check
-// generically -- e.g. batch operations where the affected keys are only
-// known after the request body is decoded, so the coarse bucket-level
-// check S3Action performs up front isn't precise enough.
+// AllowedS3BucketAction reports whether user may perform action on a
+// bucket-level resource. A nil user or a user with no Policy (full
+// access, including the legacy single-credential user) always passes.
+// For handlers authorizing a bucket name only known after parsing the
+// request body (e.g. the console's handleCreateBucket).
+func AllowedS3BucketAction(user *User, action, bucket string) bool {
+	return Authorized(user, action, bucketARN(bucket))
+}
+
+// AllowedS3Action is AllowedS3BucketAction for an object-level (bucket+key)
+// resource -- e.g. per-key checks in batch/recursive delete handlers,
+// whose affected keys S3Action/ConsoleAction can't see up front.
 func AllowedS3Action(user *User, action, bucket, key string) bool {
 	return Authorized(user, action, objectARN(bucket, key))
 }
 
 // Authorized reports whether user may perform action on resource. A nil
 // user or a user with no Policy attached (full access, including the
-// legacy single-credential user) is always allowed. An empty action means
-// S3Action/ConsoleAction couldn't determine a single resource to check up
-// front -- e.g. batch operations whose affected keys are only known once
-// the request body is decoded -- so it also passes, deferring enforcement
-// to the handler itself (see AllowedS3Action). This is the single place
-// SigV4 and BasicAuth both consult after resolving the matched user, so
-// the fail-open convention for an empty action lives in one spot.
+// legacy single-credential user) is always allowed.
+//
+// action == actionSkip or actionDeferred also passes, for the reasons
+// documented on those constants. Any other empty action is treated as
+// deny -- see the doc comment on actionSkip/actionDeferred for why an
+// unclassified action must fail closed rather than open. This is the
+// single place SigV4 and BasicAuth both consult after resolving the
+// matched user, so this convention lives in one spot.
 func Authorized(user *User, action, resource string) bool {
-	if user == nil || user.Policy == nil || action == "" {
+	if action == actionSkip || action == actionDeferred {
+		return true
+	}
+	if action == "" {
+		return false
+	}
+	if user == nil || user.Policy == nil {
 		return true
 	}
 	return user.Policy.Allowed(action, resource)
@@ -237,30 +268,35 @@ func S3Action(r *http.Request, bucket, key string) (action, resource string) {
 		return actionListAllMyBuckets, "arn:aws:s3:::*"
 	}
 
-	if key == "" {
+	// key == "" is ambiguous on its own: "DELETE /{bucket}" (truly
+	// bucket-level, no key wildcard in that pattern) and
+	// "DELETE /{bucket}/" (matches "/{bucket}/{key...}" with an empty
+	// key) both populate PathValue("key") as "". Go's ServeMux always
+	// prefers the more specific "/{bucket}/{key...}" pattern once there's
+	// a trailing slash, so a trailing-slash request is actually dispatched
+	// to the object handler (handleGetObject/handlePutObject/etc. with an
+	// empty key), not the bucket-level one -- checking it as a
+	// bucket-level action here would authorize a different operation than
+	// the one that actually runs. Only a path with no trailing slash is
+	// genuinely bucket-level.
+	if key == "" && !strings.HasSuffix(r.URL.Path, "/") {
 		switch r.Method {
 		case http.MethodPut:
-			return actionCreateBucket, bucketARN(bucket)
+			return ActionCreateBucket, bucketARN(bucket)
 		case http.MethodDelete:
 			return actionDeleteBucket, bucketARN(bucket)
 		case http.MethodHead:
-			return actionListBucket, bucketARN(bucket)
+			return ActionListBucket, bucketARN(bucket)
 		case http.MethodGet:
 			if _, ok := q["location"]; ok {
 				return actionGetBucketLocation, bucketARN(bucket)
 			}
-			return actionListBucket, bucketARN(bucket)
+			return ActionListBucket, bucketARN(bucket)
 		}
-		// Batch delete (POST /{bucket}?delete) falls through to here: the
-		// affected keys are only known once the request body is decoded,
-		// so no single resource can be checked up front -- a policy
-		// scoped to a narrower prefix than the whole bucket would
-		// otherwise be denied even for keys it does cover, since a
-		// Resource pattern only matches the literal resource it's tested
-		// against, not a broader placeholder standing in for "any key".
-		// handleDeleteObjects checks each key individually via
-		// AllowedS3Action instead.
-		return "", ""
+		// Batch delete (POST /{bucket}?delete): affected keys are only
+		// known once the body is decoded. handleDeleteObjects checks each
+		// key via AllowedS3Action instead.
+		return actionDeferred, ""
 	}
 
 	switch r.Method {
@@ -282,7 +318,7 @@ func S3Action(r *http.Request, bucket, key string) (action, resource string) {
 		// (?uploadId=...) both fall under s3:PutObject.
 		return ActionPutObject, objectARN(bucket, key)
 	}
-	return "", ""
+	return "", "" // unreachable given the registered routes; fails closed if it ever isn't.
 }
 
 // ConsoleAction derives the s3:* IAM action name and resource ARN for a Web
@@ -290,23 +326,24 @@ func S3Action(r *http.Request, bucket, key string) (action, resource string) {
 // PathValue("object") as populated by the ServeMux before middleware runs.
 // It mirrors S3Action for the console's non-S3-shaped routes (see
 // server/handlers/console/{index,buckets/objects,buckets/objects/view}.go).
-//
-// An empty action means "no authorization check applies" -- used for the
-// static asset route, which serves no user data.
+// See actionSkip/actionDeferred for what a non-normal action return means.
 func ConsoleAction(r *http.Request) (action, resource string) {
 	if strings.HasPrefix(r.URL.Path, "/static/") {
-		return "", ""
+		return actionSkip, "" // no user data
 	}
 
 	name := r.PathValue("name")
 	if name == "" {
 		if r.Method == http.MethodPost && r.URL.Path == "/buckets" {
-			// The bucket name lives in the form body, not the URL, and
-			// doesn't exist yet -- authorize against the wildcard bucket
-			// resource rather than parsing the body here.
-			return actionCreateBucket, "arn:aws:s3:::*"
+			// Bucket name lives in the form body; handleCreateBucket
+			// checks it via AllowedS3BucketAction.
+			return actionDeferred, ""
 		}
-		return actionListAllMyBuckets, "arn:aws:s3:::*"
+		// GET / is the console's only entry point (login + bucket
+		// sidebar); gating it on s3:ListAllMyBuckets would lock out any
+		// user with only narrower per-bucket grants. FilterBucketNames
+		// determines what the sidebar actually shows.
+		return actionDeferred, ""
 	}
 
 	arn := bucketARN(name)
@@ -314,31 +351,26 @@ func ConsoleAction(r *http.Request) (action, resource string) {
 
 	switch {
 	case rest == "" && r.Method == http.MethodGet:
-		return actionListBucket, arn
+		return ActionListBucket, arn
 	case rest == "" && r.Method == http.MethodDelete:
 		return actionDeleteBucket, arn
 	case rest == "/folders", rest == "/upload":
-		// The target key lives in the form body and isn't known here. A
-		// wildcard placeholder resource (bucket/*) would be wrong in both
-		// directions -- it can't see a Deny scoped to one specific key,
-		// and it doesn't match an Allow scoped to a narrower prefix than
-		// the whole bucket -- so defer entirely to the handler, which
-		// checks the real key once the body is parsed (handleCreateFolder,
-		// handleUploadFile in server/handlers/console/buckets/objects.go).
-		return "", ""
+		// Target key lives in the form body; the handler checks the real
+		// key via AllowedS3Action once parsed (handleCreateFolder,
+		// handleUploadFile).
+		return actionDeferred, ""
 	case rest == "/objects" && r.Method == http.MethodDelete:
-		// Unlike /folders and /upload, the target key is a query
-		// parameter here, so it's available without consuming the body --
+		// The key is a query param, available without parsing the body --
 		// except for a recursive folder delete (key ends in "/"), whose
-		// affected keys are only known once the handler lists the prefix;
-		// that case also defers to the handler (handleDeleteObject).
+		// affected keys are only known once handleDeleteObject lists the
+		// prefix.
 		key := r.URL.Query().Get("key")
 		if strings.HasSuffix(key, "/") {
-			return "", ""
+			return actionDeferred, ""
 		}
 		return ActionDeleteObject, objectARN(name, key)
 	case strings.HasPrefix(rest, "/view/"), strings.HasPrefix(rest, "/meta/"), strings.HasPrefix(rest, "/preview/"):
 		return ActionGetObject, objectARN(name, r.PathValue("object"))
 	}
-	return "", ""
+	return "", "" // unreachable given the registered routes; fails closed if it ever isn't.
 }
