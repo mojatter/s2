@@ -185,3 +185,90 @@ func TestConfigValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigValidateUsers(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		cfg      *Config
+		wantErr  bool
+	}{
+		{
+			caseName: "valid multi-user config",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Users = []User{
+					{AccessKeyID: "userA", SecretAccessKey: "secretA"},
+					{AccessKeyID: "userB", SecretAccessKey: "secretB", Policy: &Policy{
+						Statement: []Statement{allowStatement("s3:GetObject", "*")},
+					}},
+				}
+				return c
+			}(),
+			wantErr: false,
+		},
+		{
+			caseName: "empty access key id rejected",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Users = []User{{SecretAccessKey: "secretA"}}
+				return c
+			}(),
+			wantErr: true,
+		},
+		{
+			caseName: "empty secret access key rejected",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Users = []User{{AccessKeyID: "userA"}}
+				return c
+			}(),
+			wantErr: true,
+		},
+		{
+			caseName: "duplicate access key id within users rejected",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Users = []User{
+					{AccessKeyID: "userA", SecretAccessKey: "secretA"},
+					{AccessKeyID: "userA", SecretAccessKey: "secretA2"},
+				}
+				return c
+			}(),
+			wantErr: true,
+		},
+		{
+			caseName: "access key id colliding with legacy user rejected",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.User = "root"
+				c.Password = "rootsecret"
+				c.Users = []User{{AccessKeyID: "root", SecretAccessKey: "other"}}
+				return c
+			}(),
+			wantErr: true,
+		},
+		{
+			caseName: "malformed nested policy rejected",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Users = []User{{
+					AccessKeyID:     "userA",
+					SecretAccessKey: "secretA",
+					Policy:          &Policy{Statement: []Statement{{Effect: "invalid"}}},
+				}}
+				return c
+			}(),
+			wantErr: true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}

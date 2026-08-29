@@ -135,6 +135,9 @@ func handleCreateFolder(s *server.Server, w http.ResponseWriter, r *http.Request
 	}
 
 	key := path.Join(prefix, folderName)
+	if !server.DenyUnlessAllowedS3Action(w, server.UserFromContext(ctx), server.ActionPutObject, name, key) {
+		return
+	}
 	if err := s.Buckets.CreateFolder(ctx, name, key); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -169,6 +172,9 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	}
 
 	key := path.Join(prefix, header.Filename)
+	if !server.DenyUnlessAllowedS3Action(w, server.UserFromContext(ctx), server.ActionPutObject, name, key) {
+		return
+	}
 	obj := s2.NewObjectReader(key, file, s2.MustUint64(header.Size))
 	if err := strg.Put(ctx, obj); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -194,7 +200,50 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 	}
 
 	if strings.HasSuffix(key, "/") {
-		if err := strg.DeleteRecursive(ctx, key); err != nil {
+		user := server.UserFromContext(ctx)
+		if user != nil && user.Policy != nil {
+			// ConsoleAction defers authorization for a recursive folder
+			// delete; check and delete each descendant per page instead of
+			// buffering all keys first, to bound memory. Processing stops
+			// at the first denied key rather than skipping it and scanning
+			// the rest of the prefix to completion -- a caller with no
+			// delete permission at all under a huge prefix would otherwise
+			// force a full pagination sweep for no benefit. The refreshed
+			// fragment below still reflects whatever was deleted before
+			// the stop, unlike an old 403 short-circuit that would leave
+			// the console showing already-deleted objects (htmx doesn't
+			// swap on a 4xx response).
+			//
+			// TODO: stopping early is silent -- the response is always a
+			// plain 200, so the user has no way to tell that the folder
+			// was only partially cleared, or why it stopped where it did.
+			//
+			// .keep markers aren't filtered out here (unlike elsewhere):
+			// they're deleted like any other object under the same
+			// wildcard grant, so an authorized folder doesn't linger empty.
+			after := ""
+		pagination:
+			for {
+				res, err := strg.List(ctx, s2.ListOptions{Prefix: key, Recursive: true, After: after})
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				for _, obj := range res.Objects {
+					if !server.AllowedS3Action(user, server.ActionDeleteObject, name, obj.Name()) {
+						break pagination
+					}
+					if err := strg.Delete(ctx, obj.Name()); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+				}
+				if res.NextAfter == "" {
+					break
+				}
+				after = res.NextAfter
+			}
+		} else if err := strg.DeleteRecursive(ctx, key); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

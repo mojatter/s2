@@ -2,11 +2,9 @@ package s3api
 
 import (
 	"bufio"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,23 +21,11 @@ const (
 )
 
 func writeXML(w http.ResponseWriter, status int, v interface{}) {
-	w.Header().Set("Content-Type", "application/xml")
-	w.WriteHeader(status)
-	_, _ = fmt.Fprint(w, xml.Header)
-	enc := xml.NewEncoder(w)
-	if err := enc.Encode(v); err != nil {
-		slog.Error("Failed to encode XML", "error", err)
-	}
+	server.WriteXML(w, status, v)
 }
 
 func writeError(w http.ResponseWriter, r *http.Request, code string, message string, status int) {
-	resp := ErrorResponse{
-		Code:      code,
-		Message:   message,
-		Resource:  r.URL.Path,
-		RequestID: "s2-request-id",
-	}
-	writeXML(w, status, resp)
+	server.WriteS3Error(w, r, code, message, status)
 }
 
 // ErrNoSuchBucket is returned when a bucket does not exist.

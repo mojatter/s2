@@ -457,6 +457,15 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 	srcBucket := copySource[:slashIdx]
 	srcKey := copySource[slashIdx+1:]
 
+	// S3Action only authorized the destination (dstBucket/dstKey) against
+	// s3:PutObject up front -- the source is a distinct resource that must
+	// be checked separately, or a PutObject-only policy could be used to
+	// read arbitrary objects via CopyObject.
+	if !server.AllowedS3Action(server.UserFromContext(ctx), server.ActionGetObject, srcBucket, srcKey) {
+		writeError(w, r, "AccessDenied", "Access Denied", http.StatusForbidden)
+		return
+	}
+
 	srcStrg, err := s.Buckets.Get(ctx, srcBucket)
 	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
@@ -562,8 +571,28 @@ func handleDeleteObjects(s *server.Server, w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// The keys to delete only become known once the body above is decoded,
+	// so SigV4's up-front check (against the coarse bucket/* resource) is
+	// too imprecise for a policy scoped to a narrower prefix -- check each
+	// key individually here.
+	user := server.UserFromContext(ctx)
+
+	// Unlike handleCopyObject or the console's recursive-delete handler,
+	// a denied key here is reported as a per-key DeleteError and the loop
+	// continues instead of aborting the whole request -- this mirrors S3's
+	// documented multi-status DeleteObjects semantics (a batch delete
+	// always returns partial results, not an all-or-nothing failure), so
+	// don't change it to abort-on-first-denial to match those other sites.
 	result := DeleteObjectsResult{}
 	for _, obj := range req.Objects {
+		if !server.AllowedS3Action(user, server.ActionDeleteObject, bucketName, obj.Key) {
+			result.Errors = append(result.Errors, DeleteError{
+				Key:     obj.Key,
+				Code:    "AccessDenied",
+				Message: "Access Denied",
+			})
+			continue
+		}
 		if err := strg.Delete(ctx, obj.Key); err != nil {
 			code, msg, _ := s2ErrorToS3Error(err)
 			result.Errors = append(result.Errors, DeleteError{

@@ -3,6 +3,7 @@ package buckets
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -215,6 +216,31 @@ func (s *ObjectsTestSuite) TestHandleCreateFolder() {
 
 		s.Equal(http.StatusBadRequest, w.Code)
 	})
+
+	s.Run("explicit deny on the exact key is not bypassed by a wildcard allow", func() {
+		s.createBucket("fld3")
+
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{server.ActionPutObject}, Resource: []string{"arn:aws:s3:::fld3/*"}},
+			{Effect: "Deny", Action: []string{server.ActionPutObject}, Resource: []string{"arn:aws:s3:::fld3/secret"}},
+		}}}
+
+		form := url.Values{"prefix": {""}, "folder_name": {"secret"}}
+		req := httptest.NewRequest("POST", "/buckets/fld3/folders", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.SetPathValue("name", "fld3")
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handleCreateFolder(s.server, w, req)
+
+		s.Equal(http.StatusForbidden, w.Code)
+
+		strg, err := s.server.Buckets.Get(context.Background(), "fld3")
+		s.Require().NoError(err)
+		exists, err := strg.Exists(context.Background(), "secret/.keep")
+		s.Require().NoError(err)
+		s.False(exists)
+	})
 }
 
 // --- POST /buckets/{name}/upload ---
@@ -306,6 +332,39 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			}
 		})
 	}
+
+	s.Run("explicit deny on the exact filename is not bypassed by a wildcard allow", func() {
+		s.createBucket("upd")
+
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{server.ActionPutObject}, Resource: []string{"arn:aws:s3:::upd/*"}},
+			{Effect: "Deny", Action: []string{server.ActionPutObject}, Resource: []string{"arn:aws:s3:::upd/secret.txt"}},
+		}}}
+
+		body := &bytes.Buffer{}
+		mw := multipart.NewWriter(body)
+		s.Require().NoError(mw.WriteField("prefix", ""))
+		fw, err := mw.CreateFormFile("file", "secret.txt")
+		s.Require().NoError(err)
+		_, err = fw.Write([]byte("leaked"))
+		s.Require().NoError(err)
+		s.Require().NoError(mw.Close())
+
+		req := httptest.NewRequest("POST", "/buckets/upd/upload", body)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		req.SetPathValue("name", "upd")
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handleUploadFile(s.server, w, req)
+
+		s.Equal(http.StatusForbidden, w.Code)
+
+		strg, err := s.server.Buckets.Get(context.Background(), "upd")
+		s.Require().NoError(err)
+		exists, err := strg.Exists(context.Background(), "secret.txt")
+		s.Require().NoError(err)
+		s.False(exists)
+	})
 }
 
 // --- DELETE /buckets/{name}/objects ---
@@ -354,6 +413,78 @@ func (s *ObjectsTestSuite) TestHandleDeleteObject() {
 		handleDeleteObject(s.server, w, req)
 
 		s.Equal(http.StatusBadRequest, w.Code)
+	})
+
+	s.Run("recursive delete stops at the first denied descendant", func() {
+		s.createBucket("delp")
+		s.server.Buckets.CreateFolder(context.Background(), "delp", "dir")
+		s.putObject("delp", "dir/keep.txt", "must survive")
+		s.putObject("delp", "dir/other.txt", "data")
+
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{server.ActionDeleteObject}, Resource: []string{"arn:aws:s3:::delp/dir/*"}},
+			{Effect: "Deny", Action: []string{server.ActionDeleteObject}, Resource: []string{"arn:aws:s3:::delp/dir/keep.txt"}},
+		}}}
+
+		req := httptest.NewRequest("DELETE", "/buckets/delp/objects?key=dir/&prefix=", nil)
+		req.SetPathValue("name", "delp")
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handleDeleteObject(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+
+		strg, err := s.server.Buckets.Get(context.Background(), "delp")
+		s.Require().NoError(err)
+		exists, err := strg.Exists(context.Background(), "dir/keep.txt")
+		s.Require().NoError(err)
+		s.True(exists, "keep.txt must survive since it was explicitly denied")
+		exists, err = strg.Exists(context.Background(), "dir/other.txt")
+		s.Require().NoError(err)
+		// "keep.txt" sorts before "other.txt", so processing stops at
+		// keep.txt before other.txt is ever reached.
+		s.True(exists, "other.txt must also survive: processing stops at the first denial instead of skipping past it")
+	})
+
+	s.Run("denial past the first list page (1000 objects) stops the sweep there", func() {
+		s.createBucket("delbig")
+		s.server.Buckets.CreateFolder(context.Background(), "delbig", "dir")
+
+		const total = 1200
+		for i := range total {
+			s.putObject("delbig", fmt.Sprintf("dir/obj-%04d.txt", i), "data")
+		}
+		// Lexicographically last, so it only appears once List's default
+		// 1000-item page is exhausted and a second page is fetched.
+		deniedKey := fmt.Sprintf("dir/obj-%04d.txt", total-1)
+
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{server.ActionDeleteObject}, Resource: []string{"arn:aws:s3:::delbig/dir/*"}},
+			{Effect: "Deny", Action: []string{server.ActionDeleteObject}, Resource: []string{"arn:aws:s3:::delbig/" + deniedKey}},
+		}}}
+
+		req := httptest.NewRequest("DELETE", "/buckets/delbig/objects?key=dir/&prefix=", nil)
+		req.SetPathValue("name", "delbig")
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		handleDeleteObject(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+
+		strg, err := s.server.Buckets.Get(context.Background(), "delbig")
+		s.Require().NoError(err)
+		exists, err := strg.Exists(context.Background(), deniedKey)
+		s.Require().NoError(err)
+		s.True(exists, "the denied object beyond the first page must survive")
+		// Everything before the denied key in listing order -- on both the
+		// first page and the start of the second page -- is deleted before
+		// the sweep reaches and stops at the denial.
+		exists, err = strg.Exists(context.Background(), "dir/obj-0000.txt")
+		s.Require().NoError(err)
+		s.False(exists, "an allowed object from the first page must still be deleted")
+		exists, err = strg.Exists(context.Background(), fmt.Sprintf("dir/obj-%04d.txt", total-2))
+		s.Require().NoError(err)
+		s.False(exists, "an allowed object immediately before the denied one, on the second page, must still be deleted")
 	})
 }
 

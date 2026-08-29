@@ -267,6 +267,221 @@ func TestSigV4Presigned(t *testing.T) {
 	}
 }
 
+func TestSigV4MultiUser(t *testing.T) {
+	readOnlyPolicy := &server.Policy{Statement: []server.Statement{
+		{Effect: "Allow", Action: []string{"s3:GetObject", "s3:ListBucket"}, Resource: []string{"arn:aws:s3:::*"}},
+	}}
+	cfg := &server.Config{
+		Users: []server.User{
+			{AccessKeyID: "userA", SecretAccessKey: "secretA"},
+			{AccessKeyID: "userB", SecretAccessKey: "secretB", Policy: readOnlyPolicy},
+		},
+	}
+
+	testCases := []struct {
+		caseName   string
+		method     string
+		url        string
+		bucket     string
+		key        string
+		signFunc   func(r *http.Request)
+		wantStatus int
+	}{
+		{
+			caseName:   "request resolves against matching user's secret",
+			method:     http.MethodGet,
+			url:        "/",
+			signFunc:   func(r *http.Request) { signRequest(r, "userA", "secretA") },
+			wantStatus: http.StatusOK,
+		},
+		{
+			caseName:   "signature with wrong user's secret rejected",
+			method:     http.MethodGet,
+			url:        "/",
+			signFunc:   func(r *http.Request) { signRequest(r, "userA", "secretB") },
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			caseName:   "unknown access key rejected",
+			method:     http.MethodGet,
+			url:        "/",
+			signFunc:   func(r *http.Request) { signRequest(r, "unknown", "whatever") },
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			caseName:   "restricted user allowed action passes",
+			method:     http.MethodGet,
+			url:        "/mybucket/key.txt",
+			bucket:     "mybucket",
+			key:        "key.txt",
+			signFunc:   func(r *http.Request) { signRequest(r, "userB", "secretB") },
+			wantStatus: http.StatusOK,
+		},
+		{
+			caseName:   "restricted user denied action gets 403",
+			method:     http.MethodPut,
+			url:        "/mybucket/key.txt",
+			bucket:     "mybucket",
+			key:        "key.txt",
+			signFunc:   func(r *http.Request) { signRequest(r, "userB", "secretB") },
+			wantStatus: http.StatusForbidden,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			srv := &server.Server{Config: cfg}
+			handler := SigV4(noopHandler)
+
+			r := httptest.NewRequest(tc.method, tc.url, nil)
+			r.SetPathValue("bucket", tc.bucket)
+			r.SetPathValue("key", tc.key)
+			if tc.signFunc != nil {
+				tc.signFunc(r)
+			}
+			w := httptest.NewRecorder()
+			handler(srv, w, r)
+
+			assert.Equal(t, tc.wantStatus, w.Code)
+		})
+	}
+}
+
+func TestSigV4MultiUserAccessDeniedDistinctFromSignatureError(t *testing.T) {
+	cfg := &server.Config{
+		Users: []server.User{
+			{AccessKeyID: "userB", SecretAccessKey: "secretB", Policy: &server.Policy{Statement: []server.Statement{
+				{Effect: "Allow", Action: []string{"s3:GetObject"}, Resource: []string{"arn:aws:s3:::*"}},
+			}}},
+		},
+	}
+	srv := &server.Server{Config: cfg}
+	handler := SigV4(noopHandler)
+
+	r := httptest.NewRequest(http.MethodPut, "/bucket/key", nil)
+	r.SetPathValue("bucket", "bucket")
+	r.SetPathValue("key", "key")
+	signRequest(r, "userB", "secretB")
+	w := httptest.NewRecorder()
+	handler(srv, w, r)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "AccessDenied")
+	assert.NotContains(t, w.Body.String(), "SignatureDoesNotMatch")
+}
+
+// TestSigV4BatchDeletePassesThroughForNarrowPolicy verifies that a user
+// whose policy is scoped to a bucket sub-prefix (e.g. arn:aws:s3:::bucket/
+// tmp/*) is not denied at the SigV4 layer for POST /{bucket}?delete, even
+// though none of that user's Resource patterns match the coarse
+// arn:aws:s3:::bucket/* the middleware used to check up front. S3Action now
+// returns no action/resource for this route, deferring the real per-key
+// check to handleDeleteObjects (server/handlers/s3api/objects.go).
+func TestSigV4BatchDeletePassesThroughForNarrowPolicy(t *testing.T) {
+	cfg := &server.Config{
+		Users: []server.User{
+			{AccessKeyID: "userC", SecretAccessKey: "secretC", Policy: &server.Policy{Statement: []server.Statement{
+				{Effect: "Allow", Action: []string{server.ActionDeleteObject}, Resource: []string{"arn:aws:s3:::bucket/tmp/*"}},
+			}}},
+		},
+	}
+	srv := &server.Server{Config: cfg}
+	handler := SigV4(noopHandler)
+
+	r := httptest.NewRequest(http.MethodPost, "/bucket?delete", nil)
+	r.SetPathValue("bucket", "bucket")
+	signRequest(r, "userC", "secretC")
+	w := httptest.NewRecorder()
+	handler(srv, w, r)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// TestSigV4TrailingSlashBucketGetRequiresListBucket verifies that a
+// GetObject-only policy cannot use a trailing-slash bucket URL (e.g.
+// "GET /bucket/", the form minio-go/warp send by default) to bypass a
+// missing s3:ListBucket grant. handleGetObject delegates key=="" back to
+// handleBucketGET/handleHeadBucket regardless of the trailing slash, so
+// S3Action must authorize these as bucket-level actions, not s3:GetObject.
+func TestSigV4TrailingSlashBucketGetRequiresListBucket(t *testing.T) {
+	cfg := &server.Config{
+		Users: []server.User{
+			{AccessKeyID: "userD", SecretAccessKey: "secretD", Policy: &server.Policy{Statement: []server.Statement{
+				{Effect: "Allow", Action: []string{server.ActionGetObject}, Resource: []string{"arn:aws:s3:::bucket/*"}},
+			}}},
+		},
+	}
+	srv := &server.Server{Config: cfg}
+	handler := SigV4(noopHandler)
+
+	testCases := []struct {
+		caseName string
+		method   string
+		url      string
+	}{
+		{caseName: "GET with trailing slash", method: http.MethodGet, url: "/bucket/"},
+		{caseName: "HEAD with trailing slash", method: http.MethodHead, url: "/bucket/"},
+		{caseName: "GetBucketLocation with trailing slash", method: http.MethodGet, url: "/bucket/?location"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			r := httptest.NewRequest(tc.method, tc.url, nil)
+			r.SetPathValue("bucket", "bucket")
+			r.SetPathValue("key", "")
+			signRequest(r, "userD", "secretD")
+			w := httptest.NewRecorder()
+			handler(srv, w, r)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+		})
+	}
+}
+
+func TestSigV4PresignedMultiUser(t *testing.T) {
+	cfg := &server.Config{
+		Users: []server.User{
+			{AccessKeyID: "userA", SecretAccessKey: "secretA"},
+			{AccessKeyID: "userB", SecretAccessKey: "secretB", Policy: &server.Policy{Statement: []server.Statement{
+				{Effect: "Allow", Action: []string{"s3:GetObject"}, Resource: []string{"arn:aws:s3:::*"}},
+			}}},
+		},
+	}
+
+	testCases := []struct {
+		caseName   string
+		method     string
+		setup      func(r *http.Request)
+		wantStatus int
+	}{
+		{
+			caseName:   "resolves against matching user's secret",
+			method:     http.MethodGet,
+			setup:      func(r *http.Request) { presignRequest(r, "userA", "secretA", 300) },
+			wantStatus: http.StatusOK,
+		},
+		{
+			caseName:   "restricted user denied action gets 403",
+			method:     http.MethodPut,
+			setup:      func(r *http.Request) { presignRequest(r, "userB", "secretB", 300) },
+			wantStatus: http.StatusForbidden,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			srv := &server.Server{Config: cfg}
+			handler := SigV4(noopHandler)
+
+			r := httptest.NewRequest(tc.method, "/bucket/key", nil)
+			r.SetPathValue("bucket", "bucket")
+			r.SetPathValue("key", "key")
+			tc.setup(r)
+			w := httptest.NewRecorder()
+			handler(srv, w, r)
+
+			assert.Equal(t, tc.wantStatus, w.Code)
+		})
+	}
+}
+
 func TestStripQueryParam(t *testing.T) {
 	testCases := []struct {
 		caseName string
