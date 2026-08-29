@@ -444,6 +444,8 @@ aws --profile s2 s3 ls
 
 **Presigned URLs** — S2 verifies AWS SigV4 signatures passed in the query string (`X-Amz-Algorithm=AWS4-HMAC-SHA256`, `X-Amz-Signature`, …), so URLs produced by `s3.NewPresignClient` (Go) or `s3.getSignedUrl` (JavaScript) work for GET and PUT. The body of a presigned PUT is treated as `UNSIGNED-PAYLOAD`.
 
+**Multiple principals with scoped, IAM-style policies** — beyond the single `user`/`password` pair above, the config file can define a `users` list, each with its own credentials and an optional AWS-IAM-shaped `Policy` restricting which buckets/keys/actions it may use. See [docs/users-policy.md](docs/users-policy.md).
+
 ### Config file
 
 ```json
@@ -544,7 +546,7 @@ S2 Server is designed to drop-in replace MinIO for:
 - ✅ Presigned URL workflows (browser uploads/downloads)
 - ✅ Multipart uploads for large objects
 
-It is **not** a replacement for AWS S3 in scenarios requiring versioning, server-side encryption, IAM policies, lifecycle management, or multi-node replication. See [Limitations](#limitations) for details.
+It is **not** a replacement for AWS S3 in scenarios requiring versioning, server-side encryption, bucket-level ACLs, lifecycle management, or multi-node replication. See [Limitations](#limitations) for details.
 
 ## Limitations
 
@@ -553,7 +555,7 @@ S2 aims to cover the parts of the S3 API that matter for local development and l
 - **Object versioning** — `VersionId`, version listing, and `s3:GetObjectVersion` are not supported. Buckets behave as if versioning is permanently disabled.
 - **ListObjectsV2 only** — The legacy `ListObjects` (V1) API is not implemented. Most modern SDKs use V2 by default; older clients may need configuration changes.
 - **Server-side encryption (SSE-S3 / SSE-KMS / SSE-C)** — Not implemented. Use full-disk encryption at the OS level if needed.
-- **Bucket policies, ACLs, IAM** — Authentication is a single user/password pair; there is no per-bucket or per-object access control. For multi-tenant scenarios, use AWS S3 or another full-featured implementation.
+- **Bucket ACLs, S3 bucket-policy JSON on individual buckets** — Not implemented. S2 does support multiple principals with IAM-style `Policy` documents scoped by bucket/key/action (see [docs/users-policy.md](docs/users-policy.md)), but there is no per-bucket ACL or bucket-attached policy document as AWS has; access control is entirely principal-side.
 - **Replication, lifecycle rules, object lock** — Not implemented.
 
 If your use case needs any of the above, S2 is probably not the right tool — consider AWS S3, Ceph RGW, or SeaweedFS.
