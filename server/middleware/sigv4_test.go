@@ -396,6 +396,46 @@ func TestSigV4BatchDeletePassesThroughForNarrowPolicy(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
+// TestSigV4TrailingSlashBucketGetRequiresListBucket verifies that a
+// GetObject-only policy cannot use a trailing-slash bucket URL (e.g.
+// "GET /bucket/", the form minio-go/warp send by default) to bypass a
+// missing s3:ListBucket grant. handleGetObject delegates key=="" back to
+// handleBucketGET/handleHeadBucket regardless of the trailing slash, so
+// S3Action must authorize these as bucket-level actions, not s3:GetObject.
+func TestSigV4TrailingSlashBucketGetRequiresListBucket(t *testing.T) {
+	cfg := &server.Config{
+		Users: []server.User{
+			{AccessKeyID: "userD", SecretAccessKey: "secretD", Policy: &server.Policy{Statement: []server.Statement{
+				{Effect: "Allow", Action: []string{server.ActionGetObject}, Resource: []string{"arn:aws:s3:::bucket/*"}},
+			}}},
+		},
+	}
+	srv := &server.Server{Config: cfg}
+	handler := SigV4(noopHandler)
+
+	testCases := []struct {
+		caseName string
+		method   string
+		url      string
+	}{
+		{caseName: "GET with trailing slash", method: http.MethodGet, url: "/bucket/"},
+		{caseName: "HEAD with trailing slash", method: http.MethodHead, url: "/bucket/"},
+		{caseName: "GetBucketLocation with trailing slash", method: http.MethodGet, url: "/bucket/?location"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			r := httptest.NewRequest(tc.method, tc.url, nil)
+			r.SetPathValue("bucket", "bucket")
+			r.SetPathValue("key", "")
+			signRequest(r, "userD", "secretD")
+			w := httptest.NewRecorder()
+			handler(srv, w, r)
+
+			assert.Equal(t, http.StatusForbidden, w.Code)
+		})
+	}
+}
+
 func TestSigV4PresignedMultiUser(t *testing.T) {
 	cfg := &server.Config{
 		Users: []server.User{

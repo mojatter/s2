@@ -505,13 +505,36 @@ func TestS3Action(t *testing.T) {
 			wantResource: "arn:aws:s3:::mybucket/",
 		},
 		{
-			caseName:     "get with trailing slash routes to object handler, not bucket handler",
+			// Unlike DELETE/PUT, handleGetObject delegates key=="" back to
+			// handleBucketGET regardless of the trailing slash, so this
+			// must be checked as a bucket-level action -- classifying it
+			// as GetObject would let a GetObject-only grant enumerate the
+			// whole bucket via ListObjectsV2.
+			caseName:     "get with trailing slash still routes to the bucket handler",
 			method:       http.MethodGet,
 			url:          "/mybucket/",
 			bucket:       "mybucket",
 			key:          "",
-			wantAction:   "s3:GetObject",
-			wantResource: "arn:aws:s3:::mybucket/",
+			wantAction:   "s3:ListBucket",
+			wantResource: "arn:aws:s3:::mybucket",
+		},
+		{
+			caseName:     "head with trailing slash still routes to the bucket handler",
+			method:       http.MethodHead,
+			url:          "/mybucket/",
+			bucket:       "mybucket",
+			key:          "",
+			wantAction:   "s3:ListBucket",
+			wantResource: "arn:aws:s3:::mybucket",
+		},
+		{
+			caseName:     "get bucket location with trailing slash still routes to the bucket handler",
+			method:       http.MethodGet,
+			url:          "/mybucket/?location",
+			bucket:       "mybucket",
+			key:          "",
+			wantAction:   "s3:GetBucketLocation",
+			wantResource: "arn:aws:s3:::mybucket",
 		},
 		{
 			caseName:     "put with trailing slash routes to object handler, not bucket handler",
