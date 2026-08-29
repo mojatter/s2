@@ -135,8 +135,7 @@ func handleCreateFolder(s *server.Server, w http.ResponseWriter, r *http.Request
 	}
 
 	key := path.Join(prefix, folderName)
-	if !server.AllowedS3Action(server.UserFromContext(ctx), server.ActionPutObject, name, key) {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+	if !server.DenyUnlessAllowedS3Action(w, server.UserFromContext(ctx), server.ActionPutObject, name, key) {
 		return
 	}
 	if err := s.Buckets.CreateFolder(ctx, name, key); err != nil {
@@ -173,8 +172,7 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	}
 
 	key := path.Join(prefix, header.Filename)
-	if !server.AllowedS3Action(server.UserFromContext(ctx), server.ActionPutObject, name, key) {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+	if !server.DenyUnlessAllowedS3Action(w, server.UserFromContext(ctx), server.ActionPutObject, name, key) {
 		return
 	}
 	obj := s2.NewObjectReader(key, file, s2.MustUint64(header.Size))
@@ -204,23 +202,27 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 	if strings.HasSuffix(key, "/") {
 		user := server.UserFromContext(ctx)
 		if user != nil && user.Policy != nil {
-			// ConsoleAction defers authorization entirely for a recursive
-			// folder delete (the affected keys are only known once we
-			// list the prefix here). Collect and check every descendant
-			// across all pages first -- List caps a page at 1000 objects,
-			// so a single-page check would silently skip anything past
-			// that -- and only delete the exact checked set afterward,
-			// rather than calling DeleteRecursive (which would re-list
-			// independently and could sweep in an object written after
-			// the check ran).
+			// ConsoleAction defers authorization for a recursive folder
+			// delete; check and delete each descendant per page instead of
+			// buffering all keys first, to bound memory. Processing stops
+			// at the first denied key rather than skipping it and scanning
+			// the rest of the prefix to completion -- a caller with no
+			// delete permission at all under a huge prefix would otherwise
+			// force a full pagination sweep for no benefit. The refreshed
+			// fragment below still reflects whatever was deleted before
+			// the stop, unlike an old 403 short-circuit that would leave
+			// the console showing already-deleted objects (htmx doesn't
+			// swap on a 4xx response).
 			//
-			// .keep folder markers are deliberately not filtered out here
-			// (unlike elsewhere): they're still checked and deleted like
-			// any other object under the same wildcard grant, so a folder
-			// the caller is authorized to clear doesn't linger empty
-			// afterward the way it would if its marker survived.
-			var keys []string
+			// TODO: stopping early is silent -- the response is always a
+			// plain 200, so the user has no way to tell that the folder
+			// was only partially cleared, or why it stopped where it did.
+			//
+			// .keep markers aren't filtered out here (unlike elsewhere):
+			// they're deleted like any other object under the same
+			// wildcard grant, so an authorized folder doesn't linger empty.
 			after := ""
+		pagination:
 			for {
 				res, err := strg.List(ctx, s2.ListOptions{Prefix: key, Recursive: true, After: after})
 				if err != nil {
@@ -229,21 +231,17 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 				}
 				for _, obj := range res.Objects {
 					if !server.AllowedS3Action(user, server.ActionDeleteObject, name, obj.Name()) {
-						http.Error(w, "Forbidden", http.StatusForbidden)
+						break pagination
+					}
+					if err := strg.Delete(ctx, obj.Name()); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
 						return
 					}
-					keys = append(keys, obj.Name())
 				}
 				if res.NextAfter == "" {
 					break
 				}
 				after = res.NextAfter
-			}
-			for _, k := range keys {
-				if err := strg.Delete(ctx, k); err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
 			}
 		} else if err := strg.DeleteRecursive(ctx, key); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)

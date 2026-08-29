@@ -73,6 +73,23 @@ func (s *BucketsTestSuite) TestListBuckets() {
 		s.Len(result.Buckets, 1)
 		s.Equal("visible", result.Buckets[0].Name)
 	})
+
+	s.Run("explicit deny on s3:ListAllMyBuckets blocks the endpoint entirely", func() {
+		s.createBucket("visible2")
+
+		user := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+			{Effect: "Allow", Action: []string{"s3:ListBucket"}, Resource: []string{"arn:aws:s3:::visible2"}},
+			{Effect: "Deny", Action: []string{"s3:ListAllMyBuckets"}, Resource: []string{"arn:aws:s3:::*"}},
+		}}}
+
+		req := httptest.NewRequest("GET", "/", nil)
+		req = req.WithContext(server.WithUser(req.Context(), user))
+		w := httptest.NewRecorder()
+		HandleListBuckets(s.server, w, req)
+
+		s.Equal(http.StatusForbidden, w.Code)
+		s.Contains(w.Body.String(), "AccessDenied")
+	})
 }
 
 // --- CreateBucket ---

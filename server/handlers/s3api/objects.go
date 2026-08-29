@@ -577,6 +577,12 @@ func handleDeleteObjects(s *server.Server, w http.ResponseWriter, r *http.Reques
 	// key individually here.
 	user := server.UserFromContext(ctx)
 
+	// Unlike handleCopyObject or the console's recursive-delete handler,
+	// a denied key here is reported as a per-key DeleteError and the loop
+	// continues instead of aborting the whole request -- this mirrors S3's
+	// documented multi-status DeleteObjects semantics (a batch delete
+	// always returns partial results, not an all-or-nothing failure), so
+	// don't change it to abort-on-first-denial to match those other sites.
 	result := DeleteObjectsResult{}
 	for _, obj := range req.Objects {
 		if !server.AllowedS3Action(user, server.ActionDeleteObject, bucketName, obj.Key) {

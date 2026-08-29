@@ -264,6 +264,31 @@ func TestAllowedS3Action(t *testing.T) {
 	}
 }
 
+func TestExplicitlyDeniedListAllMyBuckets(t *testing.T) {
+	deniedUser := &User{Policy: &Policy{Statement: []Statement{
+		denyStatement(ActionListAllMyBuckets, "arn:aws:s3:::*"),
+	}}}
+	scopedUser := &User{Policy: &Policy{Statement: []Statement{
+		allowStatement(ActionListBucket, "arn:aws:s3:::mybucket"),
+	}}}
+
+	testCases := []struct {
+		caseName string
+		user     *User
+		want     bool
+	}{
+		{caseName: "nil user is never denied", user: nil, want: false},
+		{caseName: "user with no policy is never denied", user: &User{}, want: false},
+		{caseName: "explicit Deny on the action blocks it", user: deniedUser, want: true},
+		{caseName: "a policy with no matching statement at all is not denied", user: scopedUser, want: false},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			assert.Equal(t, tc.want, ExplicitlyDeniedListAllMyBuckets(tc.user))
+		})
+	}
+}
+
 func TestPolicyValidate(t *testing.T) {
 	testCases := []struct {
 		caseName string
@@ -431,11 +456,14 @@ func TestS3Action(t *testing.T) {
 		wantResource string
 	}{
 		{
-			caseName:     "list all my buckets",
-			method:       http.MethodGet,
-			url:          "/",
-			wantAction:   "s3:ListAllMyBuckets",
-			wantResource: "arn:aws:s3:::*",
+			caseName: "list all my buckets",
+			method:   http.MethodGet,
+			url:      "/",
+			// HandleListBuckets filters the result per-bucket via
+			// FilterBucketNames instead of gating the whole request on a
+			// single up-front resource, mirroring ConsoleAction's GET /.
+			wantAction:   actionDeferred,
+			wantResource: "",
 		},
 		{
 			caseName:     "create bucket",
@@ -526,6 +554,19 @@ func TestS3Action(t *testing.T) {
 			// The affected keys are only known once the handler decodes
 			// the request body, so S3Action defers entirely to
 			// handleDeleteObjects' per-key AllowedS3Action checks.
+			wantAction:   actionDeferred,
+			wantResource: "",
+		},
+		{
+			caseName: "batch delete objects via trailing-slash bucket URL",
+			method:   http.MethodPost,
+			url:      "/mybucket/?delete",
+			bucket:   "mybucket",
+			// "POST /{bucket}/?delete" routes to "/{bucket}/{key...}" with
+			// an empty key and is delegated back to handleBucketPOST /
+			// handleDeleteObjects (see handleObjectPOST). It must defer
+			// identically to the no-trailing-slash form above rather than
+			// being checked as s3:PutObject on the empty-key resource.
 			wantAction:   actionDeferred,
 			wantResource: "",
 		},

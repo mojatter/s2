@@ -415,7 +415,7 @@ func (s *ObjectsTestSuite) TestHandleDeleteObject() {
 		s.Equal(http.StatusBadRequest, w.Code)
 	})
 
-	s.Run("recursive delete aborts entirely when one descendant is denied", func() {
+	s.Run("recursive delete stops at the first denied descendant", func() {
 		s.createBucket("delp")
 		s.server.Buckets.CreateFolder(context.Background(), "delp", "dir")
 		s.putObject("delp", "dir/keep.txt", "must survive")
@@ -432,7 +432,7 @@ func (s *ObjectsTestSuite) TestHandleDeleteObject() {
 		w := httptest.NewRecorder()
 		handleDeleteObject(s.server, w, req)
 
-		s.Equal(http.StatusForbidden, w.Code)
+		s.Equal(http.StatusOK, w.Code)
 
 		strg, err := s.server.Buckets.Get(context.Background(), "delp")
 		s.Require().NoError(err)
@@ -441,10 +441,12 @@ func (s *ObjectsTestSuite) TestHandleDeleteObject() {
 		s.True(exists, "keep.txt must survive since it was explicitly denied")
 		exists, err = strg.Exists(context.Background(), "dir/other.txt")
 		s.Require().NoError(err)
-		s.True(exists, "other.txt must also survive: the whole operation aborts on any denial")
+		// "keep.txt" sorts before "other.txt", so processing stops at
+		// keep.txt before other.txt is ever reached.
+		s.True(exists, "other.txt must also survive: processing stops at the first denial instead of skipping past it")
 	})
 
-	s.Run("denial past the first list page (1000 objects) is still honored", func() {
+	s.Run("denial past the first list page (1000 objects) stops the sweep there", func() {
 		s.createBucket("delbig")
 		s.server.Buckets.CreateFolder(context.Background(), "delbig", "dir")
 
@@ -467,18 +469,22 @@ func (s *ObjectsTestSuite) TestHandleDeleteObject() {
 		w := httptest.NewRecorder()
 		handleDeleteObject(s.server, w, req)
 
-		s.Equal(http.StatusForbidden, w.Code)
+		s.Equal(http.StatusOK, w.Code)
 
 		strg, err := s.server.Buckets.Get(context.Background(), "delbig")
 		s.Require().NoError(err)
 		exists, err := strg.Exists(context.Background(), deniedKey)
 		s.Require().NoError(err)
 		s.True(exists, "the denied object beyond the first page must survive")
-		// Nothing should have been deleted either, since the check runs
-		// to completion across all pages before any delete happens.
+		// Everything before the denied key in listing order -- on both the
+		// first page and the start of the second page -- is deleted before
+		// the sweep reaches and stops at the denial.
 		exists, err = strg.Exists(context.Background(), "dir/obj-0000.txt")
 		s.Require().NoError(err)
-		s.True(exists, "even an allowed object from the first page must survive: the whole operation aborts on any denial")
+		s.False(exists, "an allowed object from the first page must still be deleted")
+		exists, err = strg.Exists(context.Background(), fmt.Sprintf("dir/obj-%04d.txt", total-2))
+		s.Require().NoError(err)
+		s.False(exists, "an allowed object immediately before the denied one, on the second page, must still be deleted")
 	})
 }
 

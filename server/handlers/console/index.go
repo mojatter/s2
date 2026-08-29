@@ -26,8 +26,7 @@ func handleCreateBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 	// this route (the bucket doesn't exist in the URL and isn't known
 	// until the form above is parsed), so re-check the real name here --
 	// a Deny scoped to this specific bucket name must still apply.
-	if !server.AllowedS3BucketAction(server.UserFromContext(r.Context()), server.ActionCreateBucket, name) {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+	if !server.DenyUnlessAllowedS3BucketAction(w, server.UserFromContext(r.Context()), server.ActionCreateBucket, name) {
 		return
 	}
 	if err := s.Buckets.Create(r.Context(), name); err != nil {

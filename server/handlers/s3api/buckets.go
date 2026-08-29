@@ -9,6 +9,15 @@ import (
 
 func HandleListBuckets(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	// S3Action defers this route entirely so FilterBucketNames can filter
+	// per-bucket instead of gating the whole request on an up-front
+	// s3:ListAllMyBuckets Allow (see S3Action's doc comment). But an
+	// explicit Deny on that action, as a policy author porting an
+	// AWS-style policy would expect, must still block the endpoint.
+	if server.ExplicitlyDeniedListAllMyBuckets(server.UserFromContext(ctx)) {
+		writeError(w, r, "AccessDenied", "Access Denied", http.StatusForbidden)
+		return
+	}
 	names, err := s.Buckets.Names(ctx)
 	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)

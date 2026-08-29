@@ -269,9 +269,13 @@ run_test "Memfs_MultipartUploadStreams" sh -c '
 
 # === Multi-user auth + IAM policy (s2-users) ===
 # rootkey has no Policy attached (legacy full-access user); readonlykey is
-# restricted to s3:ListAllMyBuckets / s3:ListBucket / s3:GetObject via the
-# policy in users-config.json (mirrors the read-only example from
-# https://github.com/mojatter/s2/issues/162).
+# restricted to s3:ListBucket / s3:GetObject via the policy in
+# users-config.json (mirrors the read-only example from
+# https://github.com/mojatter/s2/issues/162). ListBuckets (GET /) doesn't
+# require an up-front s3:ListAllMyBuckets Allow in s2 -- it defers and
+# returns whatever FilterBucketNames' per-bucket s3:ListBucket check
+# allows, unless the policy carries an explicit Deny on
+# s3:ListAllMyBuckets, which still hard-blocks the endpoint.
 
 run_test "Users_RootCreateBucket" sh -c '
   AWS_ACCESS_KEY_ID=rootkey AWS_SECRET_ACCESS_KEY=rootsecret \

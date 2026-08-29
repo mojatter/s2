@@ -10,7 +10,10 @@ import (
 // S3 IAM action names, shared between S3Action and ConsoleAction so a typo
 // in one mapping can't silently drift from the other.
 const (
-	actionListAllMyBuckets = "s3:ListAllMyBuckets"
+	// ActionListAllMyBuckets is exported: HandleListBuckets (S3 API GET /)
+	// checks it explicitly via ExplicitlyDeniedListAllMyBuckets. It is not
+	// returned by S3Action itself -- see that function's doc comment.
+	ActionListAllMyBuckets = "s3:ListAllMyBuckets"
 	// ActionCreateBucket is exported: the console's handleCreateBucket
 	// checks a form-parsed bucket name directly via AllowedS3BucketAction.
 	ActionCreateBucket      = "s3:CreateBucket"
@@ -121,6 +124,20 @@ func (p *Policy) Allowed(action, resource string) bool {
 	return allowed
 }
 
+// explicitlyDenied reports whether policy has a Deny statement matching
+// action and resource, ignoring any Allow. Unlike Allowed, whose default
+// (no matching statement) is deny, the default here is "not denied" -- for
+// callers where the baseline is already permit and an explicit Deny should
+// layer a hard block on top of that baseline.
+func (p *Policy) explicitlyDenied(action, resource string) bool {
+	for _, stmt := range p.Statement {
+		if stmt.Effect == "Deny" && stmt.matches(action, resource) {
+			return true
+		}
+	}
+	return false
+}
+
 func (stmt Statement) matches(action, resource string) bool {
 	return matchAny(stmt.Action, action) && matchAny(stmt.Resource, resource)
 }
@@ -229,6 +246,49 @@ func AllowedS3Action(user *User, action, bucket, key string) bool {
 	return Authorized(user, action, objectARN(bucket, key))
 }
 
+// ExplicitlyDeniedListAllMyBuckets reports whether user has an explicit
+// Deny statement for s3:ListAllMyBuckets. A nil user or a user with no
+// Policy is never denied.
+//
+// S3Action doesn't gate GET / (ListBuckets) on s3:ListAllMyBuckets at all
+// -- it always defers to FilterBucketNames, so a policy scoped to only a
+// few buckets isn't locked out of the endpoint entirely (see S3Action's
+// doc comment). But that means an explicit Deny on s3:ListAllMyBuckets,
+// which a policy author porting an AWS-style policy would expect to hard
+// -block the endpoint, would otherwise be silently ignored. HandleListBuckets
+// calls this to layer that specific block back on top of the deferred
+// default, without requiring every caller to hold an explicit Allow.
+func ExplicitlyDeniedListAllMyBuckets(user *User) bool {
+	if user == nil || user.Policy == nil {
+		return false
+	}
+	return user.Policy.explicitlyDenied(ActionListAllMyBuckets, "arn:aws:s3:::*")
+}
+
+// DenyUnlessAllowedS3BucketAction writes a 403 Forbidden response and
+// reports false if user may not perform action on bucket; otherwise it
+// reports true and writes nothing. Consolidates the repeated
+// "if !AllowedS3BucketAction(...) { http.Error(...); return }" idiom
+// duplicated across console handlers whose resource is only known once
+// the request body/query is parsed.
+func DenyUnlessAllowedS3BucketAction(w http.ResponseWriter, user *User, action, bucket string) bool {
+	if !AllowedS3BucketAction(user, action, bucket) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+// DenyUnlessAllowedS3Action is DenyUnlessAllowedS3BucketAction for an
+// object-level (bucket+key) resource.
+func DenyUnlessAllowedS3Action(w http.ResponseWriter, user *User, action, bucket, key string) bool {
+	if !AllowedS3Action(user, action, bucket, key) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 // Authorized reports whether user may perform action on resource. A nil
 // user or a user with no Policy attached (full access, including the
 // legacy single-credential user) is always allowed.
@@ -257,15 +317,36 @@ func Authorized(user *User, action, resource string) bool {
 // bucket/key path values populated by the ServeMux before middleware runs.
 // The mapping mirrors the query-parameter dispatch already implemented in
 // server/handlers/s3api/{buckets,objects,multipart}.go.
-//
-// s3:ListAllMyBuckets has no single resource to check -- it is authorized
-// as a whole against a synthetic "arn:aws:s3:::*" resource by the caller,
-// and the returned bucket list is filtered separately via FilterBucketNames.
 func S3Action(r *http.Request, bucket, key string) (action, resource string) {
 	q := r.URL.Query()
 
 	if bucket == "" {
-		return actionListAllMyBuckets, "arn:aws:s3:::*"
+		// GET / (ListBuckets) has no single resource to gate on up front;
+		// HandleListBuckets filters the result per-bucket via
+		// FilterBucketNames, mirroring ConsoleAction's GET / handling.
+		// Hard-gating the whole request on s3:ListAllMyBuckets would lock
+		// out a user who only holds narrower per-bucket grants, even
+		// though FilterBucketNames would otherwise show them a (possibly
+		// empty) filtered list. HandleListBuckets separately layers an
+		// explicit-Deny-only check on top via
+		// ExplicitlyDeniedListAllMyBuckets, so a Deny statement targeting
+		// this action still has an effect.
+		return actionDeferred, ""
+	}
+
+	// POST with an empty key covers both "POST /{bucket}?delete" (routed
+	// bucket-level, no trailing slash) and "POST /{bucket}/?delete"
+	// (routed to "/{bucket}/{key...}" with an empty key, then delegated
+	// back to handleBucketPOST by handleObjectPOST -- see the comment on
+	// handleObjectPOST in server/handlers/s3api/multipart.go). Both forms
+	// reach handleDeleteObjects, whose affected keys are only known once
+	// the body is decoded; handleDeleteObjects checks each key via
+	// AllowedS3Action instead. Handling this before the trailing-slash
+	// check below means both URL forms defer identically, rather than the
+	// trailing-slash form falling through to the object-level switch and
+	// being checked as s3:PutObject on the wrong (empty-key) resource.
+	if key == "" && r.Method == http.MethodPost {
+		return actionDeferred, ""
 	}
 
 	// key == "" is ambiguous on its own: "DELETE /{bucket}" (truly
@@ -293,10 +374,6 @@ func S3Action(r *http.Request, bucket, key string) (action, resource string) {
 			}
 			return ActionListBucket, bucketARN(bucket)
 		}
-		// Batch delete (POST /{bucket}?delete): affected keys are only
-		// known once the body is decoded. handleDeleteObjects checks each
-		// key via AllowedS3Action instead.
-		return actionDeferred, ""
 	}
 
 	switch r.Method {
