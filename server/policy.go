@@ -197,8 +197,17 @@ func isEmptyCondition(c json.RawMessage) bool {
 	return len(m) == 0
 }
 
+// resourceARNPrefix is the ARN prefix every real S3 resource this server
+// checks a policy against (see bucketARN/objectARN) starts with.
+const resourceARNPrefix = "arn:aws:s3:::"
+
 // Validate checks the policy for obvious configuration mistakes. It does
-// not validate ARN syntax deeply.
+// not validate ARN syntax deeply -- only that each Resource entry is
+// either the bare wildcard "*" or starts with the ARN prefix this server
+// actually matches against. wildcardMatch does plain string comparison,
+// so a Resource written without that prefix (e.g. "mybucket/*" instead of
+// "arn:aws:s3:::mybucket/*") would never match anything: an intended Deny
+// would silently become a permanent no-op instead of failing to load.
 func (p *Policy) Validate() error {
 	if p.Version != "" && p.Version != "2012-10-17" {
 		return fmt.Errorf("policy: unsupported Version %q", p.Version)
@@ -212,6 +221,11 @@ func (p *Policy) Validate() error {
 		}
 		if len(stmt.Resource) == 0 {
 			return fmt.Errorf("policy: statement[%d]: Resource must not be empty", i)
+		}
+		for _, r := range stmt.Resource {
+			if r != "*" && !strings.HasPrefix(r, resourceARNPrefix) {
+				return fmt.Errorf("policy: statement[%d]: Resource %q must be %q or start with %q", i, r, "*", resourceARNPrefix)
+			}
 		}
 		if !isEmptyCondition(stmt.Condition) {
 			return fmt.Errorf("policy: statement[%d]: Condition is not supported", i)

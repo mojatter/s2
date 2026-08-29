@@ -358,6 +358,43 @@ func TestPolicyValidate(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			caseName: "resource without the arn:aws:s3::: prefix rejected",
+			policy: Policy{
+				// A common typo: the author meant to scope this to
+				// "arn:aws:s3:::secret-bucket/*" but dropped the ARN
+				// prefix. wildcardMatch would never match this against a
+				// real "arn:aws:s3:::..." resource, silently turning an
+				// intended Deny into a permanent no-op.
+				Statement: []Statement{denyStatement("s3:GetObject", "secret-bucket/*")},
+			},
+			wantErr: true,
+		},
+		{
+			caseName: "bare wildcard resource accepted",
+			policy: Policy{
+				Statement: []Statement{allowStatement("s3:GetObject", "*")},
+			},
+			wantErr: false,
+		},
+		{
+			caseName: "arn-prefixed resource accepted",
+			policy: Policy{
+				Statement: []Statement{allowStatement("s3:GetObject", "arn:aws:s3:::mybucket/*")},
+			},
+			wantErr: false,
+		},
+		{
+			caseName: "one bad resource among several rejected",
+			policy: Policy{
+				Statement: []Statement{{
+					Effect:   "Allow",
+					Action:   stringOrSlice{"s3:GetObject"},
+					Resource: stringOrSlice{"arn:aws:s3:::mybucket/*", "otherbucket/*"},
+				}},
+			},
+			wantErr: true,
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
