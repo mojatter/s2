@@ -84,7 +84,8 @@ type Config struct {
 	// carry no Authorization header and no presigned-URL query parameters,
 	// instead of rejecting them outright. BasicAuth (the Web Console) never
 	// consults it -- anonymous browsing of the bucket sidebar is out of
-	// scope. See Config.Validate for the constraints placed on this entry.
+	// scope. See Config.Validate and anonymousAllowedActions for the
+	// constraints placed on this entry.
 	Users []User `json:"users,omitempty"`
 	// Buckets is a list of bucket names to create on startup if they don't already exist.
 	Buckets []string `json:"buckets"`
@@ -140,7 +141,7 @@ func (cfg *Config) Validate() error {
 	}
 
 	if cfg.User == AnonymousAccessKeyID {
-		return fmt.Errorf("server: User must not be %q; the anonymous principal is only configurable via a Users entry, which enforces the GetObject-only restriction", AnonymousAccessKeyID)
+		return fmt.Errorf("server: User must not be %q; the anonymous principal is only configurable via a Users entry, which enforces the read-only action restriction", AnonymousAccessKeyID)
 	}
 
 	seen := make(map[string]bool, len(cfg.Users)+1)
@@ -180,16 +181,39 @@ func (cfg *Config) Validate() error {
 	return nil
 }
 
+// anonymousAllowedActions is the fixed set of s3:* actions permitted in an
+// anonymous principal's policy: read-only object access, listing, and
+// s3:ListAllMyBuckets (needed to Deny it -- see the doc comment below).
+// Write and delete are never allowed, regardless of what the policy's
+// Statement list contains.
+var anonymousAllowedActions = map[string]bool{
+	ActionGetObject:        true,
+	ActionListBucket:       true,
+	ActionListAllMyBuckets: true,
+}
+
 // validateAnonymousPolicyActions restricts the anonymous principal's policy
-// to s3:GetObject, so a "*" entry can only ever grant unauthenticated read
-// access. Without this, the existing "nil Policy = full access" convention
-// combined with a permissive Action wildcard could turn a single Users
-// entry into an all-buckets, all-actions public grant.
+// to anonymousAllowedActions, so a "*" entry can only ever grant
+// unauthenticated read/list access. Without this, the existing "nil Policy =
+// full access" convention combined with a permissive Action wildcard could
+// turn a single Users entry into an all-buckets, all-actions public grant.
+//
+// s3:ListAllMyBuckets is allowed here even though it grants nothing on its
+// own (S3Action always defers GET / to FilterBucketNames -- see its doc
+// comment) so that an anonymous policy can carry an explicit Deny on it.
+// Once s3:ListBucket became grantable to "*", FilterBucketNames -- shared by
+// every principal -- started including anonymously-listable buckets in
+// unauthenticated GET / (name + creation date), which was previously
+// impossible since "*" could never hold s3:ListBucket. A Deny here is the
+// same documented escape hatch other principals already have (see
+// ExplicitlyDeniedListAllMyBuckets and "Known gaps and quirks" in
+// docs/users-policy.md) to hard-block that endpoint while still allowing
+// per-bucket listing.
 func validateAnonymousPolicyActions(p *Policy) error {
 	for i, stmt := range p.Statement {
 		for _, action := range stmt.Action {
-			if action != ActionGetObject {
-				return fmt.Errorf("policy: statement[%d]: anonymous principal only supports Action %q, got %q", i, ActionGetObject, action)
+			if !anonymousAllowedActions[action] {
+				return fmt.Errorf("policy: statement[%d]: anonymous principal only supports Action %q, %q, or %q, got %q", i, ActionGetObject, ActionListBucket, ActionListAllMyBuckets, action)
 			}
 		}
 	}

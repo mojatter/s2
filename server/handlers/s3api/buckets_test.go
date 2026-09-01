@@ -90,6 +90,55 @@ func (s *BucketsTestSuite) TestListBuckets() {
 		s.Equal(http.StatusForbidden, w.Code)
 		s.Contains(w.Body.String(), "AccessDenied")
 	})
+
+	// Once s3:ListBucket became grantable to the anonymous ("*") principal
+	// (see server.AnonymousAccessKeyID), FilterBucketNames -- shared by every
+	// principal -- started including anonymously-listable buckets in
+	// unauthenticated GET / too. These two cases pin that behavior down
+	// explicitly for the anonymous principal, plus the Deny s3:ListAllMyBuckets
+	// escape hatch documented in docs/users-policy.md's "Allowing anonymous
+	// directory listing" section.
+	s.Run("anonymous principal's ListBucket grant is disclosed via GET /", func() {
+		s.createBucket("anon-visible")
+
+		anon := &server.User{
+			AccessKeyID: server.AnonymousAccessKeyID,
+			Policy: &server.Policy{Statement: []server.Statement{
+				{Effect: "Allow", Action: []string{"s3:ListBucket"}, Resource: []string{"arn:aws:s3:::anon-visible"}},
+			}},
+		}
+
+		req := httptest.NewRequest("GET", "/", nil)
+		req = req.WithContext(server.WithUser(req.Context(), anon))
+		w := httptest.NewRecorder()
+		HandleListBuckets(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		var result ListAllMyBucketsResult
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+		s.Len(result.Buckets, 1)
+		s.Equal("anon-visible", result.Buckets[0].Name)
+	})
+
+	s.Run("Deny s3:ListAllMyBuckets suppresses that disclosure for the anonymous principal", func() {
+		s.createBucket("anon-visible2")
+
+		anon := &server.User{
+			AccessKeyID: server.AnonymousAccessKeyID,
+			Policy: &server.Policy{Statement: []server.Statement{
+				{Effect: "Allow", Action: []string{"s3:ListBucket"}, Resource: []string{"arn:aws:s3:::anon-visible2"}},
+				{Effect: "Deny", Action: []string{"s3:ListAllMyBuckets"}, Resource: []string{"arn:aws:s3:::*"}},
+			}},
+		}
+
+		req := httptest.NewRequest("GET", "/", nil)
+		req = req.WithContext(server.WithUser(req.Context(), anon))
+		w := httptest.NewRecorder()
+		HandleListBuckets(s.server, w, req)
+
+		s.Equal(http.StatusForbidden, w.Code)
+		s.Contains(w.Body.String(), "AccessDenied")
+	})
 }
 
 // --- CreateBucket ---

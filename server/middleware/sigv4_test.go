@@ -406,6 +406,84 @@ func TestSigV4Anonymous(t *testing.T) {
 	}
 }
 
+// TestSigV4AnonymousListBucket verifies that s3:ListBucket and s3:GetObject
+// are authorized independently for the anonymous principal, matching their
+// different Resource ARNs (bucket-level vs. object-level, see S3Action) --
+// granting one must not implicitly grant the other.
+func TestSigV4AnonymousListBucket(t *testing.T) {
+	testCases := []struct {
+		caseName        string
+		anonymousPolicy *server.Policy
+		method          string
+		url             string
+		bucket          string
+		key             string
+		wantStatus      int
+	}{
+		{
+			caseName: "GetObject-only policy denies unsigned bucket listing",
+			anonymousPolicy: &server.Policy{Statement: []server.Statement{
+				{Effect: "Allow", Action: []string{"s3:GetObject"}, Resource: []string{"arn:aws:s3:::public/*"}},
+			}},
+			method:     http.MethodGet,
+			url:        "/public",
+			bucket:     "public",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			caseName: "ListBucket-only policy denies unsigned GetObject",
+			anonymousPolicy: &server.Policy{Statement: []server.Statement{
+				{Effect: "Allow", Action: []string{"s3:ListBucket"}, Resource: []string{"arn:aws:s3:::public"}},
+			}},
+			method:     http.MethodGet,
+			url:        "/public/key.txt",
+			bucket:     "public",
+			key:        "key.txt",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			caseName: "policy granting both allows unsigned bucket listing",
+			anonymousPolicy: &server.Policy{Statement: []server.Statement{
+				{Effect: "Allow", Action: []string{"s3:GetObject", "s3:ListBucket"}, Resource: []string{"arn:aws:s3:::public/*", "arn:aws:s3:::public"}},
+			}},
+			method:     http.MethodGet,
+			url:        "/public",
+			bucket:     "public",
+			wantStatus: http.StatusOK,
+		},
+		{
+			caseName: "policy granting both allows unsigned GetObject",
+			anonymousPolicy: &server.Policy{Statement: []server.Statement{
+				{Effect: "Allow", Action: []string{"s3:GetObject", "s3:ListBucket"}, Resource: []string{"arn:aws:s3:::public/*", "arn:aws:s3:::public"}},
+			}},
+			method:     http.MethodGet,
+			url:        "/public/key.txt",
+			bucket:     "public",
+			key:        "key.txt",
+			wantStatus: http.StatusOK,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			cfg := &server.Config{
+				Users: []server.User{
+					{AccessKeyID: server.AnonymousAccessKeyID, Policy: tc.anonymousPolicy},
+				},
+			}
+			srv := &server.Server{Config: cfg}
+			handler := SigV4(noopHandler)
+
+			r := httptest.NewRequest(tc.method, tc.url, nil)
+			r.SetPathValue("bucket", tc.bucket)
+			r.SetPathValue("key", tc.key)
+			w := httptest.NewRecorder()
+			handler(srv, w, r)
+
+			assert.Equal(t, tc.wantStatus, w.Code)
+		})
+	}
+}
+
 // TestSigV4NoAnonymousPrincipalStillRejectsUnsignedRequests verifies that
 // configs without a "*" Users entry keep rejecting unauthenticated requests
 // outright, matching pre-anonymous-principal behavior.
