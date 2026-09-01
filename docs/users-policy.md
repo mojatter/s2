@@ -141,8 +141,37 @@ Constraints specific to this entry, enforced at config-load time:
 
 - `secret_access_key` must be empty — anonymous requests never present a secret.
 - `policy` is required (the usual "no `policy` = full access" convention does not apply to `"*"`, since that would turn one config line into an all-buckets, all-actions public grant).
-- Every `Action` in the policy must be `s3:GetObject`. `s3:ListBucket` (directory-listing-style enumeration) and write/delete actions are not supported for the anonymous principal.
+- Every `Action` in the policy must be `s3:GetObject` or `s3:ListBucket`. Write/delete actions are not supported for the anonymous principal.
 - The Web Console (Basic Auth) never consults this entry — anonymous browsing of the bucket sidebar is out of scope. Anonymous access only applies to the S3 API.
+
+### Allowing anonymous directory listing
+
+`s3:ListBucket` reveals every key, size, and timestamp under a bucket — a materially different exposure than `s3:GetObject`, which requires knowing a key in advance. It's opt-in per statement: omit it and the anonymous principal can only fetch objects whose key it already knows.
+
+`s3:ListBucket` and `s3:GetObject` also check different `Resource` ARNs — a bucket-level ARN (no trailing `/*`) for `ListBucket`, an object-level ARN (`bucket/*`) for `GetObject` — so granting one does not implicitly grant the other, and a policy needs both `Resource` forms to allow both actions:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::public-assets/*", "arn:aws:s3:::public-assets"]
+    }
+  ]
+}
+```
+
+**Granting `s3:ListBucket` also exposes the bucket's name and creation date via unauthenticated `GET /`.** `GET /` (ListBuckets) is filtered per-bucket by the same `s3:ListBucket` check (see [below](#s3listallmybuckets-is-not-a-full-gate)), and this applies to the anonymous principal too: once any bucket is anonymously listable, anyone can discover it exists — without knowing its name in advance — by hitting the bucket-less root endpoint. If you want per-bucket listing without that root-level disclosure, add an explicit `Deny` on `s3:ListAllMyBuckets` (this is the one exception to the `s3:GetObject`/`s3:ListBucket`-only restriction above — it's permitted specifically so it can be denied):
+
+```json
+{
+  "Effect": "Deny",
+  "Action": "s3:ListAllMyBuckets",
+  "Resource": "arn:aws:s3:::*"
+}
+```
 
 ## Known gaps and quirks
 

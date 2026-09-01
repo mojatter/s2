@@ -19,7 +19,8 @@ type User struct {
 // Authorization header nor presigned-URL query parameters are evaluated
 // against this entry's Policy instead of being rejected outright. See
 // Config.Validate for the extra constraints placed on this entry (no
-// secret, Policy required, s3:GetObject only).
+// secret, Policy required, see anonymousAllowedActions for the permitted
+// action set).
 const AnonymousAccessKeyID = "*"
 
 // LookupUser returns the User matching accessKeyID, checking cfg.Users

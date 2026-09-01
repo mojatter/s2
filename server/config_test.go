@@ -299,13 +299,50 @@ func TestConfigValidateUsers(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			caseName: "anonymous principal with non-GetObject action rejected",
+			caseName: "anonymous principal with s3:ListBucket accepted",
 			cfg: func() *Config {
 				c := DefaultConfig()
 				c.Users = []User{{
 					AccessKeyID: AnonymousAccessKeyID,
 					Policy: &Policy{
-						Statement: []Statement{allowStatement("s3:ListBucket", "*")},
+						Statement: []Statement{allowStatement("s3:ListBucket", "arn:aws:s3:::public")},
+					},
+				}}
+				return c
+			}(),
+			wantErr: false,
+		},
+		{
+			// s3:ListAllMyBuckets grants nothing on its own (S3Action always
+			// defers GET / to FilterBucketNames), but a Deny on it is the
+			// documented escape hatch to hard-block unauthenticated root
+			// bucket enumeration once s3:ListBucket is anonymously grantable
+			// -- see the "Allowing anonymous directory listing" section of
+			// docs/users-policy.md.
+			caseName: "anonymous principal with Deny s3:ListAllMyBuckets accepted",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Users = []User{{
+					AccessKeyID: AnonymousAccessKeyID,
+					Policy: &Policy{
+						Statement: []Statement{
+							allowStatement("s3:ListBucket", "arn:aws:s3:::public"),
+							denyStatement("s3:ListAllMyBuckets", "arn:aws:s3:::*"),
+						},
+					},
+				}}
+				return c
+			}(),
+			wantErr: false,
+		},
+		{
+			caseName: "anonymous principal with write action rejected",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Users = []User{{
+					AccessKeyID: AnonymousAccessKeyID,
+					Policy: &Policy{
+						Statement: []Statement{allowStatement("s3:PutObject", "*")},
 					},
 				}}
 				return c
@@ -329,8 +366,8 @@ func TestConfigValidateUsers(t *testing.T) {
 		{
 			// A legacy User set to "*" would resolve through LookupUser's
 			// fallback to a full-access (nil-Policy) User, bypassing the
-			// GetObject-only restriction the anonymous principal is meant to
-			// enforce -- see server.LookupUser and the Users-entry cases
+			// read-only action restriction the anonymous principal is meant
+			// to enforce -- see server.LookupUser and the Users-entry cases
 			// above for the restriction this must not be allowed to skip.
 			caseName: "legacy User set to the anonymous access key id rejected",
 			cfg: func() *Config {
