@@ -346,6 +346,85 @@ func TestSigV4MultiUser(t *testing.T) {
 	}
 }
 
+func TestSigV4Anonymous(t *testing.T) {
+	anonymousPolicy := &server.Policy{Statement: []server.Statement{
+		{Effect: "Allow", Action: []string{"s3:GetObject"}, Resource: []string{"arn:aws:s3:::public/*"}},
+	}}
+	cfg := &server.Config{
+		Users: []server.User{
+			{AccessKeyID: "userA", SecretAccessKey: "secretA"},
+			{AccessKeyID: server.AnonymousAccessKeyID, Policy: anonymousPolicy},
+		},
+	}
+
+	testCases := []struct {
+		caseName   string
+		method     string
+		url        string
+		bucket     string
+		key        string
+		wantStatus int
+	}{
+		{
+			caseName:   "unsigned request within the anonymous policy's scope passes",
+			method:     http.MethodGet,
+			url:        "/public/key.txt",
+			bucket:     "public",
+			key:        "key.txt",
+			wantStatus: http.StatusOK,
+		},
+		{
+			caseName:   "unsigned request outside the anonymous policy's scope is denied",
+			method:     http.MethodGet,
+			url:        "/private/key.txt",
+			bucket:     "private",
+			key:        "key.txt",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			caseName:   "unsigned write is denied even within the public prefix",
+			method:     http.MethodPut,
+			url:        "/public/key.txt",
+			bucket:     "public",
+			key:        "key.txt",
+			wantStatus: http.StatusForbidden,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			srv := &server.Server{Config: cfg}
+			handler := SigV4(noopHandler)
+
+			r := httptest.NewRequest(tc.method, tc.url, nil)
+			r.SetPathValue("bucket", tc.bucket)
+			r.SetPathValue("key", tc.key)
+			w := httptest.NewRecorder()
+			handler(srv, w, r)
+
+			assert.Equal(t, tc.wantStatus, w.Code)
+		})
+	}
+}
+
+// TestSigV4NoAnonymousPrincipalStillRejectsUnsignedRequests verifies that
+// configs without a "*" Users entry keep rejecting unauthenticated requests
+// outright, matching pre-anonymous-principal behavior.
+func TestSigV4NoAnonymousPrincipalStillRejectsUnsignedRequests(t *testing.T) {
+	cfg := &server.Config{
+		Users: []server.User{{AccessKeyID: "userA", SecretAccessKey: "secretA"}},
+	}
+	srv := &server.Server{Config: cfg}
+	handler := SigV4(noopHandler)
+
+	r := httptest.NewRequest(http.MethodGet, "/bucket/key", nil)
+	r.SetPathValue("bucket", "bucket")
+	r.SetPathValue("key", "key")
+	w := httptest.NewRecorder()
+	handler(srv, w, r)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
 func TestSigV4MultiUserAccessDeniedDistinctFromSignatureError(t *testing.T) {
 	cfg := &server.Config{
 		Users: []server.User{

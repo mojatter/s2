@@ -14,6 +14,14 @@ type User struct {
 	Policy          *Policy `json:"policy,omitempty"`
 }
 
+// AnonymousAccessKeyID is the access_key_id value that marks a Users entry
+// as the anonymous principal: S3 API requests that carry neither an
+// Authorization header nor presigned-URL query parameters are evaluated
+// against this entry's Policy instead of being rejected outright. See
+// Config.Validate for the extra constraints placed on this entry (no
+// secret, Policy required, s3:GetObject only).
+const AnonymousAccessKeyID = "*"
+
 // LookupUser returns the User matching accessKeyID, checking cfg.Users
 // first and falling back to the legacy single User/Password fields
 // (synthesized as a full-access User with a nil Policy) if no Users entry

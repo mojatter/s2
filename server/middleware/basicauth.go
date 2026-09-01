@@ -16,6 +16,13 @@ import (
 // ConsoleAction, and the matched user is stashed on the request context
 // (server.WithUser) so handlers such as the bucket-list page can filter
 // their results by the same policy.
+//
+// The anonymous principal (server.AnonymousAccessKeyID) never matches here,
+// even if a client sends it as the Basic Auth username with an empty
+// password (which would otherwise compare equal, since the anonymous entry
+// carries no SecretAccessKey by construction -- see Config.Validate).
+// Anonymous access is an S3-API-only concept; the Web Console always
+// requires a real credential.
 func BasicAuth(next server.HandlerFunc) server.HandlerFunc {
 	return func(srv *server.Server, w http.ResponseWriter, r *http.Request) {
 		if !srv.Config.AuthEnabled() {
@@ -24,7 +31,7 @@ func BasicAuth(next server.HandlerFunc) server.HandlerFunc {
 		}
 		user, pass, ok := r.BasicAuth()
 		u := srv.Config.LookupUser(user)
-		if !ok || u == nil || subtle.ConstantTimeCompare([]byte(pass), []byte(u.SecretAccessKey)) != 1 {
+		if !ok || u == nil || u.AccessKeyID == server.AnonymousAccessKeyID || subtle.ConstantTimeCompare([]byte(pass), []byte(u.SecretAccessKey)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Basic realm="s2"`)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return

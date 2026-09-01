@@ -260,6 +260,87 @@ func TestConfigValidateUsers(t *testing.T) {
 			}(),
 			wantErr: true,
 		},
+		{
+			caseName: "valid anonymous principal accepted",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Users = []User{{
+					AccessKeyID: AnonymousAccessKeyID,
+					Policy: &Policy{
+						Statement: []Statement{allowStatement("s3:GetObject", "arn:aws:s3:::public/*")},
+					},
+				}}
+				return c
+			}(),
+			wantErr: false,
+		},
+		{
+			caseName: "anonymous principal with secret_access_key rejected",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Users = []User{{
+					AccessKeyID:     AnonymousAccessKeyID,
+					SecretAccessKey: "shouldnotbeset",
+					Policy: &Policy{
+						Statement: []Statement{allowStatement("s3:GetObject", "*")},
+					},
+				}}
+				return c
+			}(),
+			wantErr: true,
+		},
+		{
+			caseName: "anonymous principal without policy rejected",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Users = []User{{AccessKeyID: AnonymousAccessKeyID}}
+				return c
+			}(),
+			wantErr: true,
+		},
+		{
+			caseName: "anonymous principal with non-GetObject action rejected",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Users = []User{{
+					AccessKeyID: AnonymousAccessKeyID,
+					Policy: &Policy{
+						Statement: []Statement{allowStatement("s3:ListBucket", "*")},
+					},
+				}}
+				return c
+			}(),
+			wantErr: true,
+		},
+		{
+			caseName: "anonymous principal with wildcard action rejected",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Users = []User{{
+					AccessKeyID: AnonymousAccessKeyID,
+					Policy: &Policy{
+						Statement: []Statement{allowStatement("*", "*")},
+					},
+				}}
+				return c
+			}(),
+			wantErr: true,
+		},
+		{
+			// A legacy User set to "*" would resolve through LookupUser's
+			// fallback to a full-access (nil-Policy) User, bypassing the
+			// GetObject-only restriction the anonymous principal is meant to
+			// enforce -- see server.LookupUser and the Users-entry cases
+			// above for the restriction this must not be allowed to skip.
+			caseName: "legacy User set to the anonymous access key id rejected",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.User = AnonymousAccessKeyID
+				c.Password = "somesecret"
+				return c
+			}(),
+			wantErr: true,
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {

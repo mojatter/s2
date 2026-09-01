@@ -96,11 +96,15 @@ func TestBasicAuthMultiUser(t *testing.T) {
 	noListAllBucketsPolicy := &server.Policy{Statement: []server.Statement{
 		{Effect: "Allow", Action: []string{"s3:ListBucket", "s3:GetObject"}, Resource: []string{"arn:aws:s3:::visible"}},
 	}}
+	anonymousPolicy := &server.Policy{Statement: []server.Statement{
+		{Effect: "Allow", Action: []string{"s3:GetObject"}, Resource: []string{"arn:aws:s3:::*"}},
+	}}
 	cfg := &server.Config{
 		Users: []server.User{
 			{AccessKeyID: "userA", SecretAccessKey: "secretA"},
 			{AccessKeyID: "userB", SecretAccessKey: "secretB", Policy: readOnlyPolicy},
 			{AccessKeyID: "userC", SecretAccessKey: "secretC", Policy: noListAllBucketsPolicy},
+			{AccessKeyID: server.AnonymousAccessKeyID, Policy: anonymousPolicy},
 		},
 	}
 
@@ -163,6 +167,18 @@ func TestBasicAuthMultiUser(t *testing.T) {
 			authUser:   "userC",
 			authPass:   "secretC",
 			wantStatus: http.StatusOK,
+		},
+		{
+			// The anonymous entry carries no SecretAccessKey by construction,
+			// so a client sending "*" with an empty password would otherwise
+			// compare equal -- BasicAuth must reject it explicitly rather
+			// than let the empty-secret match log it into the console.
+			caseName:   "anonymous principal rejected even with matching empty secret",
+			method:     http.MethodGet,
+			url:        "/",
+			authUser:   server.AnonymousAccessKeyID,
+			authPass:   "",
+			wantStatus: http.StatusUnauthorized,
 		},
 	}
 	for _, tc := range testCases {

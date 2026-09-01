@@ -32,6 +32,11 @@ const (
 // SignatureDoesNotMatch used for verification failures. The matched User is
 // stashed on the request context (server.WithUser) so handlers such as
 // HandleListBuckets can filter their results by the same policy.
+//
+// A request with neither an Authorization header nor presigned-URL query
+// parameters falls back to the anonymous principal (server.AnonymousAccessKeyID)
+// when one is configured, rather than being rejected outright; its Policy is
+// then checked exactly like any other matched User's.
 func SigV4(next server.HandlerFunc) server.HandlerFunc {
 	return func(srv *server.Server, w http.ResponseWriter, r *http.Request) {
 		if !srv.Config.AuthEnabled() {
@@ -45,12 +50,16 @@ func SigV4(next server.HandlerFunc) server.HandlerFunc {
 		}
 
 		// AWS prefers the Authorization header when both are present.
-		// Fall back to query-string (presigned URL) verification when the header is absent.
+		// Fall back to query-string (presigned URL) verification, then to
+		// the anonymous principal, when the header is absent.
 		var matched *server.User
 		var err error
-		if r.Header.Get("Authorization") == "" && r.URL.Query().Get("X-Amz-Algorithm") != "" {
+		switch authHeader := r.Header.Get("Authorization"); {
+		case authHeader == "" && r.URL.Query().Get("X-Amz-Algorithm") != "":
 			matched, err = verifyPresignedV4(r, lookup, time.Now().UTC())
-		} else {
+		case authHeader == "":
+			matched, err = anonymousUser(lookup)
+		default:
 			matched, err = verifySignatureV4(r, lookup)
 		}
 		if err != nil {
@@ -75,6 +84,20 @@ func writeS3AuthError(w http.ResponseWriter, r *http.Request, message string) {
 
 func writeS3AccessDeniedError(w http.ResponseWriter, r *http.Request) {
 	server.WriteS3Error(w, r, "AccessDenied", "Access Denied", http.StatusForbidden)
+}
+
+// anonymousUser resolves the unauthenticated fallback: a request with
+// neither an Authorization header nor presigned-URL query parameters
+// matches server.AnonymousAccessKeyID ("*") if one is configured, without
+// any signature verification. It returns the same "missing Authorization
+// header" error as before when no such entry exists, so behavior is
+// unchanged for configs that don't opt in.
+func anonymousUser(lookup func(accessKeyID string) (user *server.User, ok bool)) (*server.User, error) {
+	user, ok := lookup(server.AnonymousAccessKeyID)
+	if !ok {
+		return nil, fmt.Errorf("missing Authorization header")
+	}
+	return user, nil
 }
 
 // verifySignatureV4 verifies the AWS Signature Version 4 of an HTTP request.
