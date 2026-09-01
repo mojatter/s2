@@ -78,6 +78,13 @@ type Config struct {
 	// Password pair above; each entry's Policy (if set) governs what that
 	// principal may do. Config-file only -- there is no environment
 	// variable equivalent.
+	//
+	// An entry whose AccessKeyID is AnonymousAccessKeyID ("*") is the
+	// anonymous principal: SigV4 falls back to it for S3 API requests that
+	// carry no Authorization header and no presigned-URL query parameters,
+	// instead of rejecting them outright. BasicAuth (the Web Console) never
+	// consults it -- anonymous browsing of the bucket sidebar is out of
+	// scope. See Config.Validate for the constraints placed on this entry.
 	Users []User `json:"users,omitempty"`
 	// Buckets is a list of bucket names to create on startup if they don't already exist.
 	Buckets []string `json:"buckets"`
@@ -132,6 +139,10 @@ func (cfg *Config) Validate() error {
 		}
 	}
 
+	if cfg.User == AnonymousAccessKeyID {
+		return fmt.Errorf("server: User must not be %q; the anonymous principal is only configurable via a Users entry, which enforces the GetObject-only restriction", AnonymousAccessKeyID)
+	}
+
 	seen := make(map[string]bool, len(cfg.Users)+1)
 	if cfg.User != "" {
 		seen[cfg.User] = true
@@ -140,7 +151,15 @@ func (cfg *Config) Validate() error {
 		if u.AccessKeyID == "" {
 			return fmt.Errorf("server: users[%d]: access_key_id must not be empty", i)
 		}
-		if u.SecretAccessKey == "" {
+		isAnonymous := u.AccessKeyID == AnonymousAccessKeyID
+		if isAnonymous {
+			if u.SecretAccessKey != "" {
+				return fmt.Errorf("server: users[%d] (%s): secret_access_key must be empty for the anonymous principal", i, u.AccessKeyID)
+			}
+			if u.Policy == nil {
+				return fmt.Errorf("server: users[%d] (%s): policy is required for the anonymous principal", i, u.AccessKeyID)
+			}
+		} else if u.SecretAccessKey == "" {
 			return fmt.Errorf("server: users[%d] (%s): secret_access_key must not be empty", i, u.AccessKeyID)
 		}
 		if seen[u.AccessKeyID] {
@@ -150,6 +169,27 @@ func (cfg *Config) Validate() error {
 		if u.Policy != nil {
 			if err := u.Policy.Validate(); err != nil {
 				return fmt.Errorf("server: users[%d] (%s): %w", i, u.AccessKeyID, err)
+			}
+			if isAnonymous {
+				if err := validateAnonymousPolicyActions(u.Policy); err != nil {
+					return fmt.Errorf("server: users[%d] (%s): %w", i, u.AccessKeyID, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// validateAnonymousPolicyActions restricts the anonymous principal's policy
+// to s3:GetObject, so a "*" entry can only ever grant unauthenticated read
+// access. Without this, the existing "nil Policy = full access" convention
+// combined with a permissive Action wildcard could turn a single Users
+// entry into an all-buckets, all-actions public grant.
+func validateAnonymousPolicyActions(p *Policy) error {
+	for i, stmt := range p.Statement {
+		for _, action := range stmt.Action {
+			if action != ActionGetObject {
+				return fmt.Errorf("policy: statement[%d]: anonymous principal only supports Action %q, got %q", i, ActionGetObject, action)
 			}
 		}
 	}

@@ -35,7 +35,7 @@ Each entry:
 
 | Field | Description |
 |-------|-------------|
-| `access_key_id` | SigV4 Access Key ID / Basic Auth username |
+| `access_key_id` | SigV4 Access Key ID / Basic Auth username. `"*"` is reserved for the anonymous principal (see [below](#anonymous-public-read-access)) |
 | `secret_access_key` | SigV4 Secret Access Key / Basic Auth password |
 | `policy` | Optional. Omit for full access (see below) |
 
@@ -110,6 +110,39 @@ A principal with **no `policy` field** (or the legacy `user`/`password` pair) ha
 ```
 
 This grants read access to the whole `uploads` bucket, write/delete access scoped to `uploads/incoming/`, and carves out one file that can never be deleted regardless of the broader `Allow` above (an explicit `Deny` always wins).
+
+## Anonymous public read access
+
+A `users` entry whose `access_key_id` is exactly `"*"` is the anonymous principal. S3 API requests that carry neither an `Authorization` header nor presigned-URL query parameters are evaluated against this entry's `policy` instead of being rejected — the same `Allowed`/`Authorized` check used for every other principal.
+
+```json
+{
+  "users": [
+    {
+      "access_key_id": "*",
+      "policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": "s3:GetObject",
+            "Resource": "arn:aws:s3:::public-assets/*"
+          }
+        ]
+      }
+    }
+  ]
+}
+```
+
+There is no separate "public bucket" flag — the presence of a `"*"` entry is itself the toggle, and `Resource` scoping controls which buckets/prefixes are public, exactly like any other principal's policy.
+
+Constraints specific to this entry, enforced at config-load time:
+
+- `secret_access_key` must be empty — anonymous requests never present a secret.
+- `policy` is required (the usual "no `policy` = full access" convention does not apply to `"*"`, since that would turn one config line into an all-buckets, all-actions public grant).
+- Every `Action` in the policy must be `s3:GetObject`. `s3:ListBucket` (directory-listing-style enumeration) and write/delete actions are not supported for the anonymous principal.
+- The Web Console (Basic Auth) never consults this entry — anonymous browsing of the bucket sidebar is out of scope. Anonymous access only applies to the S3 API.
 
 ## Known gaps and quirks
 
