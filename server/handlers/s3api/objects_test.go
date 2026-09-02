@@ -765,6 +765,198 @@ func (s *ObjectsTestSuite) TestMetadata() {
 	})
 }
 
+// --- Content-Type ---
+
+func (s *ObjectsTestSuite) TestContentType() {
+	s.Run("explicit Content-Type round-trips through GetObject", func() {
+		s.createBucket("ct")
+
+		body := "<html></html>"
+		req := httptest.NewRequest("PUT", "/ct/index.html", strings.NewReader(body))
+		req.SetPathValue("bucket", "ct")
+		req.SetPathValue("key", "index.html")
+		req.ContentLength = int64(len(body))
+		req.Header.Set("Content-Type", "text/html")
+		w := httptest.NewRecorder()
+		handlePutObject(s.server, w, req)
+		s.Equal(http.StatusOK, w.Code)
+
+		getReq := httptest.NewRequest("GET", "/ct/index.html", nil)
+		getReq.SetPathValue("bucket", "ct")
+		getReq.SetPathValue("key", "index.html")
+		getW := httptest.NewRecorder()
+		handleGetObject(s.server, getW, getReq)
+
+		s.Equal(http.StatusOK, getW.Code)
+		s.Equal("text/html", getW.Header().Get("Content-Type"))
+	})
+
+	s.Run("PutObject with whitespace-only Content-Type defaults to binary/octet-stream", func() {
+		s.createBucket("ctw")
+
+		body := "data"
+		req := httptest.NewRequest("PUT", "/ctw/plain", strings.NewReader(body))
+		req.SetPathValue("bucket", "ctw")
+		req.SetPathValue("key", "plain")
+		req.ContentLength = int64(len(body))
+		req.Header.Set("Content-Type", "   ")
+		w := httptest.NewRecorder()
+		handlePutObject(s.server, w, req)
+		s.Equal(http.StatusOK, w.Code)
+
+		getReq := httptest.NewRequest("GET", "/ctw/plain", nil)
+		getReq.SetPathValue("bucket", "ctw")
+		getReq.SetPathValue("key", "plain")
+		getW := httptest.NewRecorder()
+		handleGetObject(s.server, getW, getReq)
+
+		s.Equal(http.StatusOK, getW.Code)
+		s.Equal(defaultContentType, getW.Header().Get("Content-Type"))
+	})
+
+	s.Run("PutObject with no Content-Type defaults to binary/octet-stream", func() {
+		s.createBucket("ctd")
+
+		body := "data"
+		req := httptest.NewRequest("PUT", "/ctd/plain", strings.NewReader(body))
+		req.SetPathValue("bucket", "ctd")
+		req.SetPathValue("key", "plain")
+		req.ContentLength = int64(len(body))
+		w := httptest.NewRecorder()
+		handlePutObject(s.server, w, req)
+		s.Equal(http.StatusOK, w.Code)
+
+		getReq := httptest.NewRequest("GET", "/ctd/plain", nil)
+		getReq.SetPathValue("bucket", "ctd")
+		getReq.SetPathValue("key", "plain")
+		getW := httptest.NewRecorder()
+		handleGetObject(s.server, getW, getReq)
+
+		s.Equal(http.StatusOK, getW.Code)
+		s.Equal(defaultContentType, getW.Header().Get("Content-Type"))
+	})
+
+	s.Run("Content-Type internal metadata key does not leak as x-amz-meta-*", func() {
+		s.createBucket("ctm")
+
+		body := "data"
+		req := httptest.NewRequest("PUT", "/ctm/file", strings.NewReader(body))
+		req.SetPathValue("bucket", "ctm")
+		req.SetPathValue("key", "file")
+		req.ContentLength = int64(len(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handlePutObject(s.server, w, req)
+		s.Equal(http.StatusOK, w.Code)
+
+		getReq := httptest.NewRequest("GET", "/ctm/file", nil)
+		getReq.SetPathValue("bucket", "ctm")
+		getReq.SetPathValue("key", "file")
+		getW := httptest.NewRecorder()
+		handleGetObject(s.server, getW, getReq)
+
+		s.Empty(getW.Header().Get("x-amz-meta-" + contentTypeMetadataKey))
+	})
+
+	s.Run("HEAD returns Content-Type", func() {
+		s.createBucket("cth")
+
+		body := "data"
+		req := httptest.NewRequest("PUT", "/cth/file.json", strings.NewReader(body))
+		req.SetPathValue("bucket", "cth")
+		req.SetPathValue("key", "file.json")
+		req.ContentLength = int64(len(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handlePutObject(s.server, w, req)
+		s.Equal(http.StatusOK, w.Code)
+
+		headReq := httptest.NewRequest("HEAD", "/cth/file.json", nil)
+		headReq.SetPathValue("bucket", "cth")
+		headReq.SetPathValue("key", "file.json")
+		headW := httptest.NewRecorder()
+		handleGetObject(s.server, headW, headReq)
+
+		s.Equal(http.StatusOK, headW.Code)
+		s.Equal("application/json", headW.Header().Get("Content-Type"))
+	})
+
+	s.Run("object with no stored Content-Type (predates this feature) leaves the header unset", func() {
+		s.createBucket("ctn")
+		// putObject bypasses handlePutObject entirely (direct storage write),
+		// so no s2-content-type metadata is ever recorded -- the same shape
+		// as a pre-existing or externally-placed osfs object (see #188).
+		s.putObject("ctn", "legacy.txt", "data")
+
+		getReq := httptest.NewRequest("GET", "/ctn/legacy.txt", nil)
+		getReq.SetPathValue("bucket", "ctn")
+		getReq.SetPathValue("key", "legacy.txt")
+		getW := httptest.NewRecorder()
+		handleGetObject(s.server, getW, getReq)
+
+		s.Equal(http.StatusOK, getW.Code)
+		s.Empty(getW.Header().Get("Content-Type"))
+	})
+
+	s.Run("CopyObject without directive preserves source Content-Type", func() {
+		s.createBucket("ctc")
+
+		srcReq := httptest.NewRequest("PUT", "/ctc/src.html", strings.NewReader("<h1>hi</h1>"))
+		srcReq.SetPathValue("bucket", "ctc")
+		srcReq.SetPathValue("key", "src.html")
+		srcReq.ContentLength = 11
+		srcReq.Header.Set("Content-Type", "text/html")
+		srcW := httptest.NewRecorder()
+		handlePutObject(s.server, srcW, srcReq)
+		s.Equal(http.StatusOK, srcW.Code)
+
+		copyReq := httptest.NewRequest("PUT", "/ctc/dst.html", nil)
+		copyReq.SetPathValue("bucket", "ctc")
+		copyReq.SetPathValue("key", "dst.html")
+		copyReq.Header.Set("x-amz-copy-source", "/ctc/src.html")
+		copyW := httptest.NewRecorder()
+		handlePutObject(s.server, copyW, copyReq)
+		s.Equal(http.StatusOK, copyW.Code)
+
+		getReq := httptest.NewRequest("GET", "/ctc/dst.html", nil)
+		getReq.SetPathValue("bucket", "ctc")
+		getReq.SetPathValue("key", "dst.html")
+		getW := httptest.NewRecorder()
+		handleGetObject(s.server, getW, getReq)
+		s.Equal("text/html", getW.Header().Get("Content-Type"))
+	})
+
+	s.Run("CopyObject with REPLACE directive uses the new Content-Type", func() {
+		s.createBucket("ctr")
+
+		srcReq := httptest.NewRequest("PUT", "/ctr/src.html", strings.NewReader("<h1>hi</h1>"))
+		srcReq.SetPathValue("bucket", "ctr")
+		srcReq.SetPathValue("key", "src.html")
+		srcReq.ContentLength = 11
+		srcReq.Header.Set("Content-Type", "text/html")
+		srcW := httptest.NewRecorder()
+		handlePutObject(s.server, srcW, srcReq)
+		s.Equal(http.StatusOK, srcW.Code)
+
+		copyReq := httptest.NewRequest("PUT", "/ctr/dst.bin", nil)
+		copyReq.SetPathValue("bucket", "ctr")
+		copyReq.SetPathValue("key", "dst.bin")
+		copyReq.Header.Set("x-amz-copy-source", "/ctr/src.html")
+		copyReq.Header.Set("x-amz-metadata-directive", "REPLACE")
+		copyReq.Header.Set("Content-Type", "application/octet-stream")
+		copyW := httptest.NewRecorder()
+		handlePutObject(s.server, copyW, copyReq)
+		s.Equal(http.StatusOK, copyW.Code)
+
+		getReq := httptest.NewRequest("GET", "/ctr/dst.bin", nil)
+		getReq.SetPathValue("bucket", "ctr")
+		getReq.SetPathValue("key", "dst.bin")
+		getW := httptest.NewRecorder()
+		handleGetObject(s.server, getW, getReq)
+		s.Equal("application/octet-stream", getW.Header().Get("Content-Type"))
+	})
+}
+
 // --- CopyObject ---
 
 func (s *ObjectsTestSuite) TestCopyObject() {

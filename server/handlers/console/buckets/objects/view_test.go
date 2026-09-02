@@ -77,6 +77,24 @@ func (s *ViewTestSuite) TestHandleView() {
 		s.Equal("image/png", w.Header().Get("Content-Type"))
 	})
 
+	s.Run("stored Content-Type takes precedence over the extension guess", func() {
+		s.createBucket("view-ct")
+		md := s2.Metadata{server.ContentTypeMetadataKey: "application/json"}
+		// Extensionless key: contentTypeByExt(".") -- and even path.Ext("")
+		// -- would never guess "application/json" on its own, so a match
+		// here can only come from the stored metadata this test sets.
+		s.putObject("view-ct", "report", []byte("{}"), s2.WithMetadata(md))
+
+		req := httptest.NewRequest("GET", "/buckets/view-ct/view/report", nil)
+		req.SetPathValue("name", "view-ct")
+		req.SetPathValue("object", "report")
+		w := httptest.NewRecorder()
+		handleView(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		s.Equal("application/json", w.Header().Get("Content-Type"))
+	})
+
 	s.Run("nested path", func() {
 		s.createBucket("view-nest")
 		s.server.Buckets.CreateFolder(context.Background(), "view-nest", "a/b")
@@ -123,10 +141,10 @@ func (s *ViewTestSuite) TestContentTypeByExt() {
 	// macOS and Linux, so we only assert on properties that hold
 	// regardless of the platform.
 	testCases := []struct {
-		caseName      string
-		ext           string
-		wantNonEmpty  bool   // result must not be empty
-		wantContains  string // result must contain this substring (if non-empty)
+		caseName     string
+		ext          string
+		wantNonEmpty bool   // result must not be empty
+		wantContains string // result must contain this substring (if non-empty)
 	}{
 		{caseName: "Go source returns text", ext: ".go", wantNonEmpty: true, wantContains: "text/"},
 		{caseName: "JSON", ext: ".json", wantNonEmpty: true, wantContains: "json"},
@@ -193,6 +211,22 @@ func (s *ViewTestSuite) TestHandleMeta() {
 		s.Equal("1", metadata["version"])
 	})
 
+	s.Run("stored Content-Type takes precedence over the extension guess", func() {
+		s.createBucket("meta-ct")
+		md := s2.Metadata{server.ContentTypeMetadataKey: "application/json"}
+		s.putObject("meta-ct", "report", []byte("{}"), s2.WithMetadata(md))
+
+		req := httptest.NewRequest("GET", "/buckets/meta-ct/meta/report", nil)
+		req.SetPathValue("name", "meta-ct")
+		req.SetPathValue("object", "report")
+		w := httptest.NewRecorder()
+		handleMeta(s.server, w, req)
+
+		var resp map[string]any
+		s.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+		s.Equal("application/json", resp["contentType"])
+	})
+
 	s.Run("no custom metadata omits field", func() {
 		s.createBucket("meta-none")
 		s.putObject("meta-none", "plain.txt", []byte("x"))
@@ -207,6 +241,30 @@ func (s *ViewTestSuite) TestHandleMeta() {
 		s.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
 		_, hasMetadata := resp["metadata"]
 		s.False(hasMetadata)
+	})
+
+	s.Run("internal metadata keys are not exposed", func() {
+		s.createBucket("meta-internal")
+		md := s2.Metadata{
+			"author":                      "test",
+			server.EtagMetadataKey:        "should-not-leak",
+			server.ContentTypeMetadataKey: "should-not-leak",
+		}
+		s.putObject("meta-internal", "doc.txt", []byte("x"), s2.WithMetadata(md))
+
+		req := httptest.NewRequest("GET", "/buckets/meta-internal/meta/doc.txt", nil)
+		req.SetPathValue("name", "meta-internal")
+		req.SetPathValue("object", "doc.txt")
+		w := httptest.NewRecorder()
+		handleMeta(s.server, w, req)
+
+		var resp map[string]any
+		s.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+		metadata, ok := resp["metadata"].(map[string]any)
+		s.Require().True(ok)
+		s.Equal("test", metadata["author"])
+		s.NotContains(metadata, server.EtagMetadataKey)
+		s.NotContains(metadata, server.ContentTypeMetadataKey)
 	})
 
 	s.Run("nonexistent bucket", func() {

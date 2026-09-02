@@ -11,9 +11,31 @@ import (
 	"path"
 	"strings"
 
+	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/server"
 	"github.com/mojatter/s2/server/middleware"
 )
+
+// userMetadata returns obj's metadata with s2's own internal bookkeeping
+// keys (server.InternalMetadataKeys -- ETag, Content-Type) filtered out, so
+// the metadata panel/preview page only ever shows what the client actually
+// set via x-amz-meta-*, matching the S3 API's GetObject behavior.
+func userMetadata(obj s2.Object) map[string]string {
+	return server.FilterInternalMetadata(obj.Metadata())
+}
+
+// resolvedContentType returns obj's stored Content-Type (set via the S3
+// API's PutObject/CopyObject, see server.ContentTypeMetadataKey) if
+// present, so the console agrees with what GetObject/HeadObject report for
+// the same object. Objects with no stored Content-Type (pre-existing
+// objects, externally-placed osfs files, multipart uploads -- see #188/#191)
+// fall back to the extension-based guess, same as before this existed.
+func resolvedContentType(obj s2.Object, ext string) string {
+	if ct, ok := obj.Metadata().Get(server.ContentTypeMetadataKey); ok {
+		return ct
+	}
+	return contentTypeByExt(ext)
+}
 
 // contentTypeByExt returns the MIME type for the given file extension.
 // It uses mime.TypeByExtension first, then falls back to a built-in map
@@ -66,7 +88,7 @@ func handleView(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = rc.Close() }()
 
-	ct := contentTypeByExt(path.Ext(objectName))
+	ct := resolvedContentType(obj, path.Ext(objectName))
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"%s\"", path.Base(objectName)))
 
@@ -92,14 +114,14 @@ func handleMeta(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ct := contentTypeByExt(path.Ext(objectName))
+	ct := resolvedContentType(obj, path.Ext(objectName))
 	resp := map[string]any{
 		"name":         path.Base(objectName),
 		"contentType":  ct,
 		"size":         obj.Length(),
 		"lastModified": obj.LastModified().Format("2006-01-02 15:04:05"),
 	}
-	if md := obj.Metadata(); len(md) > 0 {
+	if md := userMetadata(obj); len(md) > 0 {
 		resp["metadata"] = md
 	}
 
@@ -157,13 +179,13 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}{
 		Filename:     path.Base(objectName),
 		ViewURL:      viewURL,
-		ContentType:  contentTypeByExt(ext),
+		ContentType:  resolvedContentType(obj, ext),
 		Size:         obj.Length(),
 		LastModified: obj.LastModified().Format("2006-01-02 15:04:05"),
 		PreviewType:  previewType,
 		TextContent:  textContent,
 	}
-	if md := obj.Metadata(); len(md) > 0 {
+	if md := userMetadata(obj); len(md) > 0 {
 		data.Metadata = md
 	}
 
