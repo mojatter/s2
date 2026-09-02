@@ -18,6 +18,13 @@ const (
 	s2OwnerID          = "s2-id"
 	s2OwnerDisplayName = "s2-user"
 	s2Region           = "us-east-1"
+
+	// maxXMLRequestBody caps the size of an S3 XML request body (DeleteObjects,
+	// CompleteMultipartUpload). These carry a bounded key/part list -- S3 limits
+	// DeleteObjects to 1000 keys and a multipart upload to 10000 parts -- so a
+	// few MiB is generous, while an uncapped xml.Decoder would let a client grow
+	// the decoded slice until the process runs out of memory.
+	maxXMLRequestBody = 8 << 20 // 8 MiB
 )
 
 func writeXML(w http.ResponseWriter, status int, v interface{}) {
