@@ -278,10 +278,7 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write user metadata as x-amz-meta-* headers
-	for k, v := range obj.Metadata() {
-		if server.InternalMetadataKeys[k] {
-			continue
-		}
+	for k, v := range server.FilterInternalMetadata(obj.Metadata()) {
 		w.Header().Set("x-amz-meta-"+k, v)
 	}
 	w.Header().Set("Last-Modified", obj.LastModified().Format(http.TimeFormat))

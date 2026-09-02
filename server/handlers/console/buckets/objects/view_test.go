@@ -77,6 +77,24 @@ func (s *ViewTestSuite) TestHandleView() {
 		s.Equal("image/png", w.Header().Get("Content-Type"))
 	})
 
+	s.Run("stored Content-Type takes precedence over the extension guess", func() {
+		s.createBucket("view-ct")
+		md := s2.Metadata{server.ContentTypeMetadataKey: "application/json"}
+		// Extensionless key: contentTypeByExt(".") -- and even path.Ext("")
+		// -- would never guess "application/json" on its own, so a match
+		// here can only come from the stored metadata this test sets.
+		s.putObject("view-ct", "report", []byte("{}"), s2.WithMetadata(md))
+
+		req := httptest.NewRequest("GET", "/buckets/view-ct/view/report", nil)
+		req.SetPathValue("name", "view-ct")
+		req.SetPathValue("object", "report")
+		w := httptest.NewRecorder()
+		handleView(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		s.Equal("application/json", w.Header().Get("Content-Type"))
+	})
+
 	s.Run("nested path", func() {
 		s.createBucket("view-nest")
 		s.server.Buckets.CreateFolder(context.Background(), "view-nest", "a/b")
@@ -191,6 +209,22 @@ func (s *ViewTestSuite) TestHandleMeta() {
 		s.True(ok)
 		s.Equal("test", metadata["author"])
 		s.Equal("1", metadata["version"])
+	})
+
+	s.Run("stored Content-Type takes precedence over the extension guess", func() {
+		s.createBucket("meta-ct")
+		md := s2.Metadata{server.ContentTypeMetadataKey: "application/json"}
+		s.putObject("meta-ct", "report", []byte("{}"), s2.WithMetadata(md))
+
+		req := httptest.NewRequest("GET", "/buckets/meta-ct/meta/report", nil)
+		req.SetPathValue("name", "meta-ct")
+		req.SetPathValue("object", "report")
+		w := httptest.NewRecorder()
+		handleMeta(s.server, w, req)
+
+		var resp map[string]any
+		s.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+		s.Equal("application/json", resp["contentType"])
 	})
 
 	s.Run("no custom metadata omits field", func() {
