@@ -123,10 +123,10 @@ func (s *ViewTestSuite) TestContentTypeByExt() {
 	// macOS and Linux, so we only assert on properties that hold
 	// regardless of the platform.
 	testCases := []struct {
-		caseName      string
-		ext           string
-		wantNonEmpty  bool   // result must not be empty
-		wantContains  string // result must contain this substring (if non-empty)
+		caseName     string
+		ext          string
+		wantNonEmpty bool   // result must not be empty
+		wantContains string // result must contain this substring (if non-empty)
 	}{
 		{caseName: "Go source returns text", ext: ".go", wantNonEmpty: true, wantContains: "text/"},
 		{caseName: "JSON", ext: ".json", wantNonEmpty: true, wantContains: "json"},
@@ -207,6 +207,30 @@ func (s *ViewTestSuite) TestHandleMeta() {
 		s.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
 		_, hasMetadata := resp["metadata"]
 		s.False(hasMetadata)
+	})
+
+	s.Run("internal metadata keys are not exposed", func() {
+		s.createBucket("meta-internal")
+		md := s2.Metadata{
+			"author":                      "test",
+			server.EtagMetadataKey:        "should-not-leak",
+			server.ContentTypeMetadataKey: "should-not-leak",
+		}
+		s.putObject("meta-internal", "doc.txt", []byte("x"), s2.WithMetadata(md))
+
+		req := httptest.NewRequest("GET", "/buckets/meta-internal/meta/doc.txt", nil)
+		req.SetPathValue("name", "meta-internal")
+		req.SetPathValue("object", "doc.txt")
+		w := httptest.NewRecorder()
+		handleMeta(s.server, w, req)
+
+		var resp map[string]any
+		s.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+		metadata, ok := resp["metadata"].(map[string]any)
+		s.Require().True(ok)
+		s.Equal("test", metadata["author"])
+		s.NotContains(metadata, server.EtagMetadataKey)
+		s.NotContains(metadata, server.ContentTypeMetadataKey)
 	})
 
 	s.Run("nonexistent bucket", func() {

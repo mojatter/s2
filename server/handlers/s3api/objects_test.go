@@ -791,7 +791,30 @@ func (s *ObjectsTestSuite) TestContentType() {
 		s.Equal("text/html", getW.Header().Get("Content-Type"))
 	})
 
-	s.Run("PutObject with no Content-Type defaults to application/octet-stream", func() {
+	s.Run("PutObject with whitespace-only Content-Type defaults to binary/octet-stream", func() {
+		s.createBucket("ctw")
+
+		body := "data"
+		req := httptest.NewRequest("PUT", "/ctw/plain", strings.NewReader(body))
+		req.SetPathValue("bucket", "ctw")
+		req.SetPathValue("key", "plain")
+		req.ContentLength = int64(len(body))
+		req.Header.Set("Content-Type", "   ")
+		w := httptest.NewRecorder()
+		handlePutObject(s.server, w, req)
+		s.Equal(http.StatusOK, w.Code)
+
+		getReq := httptest.NewRequest("GET", "/ctw/plain", nil)
+		getReq.SetPathValue("bucket", "ctw")
+		getReq.SetPathValue("key", "plain")
+		getW := httptest.NewRecorder()
+		handleGetObject(s.server, getW, getReq)
+
+		s.Equal(http.StatusOK, getW.Code)
+		s.Equal(defaultContentType, getW.Header().Get("Content-Type"))
+	})
+
+	s.Run("PutObject with no Content-Type defaults to binary/octet-stream", func() {
 		s.createBucket("ctd")
 
 		body := "data"

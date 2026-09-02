@@ -11,9 +11,29 @@ import (
 	"path"
 	"strings"
 
+	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/server"
 	"github.com/mojatter/s2/server/middleware"
 )
+
+// userMetadata returns obj's metadata with s2's own internal bookkeeping
+// keys (server.InternalMetadataKeys -- ETag, Content-Type) filtered out, so
+// the metadata panel/preview page only ever shows what the client actually
+// set via x-amz-meta-*, matching the S3 API's GetObject behavior.
+func userMetadata(obj s2.Object) map[string]string {
+	md := obj.Metadata()
+	if len(md) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(md))
+	for k, v := range md {
+		if server.InternalMetadataKeys[k] {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
 
 // contentTypeByExt returns the MIME type for the given file extension.
 // It uses mime.TypeByExtension first, then falls back to a built-in map
@@ -99,7 +119,7 @@ func handleMeta(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		"size":         obj.Length(),
 		"lastModified": obj.LastModified().Format("2006-01-02 15:04:05"),
 	}
-	if md := obj.Metadata(); len(md) > 0 {
+	if md := userMetadata(obj); len(md) > 0 {
 		resp["metadata"] = md
 	}
 
@@ -163,7 +183,7 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		PreviewType:  previewType,
 		TextContent:  textContent,
 	}
-	if md := obj.Metadata(); len(md) > 0 {
+	if md := userMetadata(obj); len(md) > 0 {
 		data.Metadata = md
 	}
 

@@ -19,21 +19,33 @@ import (
 )
 
 const (
-	etagMetadataKey        = "s2-etag"
-	contentTypeMetadataKey = "s2-content-type"
+	// etagMetadataKey and contentTypeMetadataKey alias server.EtagMetadataKey/
+	// server.ContentTypeMetadataKey (single source of truth for the reserved
+	// key strings -- see server.InternalMetadataKeys, which the GetObject
+	// x-amz-meta-* filter below and the Web Console's metadata panel both
+	// consult so a new internal key only needs adding in one place).
+	etagMetadataKey        = server.EtagMetadataKey
+	contentTypeMetadataKey = server.ContentTypeMetadataKey
 	defaultMaxKeys         = 1000
 )
 
 // defaultContentType is the Content-Type stored for an object whose PutObject/
-// CopyObject request carried no Content-Type header, matching AWS S3's own
-// default -- S3 never guesses from the key's extension, at either PutObject
-// or GetObject time (see issue #186 for context).
-const defaultContentType = "application/octet-stream"
+// CopyObject request carried no Content-Type header. This matches the value
+// AWS S3's REST API itself falls back to (observable via `aws s3api
+// put-object` with no --content-type, which sends the request as-is with no
+// client-side default) -- distinct from "application/octet-stream", which
+// some AWS SDKs (e.g. Java, JS) inject client-side before the request ever
+// reaches S3, and which S3 itself never assigns. S3 never guesses from the
+// key's extension, at either PutObject or GetObject time (see issue #186 for
+// context).
+const defaultContentType = "binary/octet-stream"
 
 // resolveContentType returns r's Content-Type header, or defaultContentType
-// if the request didn't send one.
+// if the request didn't send one -- or sent only whitespace, which some
+// HTTP client libraries emit for "no MIME type resolved" and which would
+// otherwise round-trip as a blank Content-Type instead of the default.
 func resolveContentType(r *http.Request) string {
-	if ct := r.Header.Get("Content-Type"); ct != "" {
+	if ct := strings.TrimSpace(r.Header.Get("Content-Type")); ct != "" {
 		return ct
 	}
 	return defaultContentType
@@ -267,7 +279,7 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	// Write user metadata as x-amz-meta-* headers
 	for k, v := range obj.Metadata() {
-		if k == etagMetadataKey || k == contentTypeMetadataKey {
+		if server.InternalMetadataKeys[k] {
 			continue
 		}
 		w.Header().Set("x-amz-meta-"+k, v)
