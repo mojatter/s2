@@ -600,6 +600,7 @@ func handleDeleteObjects(s *server.Server, w http.ResponseWriter, r *http.Reques
 	bucketName := r.PathValue("bucket")
 
 	var req DeleteObjectsRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxXMLRequestBody)
 	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, "MalformedXML", "The XML you provided was not well-formed", http.StatusBadRequest)
 		return

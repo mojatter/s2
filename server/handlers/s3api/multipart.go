@@ -132,6 +132,7 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 	}
 
 	var req CompleteMultipartUploadRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxXMLRequestBody)
 	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, "MalformedXML", "The XML you provided was not well-formed", http.StatusBadRequest)
 		return
