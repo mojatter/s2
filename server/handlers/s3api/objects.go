@@ -19,9 +19,25 @@ import (
 )
 
 const (
-	etagMetadataKey = "s2-etag"
-	defaultMaxKeys  = 1000
+	etagMetadataKey        = "s2-etag"
+	contentTypeMetadataKey = "s2-content-type"
+	defaultMaxKeys         = 1000
 )
+
+// defaultContentType is the Content-Type stored for an object whose PutObject/
+// CopyObject request carried no Content-Type header, matching AWS S3's own
+// default -- S3 never guesses from the key's extension, at either PutObject
+// or GetObject time (see issue #186 for context).
+const defaultContentType = "application/octet-stream"
+
+// resolveContentType returns r's Content-Type header, or defaultContentType
+// if the request didn't send one.
+func resolveContentType(r *http.Request) string {
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		return ct
+	}
+	return defaultContentType
+}
 
 // splitS3Prefix splits an S3 prefix at the last "/" so the directory portion
 // can be passed to a directory-oriented List call and the remainder used as a
@@ -251,13 +267,23 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	// Write user metadata as x-amz-meta-* headers
 	for k, v := range obj.Metadata() {
-		if k == etagMetadataKey {
+		if k == etagMetadataKey || k == contentTypeMetadataKey {
 			continue
 		}
 		w.Header().Set("x-amz-meta-"+k, v)
 	}
 	w.Header().Set("Last-Modified", obj.LastModified().Format(http.TimeFormat))
 	w.Header().Set("ETag", objectETag(obj))
+	// Only objects written through single-request PutObject/CopyObject since
+	// #186 have a stored Content-Type. Older or externally-placed objects
+	// (e.g. files dropped directly onto an osfs root, see #188) and objects
+	// written via multipart upload (CreateMultipartUpload never captures
+	// Content-Type, see #191) have none, and this intentionally leaves the
+	// header unset for them rather than guessing from the key's extension --
+	// real S3 never does that at GetObject time.
+	if ct, ok := obj.Metadata().Get(contentTypeMetadataKey); ok {
+		w.Header().Set("Content-Type", ct)
+	}
 
 	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" && r.Method != http.MethodHead {
 		handleRangeRequest(w, r, obj, rangeHeader)
@@ -404,9 +430,10 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	etag := `"` + hex.EncodeToString(hash.Sum(nil)) + `"`
 
-	// Store ETag and user metadata
+	// Store ETag, Content-Type, and user metadata
 	md := parseMetadataHeaders(r)
 	md[etagMetadataKey] = etag
+	md[contentTypeMetadataKey] = resolveContentType(r)
 	if err := strg.PutMetadata(ctx, key, md); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
@@ -489,10 +516,15 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 	}
 	defer func() { _ = rc.Close() }()
 
-	// Determine metadata for the destination object.
+	// Determine metadata for the destination object. REPLACE re-derives
+	// Content-Type from this request the same way PutObject does (defaulting
+	// if absent); the non-REPLACE branch carries the source's stored
+	// Content-Type over via Clone(), matching AWS's own CopyObject default of
+	// preserving metadata unless MetadataDirective=REPLACE is specified.
 	var md s2.Metadata
 	if strings.EqualFold(r.Header.Get("x-amz-metadata-directive"), "REPLACE") {
 		md = parseMetadataHeaders(r)
+		md[contentTypeMetadataKey] = resolveContentType(r)
 	} else {
 		md = srcObj.Metadata().Clone()
 	}
