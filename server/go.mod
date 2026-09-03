@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.37
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.107.3
 	github.com/chromedp/chromedp v0.16.0
-	github.com/mojatter/s2 v0.13.0
+	github.com/mojatter/s2 v0.14.0
 	github.com/stretchr/testify v1.12.1
 )
 
