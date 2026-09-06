@@ -20,11 +20,7 @@ import (
 )
 
 const (
-	// etagMetadataKey and contentTypeMetadataKey alias server.EtagMetadataKey/
-	// server.ContentTypeMetadataKey (single source of truth for the reserved
-	// key strings -- see server.InternalMetadataKeys, which the GetObject
-	// x-amz-meta-* filter below and the Web Console's metadata panel both
-	// consult so a new internal key only needs adding in one place).
+	// Aliases for readability; the server package owns these values.
 	etagMetadataKey        = server.EtagMetadataKey
 	contentTypeMetadataKey = server.ContentTypeMetadataKey
 	defaultContentType     = server.DefaultContentType
