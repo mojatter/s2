@@ -24,9 +24,8 @@ func userMetadata(obj s2.Object) map[string]string {
 }
 
 // resolvedContentType returns obj's stored Content-Type, else a guess
-// from the key's extension. Unlike the S3 API (see setContentType in the
-// s3api package) it always ends with a concrete type: a browser renders
-// this response, and no Content-Type turns a preview into a download.
+// from the key's extension, else server.DefaultContentType. It guesses
+// more readily than the S3 API because a browser renders this response.
 func resolvedContentType(obj s2.Object, name string) string {
 	if ct, ok := obj.Metadata().Get(server.ContentTypeMetadataKey); ok {
 		return ct
@@ -34,7 +33,7 @@ func resolvedContentType(obj s2.Object, name string) string {
 	if ct := server.ContentTypeByExt(path.Ext(name)); ct != "" {
 		return ct
 	}
-	return "application/octet-stream"
+	return server.DefaultContentType
 }
 
 func handleView(s *server.Server, w http.ResponseWriter, r *http.Request) {

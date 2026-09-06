@@ -95,9 +95,9 @@ func (s *ViewTestSuite) TestHandleView() {
 		s.Equal("application/json", w.Header().Get("Content-Type"))
 	})
 
-	s.Run("unrecognized extension resolves to octet-stream", func() {
+	s.Run("unrecognized extension resolves to the default", func() {
 		// The console must hand the browser a type even when the
-		// extension says nothing, unlike the S3 API which stays silent.
+		// extension says nothing.
 		s.createBucket("view-unk")
 		s.putObject("view-unk", "notes.nopesuchtype", []byte("plain words"))
 
@@ -108,7 +108,7 @@ func (s *ViewTestSuite) TestHandleView() {
 		handleView(s.server, w, req)
 
 		s.Equal(http.StatusOK, w.Code)
-		s.Equal("application/octet-stream", w.Header().Get("Content-Type"))
+		s.Equal(server.DefaultContentType, w.Header().Get("Content-Type"))
 	})
 
 	s.Run("served objects are sandboxed", func() {
