@@ -3,7 +3,11 @@ package buckets
 import (
 	"bytes"
 	"context"
+	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
+	"encoding/hex"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"path"
 	"strings"
@@ -146,6 +150,24 @@ func handleCreateFolder(s *server.Server, w http.ResponseWriter, r *http.Request
 	writeObjectsFragment(ctx, w, s, name, prefix, "")
 }
 
+// uploadContentType returns the Content-Type to store for an uploaded
+// part. Browsers fill the part header from File.type, which is empty for
+// any extension the OS does not know (.log, .go, .conf) and reaches us as
+// a generic octet-stream; the key's extension is the better answer there.
+func uploadContentType(header *multipart.FileHeader, key string) string {
+	ct := strings.TrimSpace(header.Header.Get("Content-Type"))
+	if ct != "" && ct != "application/octet-stream" && ct != server.DefaultContentType {
+		return ct
+	}
+	if byExt := server.ContentTypeByExt(path.Ext(key)); byExt != "" {
+		return byExt
+	}
+	if ct != "" {
+		return ct
+	}
+	return server.DefaultContentType
+}
+
 func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue("name")
@@ -175,8 +197,20 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	if !server.DenyUnlessAllowedS3Action(w, server.UserFromContext(ctx), server.ActionPutObject, name, key) {
 		return
 	}
-	obj := s2.NewObjectReader(key, file, s2.MustUint64(header.Size))
-	if err := strg.Put(ctx, obj); err != nil {
+	// Record what PutObject records: no metadata at all means "placed in
+	// the storage root from outside" to GetObject (#188).
+	hash := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
+	body := io.NopCloser(io.TeeReader(file, hash))
+	if err := strg.Put(ctx, s2.NewObjectReader(key, body, s2.MustUint64(header.Size))); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	contentType := uploadContentType(header, key)
+	md := s2.Metadata{
+		server.EtagMetadataKey:        `"` + hex.EncodeToString(hash.Sum(nil)) + `"`,
+		server.ContentTypeMetadataKey: contentType,
+	}
+	if err := strg.PutMetadata(ctx, key, md); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

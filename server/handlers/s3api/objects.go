@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -19,26 +20,12 @@ import (
 )
 
 const (
-	// etagMetadataKey and contentTypeMetadataKey alias server.EtagMetadataKey/
-	// server.ContentTypeMetadataKey (single source of truth for the reserved
-	// key strings -- see server.InternalMetadataKeys, which the GetObject
-	// x-amz-meta-* filter below and the Web Console's metadata panel both
-	// consult so a new internal key only needs adding in one place).
+	// Aliases for readability; the server package owns these values.
 	etagMetadataKey        = server.EtagMetadataKey
 	contentTypeMetadataKey = server.ContentTypeMetadataKey
+	defaultContentType     = server.DefaultContentType
 	defaultMaxKeys         = 1000
 )
-
-// defaultContentType is the Content-Type stored for an object whose PutObject/
-// CopyObject request carried no Content-Type header. This matches the value
-// AWS S3's REST API itself falls back to (observable via `aws s3api
-// put-object` with no --content-type, which sends the request as-is with no
-// client-side default) -- distinct from "application/octet-stream", which
-// some AWS SDKs (e.g. Java, JS) inject client-side before the request ever
-// reaches S3, and which S3 itself never assigns. S3 never guesses from the
-// key's extension, at either PutObject or GetObject time (see issue #186 for
-// context).
-const defaultContentType = "binary/octet-stream"
 
 // resolveContentType returns r's Content-Type header, or defaultContentType
 // if the request didn't send one -- or sent only whitespace, which some
@@ -242,6 +229,35 @@ func handleListObjects(s *server.Server, w http.ResponseWriter, r *http.Request)
 	writeXML(w, http.StatusOK, buildListBucketResult(p, objs, prefixes, nextToken, isTruncated))
 }
 
+// isFSBackend reports whether storage type typ is one of the filesystem
+// backends, whose root can hold files that never went through s2.
+func isFSBackend(typ s2.Type) bool {
+	return typ == s2.TypeOSFS || typ == s2.TypeMemFS
+}
+
+// guessedContentType returns a Content-Type derived from key's extension,
+// and "" unless the object is one placed into a filesystem backend's root
+// from outside s2 -- the only kind s2 guesses about (#188).
+func guessedContentType(strg s2.Storage, obj s2.Object, key string) string {
+	if len(obj.Metadata()) > 0 || !isFSBackend(strg.Type()) {
+		return ""
+	}
+	return server.ContentTypeByExt(path.Ext(key))
+}
+
+// objectContentType returns the Content-Type GetObject/HeadObject answers
+// with for obj: its stored value if s2 recorded one (#186), else the
+// extension guess, else defaultContentType, as real S3 does.
+func objectContentType(strg s2.Storage, obj s2.Object, key string) string {
+	if ct, ok := obj.Metadata().Get(contentTypeMetadataKey); ok {
+		return ct
+	}
+	if ct := guessedContentType(strg, obj, key); ct != "" {
+		return ct
+	}
+	return defaultContentType
+}
+
 func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
@@ -283,16 +299,7 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Last-Modified", obj.LastModified().Format(http.TimeFormat))
 	w.Header().Set("ETag", objectETag(obj))
-	// Only objects written through single-request PutObject/CopyObject since
-	// #186 have a stored Content-Type. Older or externally-placed objects
-	// (e.g. files dropped directly onto an osfs root, see #188) and objects
-	// written via multipart upload (CreateMultipartUpload never captures
-	// Content-Type, see #191) have none, and this intentionally leaves the
-	// header unset for them rather than guessing from the key's extension --
-	// real S3 never does that at GetObject time.
-	if ct, ok := obj.Metadata().Get(contentTypeMetadataKey); ok {
-		w.Header().Set("Content-Type", ct)
-	}
+	w.Header().Set("Content-Type", objectContentType(strg, obj, key))
 
 	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" && r.Method != http.MethodHead {
 		handleRangeRequest(w, r, obj, rangeHeader)
@@ -536,6 +543,14 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 		md[contentTypeMetadataKey] = resolveContentType(r)
 	} else {
 		md = srcObj.Metadata().Clone()
+		if md == nil {
+			md = make(s2.Metadata)
+		}
+		// The copy carries an ETag, so it can never qualify for the
+		// guess itself; keep the source's answer.
+		if ct := guessedContentType(srcStrg, srcObj, srcKey); ct != "" {
+			md[contentTypeMetadataKey] = ct
+		}
 	}
 
 	// Write to destination
