@@ -406,7 +406,11 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 
 		ct, ok := obj.Metadata().Get(server.ContentTypeMetadataKey)
 		s.True(ok)
-		s.Contains(ct, "text/plain")
+		// The exact type depends on the host mime database (text/plain on
+		// a machine with no .log entry, text/x-log on one with it), so
+		// assert only that the extension, not the part header, decided.
+		s.NotEqual("application/octet-stream", ct)
+		s.Equal(server.ContentTypeByExt(".log"), ct)
 	})
 
 	s.Run("explicit deny on the exact filename is not bypassed by a wildcard allow", func() {
