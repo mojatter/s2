@@ -3,10 +3,12 @@ package buckets
 import (
 	"bytes"
 	"context"
+	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
 	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"net/url"
 	"os/exec"
 	"strings"
@@ -332,6 +334,80 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			}
 		})
 	}
+
+	s.Run("upload records the ETag and Content-Type the S3 API would", func() {
+		// Without these, a console upload is indistinguishable from a
+		// file placed in the storage root from outside, which GetObject
+		// answers for by guessing from the extension (see #188).
+		s.createBucket("upm")
+		content := []byte("<h1>hi</h1>")
+
+		body := &bytes.Buffer{}
+		mw := multipart.NewWriter(body)
+		s.Require().NoError(mw.WriteField("prefix", ""))
+		hdr := make(textproto.MIMEHeader)
+		hdr.Set("Content-Disposition", `form-data; name="file"; filename="page.html"`)
+		hdr.Set("Content-Type", "text/html")
+		fw, err := mw.CreatePart(hdr)
+		s.Require().NoError(err)
+		_, err = fw.Write(content)
+		s.Require().NoError(err)
+		s.Require().NoError(mw.Close())
+
+		req := httptest.NewRequest("POST", "/buckets/upm/upload", body)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		req.SetPathValue("name", "upm")
+		w := httptest.NewRecorder()
+		handleUploadFile(s.server, w, req)
+		s.Equal(http.StatusOK, w.Code)
+
+		strg, err := s.server.Buckets.Get(context.Background(), "upm")
+		s.Require().NoError(err)
+		obj, err := strg.Get(context.Background(), "page.html")
+		s.Require().NoError(err)
+
+		ct, ok := obj.Metadata().Get(server.ContentTypeMetadataKey)
+		s.True(ok)
+		s.Equal("text/html", ct)
+		etag, ok := obj.Metadata().Get(server.EtagMetadataKey)
+		s.True(ok)
+		s.Equal(fmt.Sprintf("%q", fmt.Sprintf("%x", md5.Sum(content))), etag)
+	})
+
+	s.Run("generic part Content-Type falls back to the extension", func() {
+		// Browsers send application/octet-stream for any extension the
+		// OS does not know, which would otherwise be stored verbatim and
+		// make the object download instead of open.
+		s.createBucket("upg")
+
+		body := &bytes.Buffer{}
+		mw := multipart.NewWriter(body)
+		s.Require().NoError(mw.WriteField("prefix", ""))
+		hdr := make(textproto.MIMEHeader)
+		hdr.Set("Content-Disposition", `form-data; name="file"; filename="app.log"`)
+		hdr.Set("Content-Type", "application/octet-stream")
+		fw, err := mw.CreatePart(hdr)
+		s.Require().NoError(err)
+		_, err = fw.Write([]byte("log line"))
+		s.Require().NoError(err)
+		s.Require().NoError(mw.Close())
+
+		req := httptest.NewRequest("POST", "/buckets/upg/upload", body)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		req.SetPathValue("name", "upg")
+		w := httptest.NewRecorder()
+		handleUploadFile(s.server, w, req)
+		s.Equal(http.StatusOK, w.Code)
+
+		strg, err := s.server.Buckets.Get(context.Background(), "upg")
+		s.Require().NoError(err)
+		obj, err := strg.Get(context.Background(), "app.log")
+		s.Require().NoError(err)
+
+		ct, ok := obj.Metadata().Get(server.ContentTypeMetadataKey)
+		s.True(ok)
+		s.Contains(ct, "text/plain")
+	})
 
 	s.Run("explicit deny on the exact filename is not bypassed by a wildcard allow", func() {
 		s.createBucket("upd")

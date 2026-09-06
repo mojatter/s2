@@ -2,6 +2,9 @@ package s3api
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 
 	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/server"
@@ -38,4 +41,24 @@ func (s *s3apiSuite) putObject(bucket, key, content string) {
 func (s *s3apiSuite) createBucket(name string) {
 	s.T().Helper()
 	s.Require().NoError(s.server.Buckets.Create(context.Background(), name))
+}
+
+// roundTrip drives target through a real server and returns the response,
+// body drained and closed. Unlike httptest.ResponseRecorder, this shows
+// what the client receives -- net/http's own Content-Type sniffing
+// included (#188).
+func (s *s3apiSuite) roundTrip(srv *server.Server, method, target string) *http.Response {
+	s.T().Helper()
+	ts := httptest.NewServer(srv.S3Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(method, ts.URL+target, nil)
+	s.Require().NoError(err)
+	resp, err := ts.Client().Do(req)
+	s.Require().NoError(err)
+	defer func() { _ = resp.Body.Close() }()
+
+	_, err = io.Copy(io.Discard, resp.Body)
+	s.Require().NoError(err)
+	return resp
 }

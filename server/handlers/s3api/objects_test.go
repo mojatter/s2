@@ -881,21 +881,111 @@ func (s *ObjectsTestSuite) TestContentType() {
 		s.Equal("application/json", headW.Header().Get("Content-Type"))
 	})
 
-	s.Run("object with no stored Content-Type (predates this feature) leaves the header unset", func() {
+	s.Run("object with no stored Content-Type falls back to the extension guess on osfs", func() {
 		s.createBucket("ctn")
 		// putObject bypasses handlePutObject entirely (direct storage write),
 		// so no s2-content-type metadata is ever recorded -- the same shape
 		// as a pre-existing or externally-placed osfs object (see #188).
-		s.putObject("ctn", "legacy.txt", "data")
+		s.putObject("ctn", "legacy.html", "<h1>hi</h1>")
 
-		getReq := httptest.NewRequest("GET", "/ctn/legacy.txt", nil)
-		getReq.SetPathValue("bucket", "ctn")
-		getReq.SetPathValue("key", "legacy.txt")
-		getW := httptest.NewRecorder()
-		handleGetObject(s.server, getW, getReq)
+		resp := s.roundTrip(s.server, http.MethodGet, "/ctn/legacy.html")
 
-		s.Equal(http.StatusOK, getW.Code)
-		s.Empty(getW.Header().Get("Content-Type"))
+		s.Equal(http.StatusOK, resp.StatusCode)
+		s.Contains(resp.Header.Get("Content-Type"), "text/html")
+	})
+
+	s.Run("object written through s2 without a Content-Type gets the default", func() {
+		// The multipart shape (#191): CompleteMultipartUpload records an
+		// ETag and no Content-Type. Metadata exists, so the object went
+		// through s2's write path and answers with S3's own default --
+		// guessing is only for files placed into the root from outside.
+		s.createBucket("ctnp")
+		s.putObject("ctnp", "part.txt", "data")
+		ctx := context.Background()
+		strg, err := s.server.Buckets.Get(ctx, "ctnp")
+		s.Require().NoError(err)
+		s.Require().NoError(strg.PutMetadata(ctx, "part.txt", s2.Metadata{etagMetadataKey: `"abc"`}))
+
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			resp := s.roundTrip(s.server, method, "/ctnp/part.txt")
+
+			s.Equal(http.StatusOK, resp.StatusCode, method)
+			s.Equal(defaultContentType, resp.Header.Get("Content-Type"), method)
+		}
+	})
+
+	s.Run("extension guess also applies to HEAD", func() {
+		s.createBucket("ctnh")
+		s.putObject("ctnh", "pic.png", "fake-png")
+
+		resp := s.roundTrip(s.server, http.MethodHead, "/ctnh/pic.png")
+
+		s.Equal(http.StatusOK, resp.StatusCode)
+		s.Equal("image/png", resp.Header.Get("Content-Type"))
+	})
+
+	s.Run("unrecognized extension answers with the default", func() {
+		s.createBucket("ctnu")
+		s.putObject("ctnu", "blob.nopesuchtype", "plain words")
+
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			resp := s.roundTrip(s.server, method, "/ctnu/blob.nopesuchtype")
+
+			s.Equal(http.StatusOK, resp.StatusCode, method)
+			s.Equal(defaultContentType, resp.Header.Get("Content-Type"), method)
+		}
+	})
+
+	s.Run("extensionless key answers with the default", func() {
+		// Setting the header explicitly is what keeps HEAD's answer equal
+		// to GET's here; net/http would otherwise sniff the GET body.
+		s.createBucket("ctne")
+		s.putObject("ctne", "LICENSE", "Copyright (c) 2026")
+
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			resp := s.roundTrip(s.server, method, "/ctne/LICENSE")
+
+			s.Equal(http.StatusOK, resp.StatusCode, method)
+			s.Equal(defaultContentType, resp.Header.Get("Content-Type"), method)
+		}
+	})
+
+	s.Run("memfs guesses too, being a filesystem backend", func() {
+		cfg := server.DefaultConfig()
+		cfg.Type = s2.TypeMemFS
+		srv, err := server.NewServer(context.Background(), cfg)
+		s.Require().NoError(err)
+		ctx := context.Background()
+		s.Require().NoError(srv.Buckets.Create(ctx, "ctnm"))
+		strg, err := srv.Buckets.Get(ctx, "ctnm")
+		s.Require().NoError(err)
+		s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("legacy.png", []byte("fake-png"))))
+
+		resp := s.roundTrip(srv, http.MethodGet, "/ctnm/legacy.png")
+
+		s.Equal(http.StatusOK, resp.StatusCode)
+		s.Equal("image/png", resp.Header.Get("Content-Type"))
+	})
+
+	s.Run("CopyObject preserves the extension guess of a metadata-less source", func() {
+		// The copy carries an ETag, so it can never qualify for the
+		// guess itself; handleCopyObject records the source's answer.
+		s.createBucket("ctcs")
+		s.createBucket("ctcd")
+		s.putObject("ctcs", "page.html", "<h1>hi</h1>")
+
+		copyReq := httptest.NewRequest("PUT", "/ctcd/page.html", nil)
+		copyReq.SetPathValue("bucket", "ctcd")
+		copyReq.SetPathValue("key", "page.html")
+		copyReq.Header.Set("x-amz-copy-source", "/ctcs/page.html")
+		copyW := httptest.NewRecorder()
+		handlePutObject(s.server, copyW, copyReq)
+		s.Equal(http.StatusOK, copyW.Code)
+
+		resp := s.roundTrip(s.server, http.MethodGet, "/ctcd/page.html")
+
+		s.Equal(http.StatusOK, resp.StatusCode)
+		s.Contains(resp.Header.Get("Content-Type"), "text/html")
 	})
 
 	s.Run("CopyObject without directive preserves source Content-Type", func() {
@@ -1703,3 +1793,44 @@ func BenchmarkHTTPPutObject(b *testing.B)      { benchHTTPPutObject(b, s2.TypeOS
 func BenchmarkHTTPGetObject(b *testing.B)      { benchHTTPGetObject(b, s2.TypeOSFS) }
 func BenchmarkHTTPPutObjectMemFS(b *testing.B) { benchHTTPPutObject(b, s2.TypeMemFS) }
 func BenchmarkHTTPGetObjectMemFS(b *testing.B) { benchHTTPGetObject(b, s2.TypeMemFS) }
+
+// typedStorage reports an arbitrary s2.Type. The embedded interface is
+// nil: setContentType only ever calls Type(), and a cloud backend cannot
+// be stood up in a unit test.
+type typedStorage struct {
+	s2.Storage
+	typ s2.Type
+}
+
+func (t typedStorage) Type() s2.Type { return t.typ }
+
+func (s *ObjectsTestSuite) TestObjectContentTypeSkipsCloudBackends() {
+	// Cloud backends drop the bucket's own Content-Type on read (see
+	// objectContentType); guessing here would hide that gap rather than
+	// fix it, so they answer with S3's default instead of the extension.
+	// The filesystem backends are in the table to show the same call
+	// guesses.
+	testCases := []struct {
+		caseName  string
+		typ       s2.Type
+		wantGuess bool
+	}{
+		{caseName: "osfs guesses", typ: s2.TypeOSFS, wantGuess: true},
+		{caseName: "memfs guesses", typ: s2.TypeMemFS, wantGuess: true},
+		{caseName: "s3 defaults", typ: s2.TypeS3},
+		{caseName: "gcs defaults", typ: s2.TypeGCS},
+		{caseName: "azblob defaults", typ: s2.TypeAzblob},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			obj := s2.NewObjectBytes("pic.png", []byte("fake-png"))
+			got := objectContentType(typedStorage{typ: tc.typ}, obj, obj.Name())
+
+			if tc.wantGuess {
+				s.Equal("image/png", got)
+				return
+			}
+			s.Equal(defaultContentType, got)
+		})
+	}
+}

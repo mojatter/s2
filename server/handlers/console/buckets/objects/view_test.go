@@ -80,9 +80,9 @@ func (s *ViewTestSuite) TestHandleView() {
 	s.Run("stored Content-Type takes precedence over the extension guess", func() {
 		s.createBucket("view-ct")
 		md := s2.Metadata{server.ContentTypeMetadataKey: "application/json"}
-		// Extensionless key: contentTypeByExt(".") -- and even path.Ext("")
-		// -- would never guess "application/json" on its own, so a match
-		// here can only come from the stored metadata this test sets.
+		// Neither the extension table nor a sniff of "{}" would ever
+		// answer "application/json" on its own, so a match here can only
+		// come from the stored metadata this test sets.
 		s.putObject("view-ct", "report", []byte("{}"), s2.WithMetadata(md))
 
 		req := httptest.NewRequest("GET", "/buckets/view-ct/view/report", nil)
@@ -93,6 +93,22 @@ func (s *ViewTestSuite) TestHandleView() {
 
 		s.Equal(http.StatusOK, w.Code)
 		s.Equal("application/json", w.Header().Get("Content-Type"))
+	})
+
+	s.Run("unrecognized extension resolves to octet-stream", func() {
+		// The console must hand the browser a type even when the
+		// extension says nothing, unlike the S3 API which stays silent.
+		s.createBucket("view-unk")
+		s.putObject("view-unk", "notes.nopesuchtype", []byte("plain words"))
+
+		req := httptest.NewRequest("GET", "/buckets/view-unk/view/notes.nopesuchtype", nil)
+		req.SetPathValue("name", "view-unk")
+		req.SetPathValue("object", "notes.nopesuchtype")
+		w := httptest.NewRecorder()
+		handleView(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		s.Equal("application/octet-stream", w.Header().Get("Content-Type"))
 	})
 
 	s.Run("nested path", func() {
@@ -131,39 +147,6 @@ func (s *ViewTestSuite) TestHandleView() {
 
 		s.Equal(http.StatusNotFound, w.Code)
 	})
-}
-
-// --- contentTypeByExt ---
-
-func (s *ViewTestSuite) TestContentTypeByExt() {
-	// contentTypeByExt tries mime.TypeByExtension first, then falls
-	// back to a built-in switch. The OS MIME database differs between
-	// macOS and Linux, so we only assert on properties that hold
-	// regardless of the platform.
-	testCases := []struct {
-		caseName     string
-		ext          string
-		wantNonEmpty bool   // result must not be empty
-		wantContains string // result must contain this substring (if non-empty)
-	}{
-		{caseName: "Go source returns text", ext: ".go", wantNonEmpty: true, wantContains: "text/"},
-		{caseName: "JSON", ext: ".json", wantNonEmpty: true, wantContains: "json"},
-		{caseName: "CSS", ext: ".css", wantNonEmpty: true, wantContains: "css"},
-		{caseName: "PNG image", ext: ".png", wantNonEmpty: true, wantContains: "image/png"},
-		{caseName: "WebP image", ext: ".webp", wantNonEmpty: true, wantContains: "image/webp"},
-		{caseName: "Wasm binary", ext: ".wasm", wantNonEmpty: true, wantContains: "wasm"},
-	}
-	for _, tc := range testCases {
-		s.Run(tc.caseName, func() {
-			got := contentTypeByExt(tc.ext)
-			if tc.wantNonEmpty {
-				s.NotEmpty(got)
-			}
-			if tc.wantContains != "" {
-				s.Contains(got, tc.wantContains)
-			}
-		})
-	}
 }
 
 // --- GET /buckets/{name}/meta/{object...} ---

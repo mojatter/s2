@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"mime"
 	"net/http"
 	"path"
 	"strings"
@@ -24,42 +23,16 @@ func userMetadata(obj s2.Object) map[string]string {
 	return server.FilterInternalMetadata(obj.Metadata())
 }
 
-// resolvedContentType returns obj's stored Content-Type (set via the S3
-// API's PutObject/CopyObject, see server.ContentTypeMetadataKey) if
-// present, so the console agrees with what GetObject/HeadObject report for
-// the same object. Objects with no stored Content-Type (pre-existing
-// objects, externally-placed osfs files, multipart uploads -- see #188/#191)
-// fall back to the extension-based guess, same as before this existed.
-func resolvedContentType(obj s2.Object, ext string) string {
+// resolvedContentType returns obj's stored Content-Type, else a guess
+// from the key's extension. Unlike the S3 API (see setContentType in the
+// s3api package) it always ends with a concrete type: a browser renders
+// this response, and no Content-Type turns a preview into a download.
+func resolvedContentType(obj s2.Object, name string) string {
 	if ct, ok := obj.Metadata().Get(server.ContentTypeMetadataKey); ok {
 		return ct
 	}
-	return contentTypeByExt(ext)
-}
-
-// contentTypeByExt returns the MIME type for the given file extension.
-// It uses mime.TypeByExtension first, then falls back to a built-in map
-// for common types that the OS mime database may not cover.
-func contentTypeByExt(ext string) string {
-	if ct := mime.TypeByExtension(ext); ct != "" {
+	if ct := server.ContentTypeByExt(path.Ext(name)); ct != "" {
 		return ct
-	}
-	ext = strings.ToLower(ext)
-	switch ext {
-	case ".md":
-		return "text/plain; charset=utf-8"
-	case ".log", ".cfg", ".conf", ".ini":
-		return "text/plain; charset=utf-8"
-	case ".go", ".py", ".rb", ".rs", ".java", ".c", ".h", ".cpp", ".ts":
-		return "text/plain; charset=utf-8"
-	case ".sh", ".makefile", ".dockerfile":
-		return "text/plain; charset=utf-8"
-	case ".webp":
-		return "image/webp"
-	case ".flac":
-		return "audio/flac"
-	case ".wasm":
-		return "application/wasm"
 	}
 	return "application/octet-stream"
 }
@@ -88,8 +61,7 @@ func handleView(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = rc.Close() }()
 
-	ct := resolvedContentType(obj, path.Ext(objectName))
-	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Content-Type", resolvedContentType(obj, objectName))
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"%s\"", path.Base(objectName)))
 
 	if _, err := io.Copy(w, rc); err != nil {
@@ -114,7 +86,7 @@ func handleMeta(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ct := resolvedContentType(obj, path.Ext(objectName))
+	ct := resolvedContentType(obj, objectName)
 	resp := map[string]any{
 		"name":         path.Base(objectName),
 		"contentType":  ct,
@@ -179,7 +151,7 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}{
 		Filename:     path.Base(objectName),
 		ViewURL:      viewURL,
-		ContentType:  resolvedContentType(obj, ext),
+		ContentType:  resolvedContentType(obj, objectName),
 		Size:         obj.Length(),
 		LastModified: obj.LastModified().Format("2006-01-02 15:04:05"),
 		PreviewType:  previewType,
