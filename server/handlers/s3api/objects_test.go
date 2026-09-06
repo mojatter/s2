@@ -988,6 +988,31 @@ func (s *ObjectsTestSuite) TestContentType() {
 		s.Contains(resp.Header.Get("Content-Type"), "text/html")
 	})
 
+	s.Run("CopyObject records only the guess, never the default", func() {
+		// Persisting binary/octet-stream here would outlive the reason
+		// for it: once a backend surfaces its own Content-Type (#198),
+		// the stamped default would win over it forever.
+		s.createBucket("ctcn")
+		s.createBucket("ctcnd")
+		s.putObject("ctcn", "blob.nopesuchtype", "data")
+
+		copyReq := httptest.NewRequest("PUT", "/ctcnd/blob.nopesuchtype", nil)
+		copyReq.SetPathValue("bucket", "ctcnd")
+		copyReq.SetPathValue("key", "blob.nopesuchtype")
+		copyReq.Header.Set("x-amz-copy-source", "/ctcn/blob.nopesuchtype")
+		copyW := httptest.NewRecorder()
+		handlePutObject(s.server, copyW, copyReq)
+		s.Equal(http.StatusOK, copyW.Code)
+
+		ctx := context.Background()
+		strg, err := s.server.Buckets.Get(ctx, "ctcnd")
+		s.Require().NoError(err)
+		obj, err := strg.Get(ctx, "blob.nopesuchtype")
+		s.Require().NoError(err)
+		_, ok := obj.Metadata().Get(contentTypeMetadataKey)
+		s.False(ok, "no Content-Type should have been stamped on the copy")
+	})
+
 	s.Run("CopyObject without directive preserves source Content-Type", func() {
 		s.createBucket("ctc")
 
@@ -1795,7 +1820,7 @@ func BenchmarkHTTPPutObjectMemFS(b *testing.B) { benchHTTPPutObject(b, s2.TypeMe
 func BenchmarkHTTPGetObjectMemFS(b *testing.B) { benchHTTPGetObject(b, s2.TypeMemFS) }
 
 // typedStorage reports an arbitrary s2.Type. The embedded interface is
-// nil: setContentType only ever calls Type(), and a cloud backend cannot
+// nil: objectContentType only ever calls Type(), and a cloud backend cannot
 // be stood up in a unit test.
 type typedStorage struct {
 	s2.Storage

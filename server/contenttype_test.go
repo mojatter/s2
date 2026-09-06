@@ -12,9 +12,8 @@ func TestContentTypeByExt(t *testing.T) {
 	// macOS and Linux, so we only assert on properties that hold
 	// regardless of the platform.
 	//
-	// The empty result for an unrecognized extension is what lets the S3
-	// API answer with no Content-Type at all (see setContentType in the
-	// s3api package).
+	// The empty result for an unrecognized extension is what sends a
+	// caller on to its own fallback.
 	testCases := []struct {
 		caseName     string
 		ext          string

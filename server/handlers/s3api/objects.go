@@ -235,20 +235,25 @@ func isFSBackend(typ s2.Type) bool {
 	return typ == s2.TypeOSFS || typ == s2.TypeMemFS
 }
 
+// guessedContentType returns a Content-Type derived from key's extension,
+// and "" unless the object is one placed into a filesystem backend's root
+// from outside s2 -- the only kind s2 guesses about (#188).
+func guessedContentType(strg s2.Storage, obj s2.Object, key string) string {
+	if len(obj.Metadata()) > 0 || !isFSBackend(strg.Type()) {
+		return ""
+	}
+	return server.ContentTypeByExt(path.Ext(key))
+}
+
 // objectContentType returns the Content-Type GetObject/HeadObject answers
-// with for obj. Anything s2 wrote answers with its stored value (#186),
-// or with defaultContentType when it stored none, as real S3 does. Only
-// a file placed into a filesystem backend's root from outside carries no
-// metadata at all, and its extension answers instead (#188).
+// with for obj: its stored value if s2 recorded one (#186), else the
+// extension guess, else defaultContentType, as real S3 does.
 func objectContentType(strg s2.Storage, obj s2.Object, key string) string {
-	md := obj.Metadata()
-	if ct, ok := md.Get(contentTypeMetadataKey); ok {
+	if ct, ok := obj.Metadata().Get(contentTypeMetadataKey); ok {
 		return ct
 	}
-	if len(md) == 0 && isFSBackend(strg.Type()) {
-		if ct := server.ContentTypeByExt(path.Ext(key)); ct != "" {
-			return ct
-		}
+	if ct := guessedContentType(strg, obj, key); ct != "" {
+		return ct
 	}
 	return defaultContentType
 }
@@ -541,11 +546,10 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 		if md == nil {
 			md = make(s2.Metadata)
 		}
-		if _, ok := md.Get(contentTypeMetadataKey); !ok {
-			// The source may be answering with a guess from its key
-			// (#188). The copy carries an ETag, so it would never
-			// qualify for that guess; record the answer instead.
-			md[contentTypeMetadataKey] = objectContentType(srcStrg, srcObj, srcKey)
+		// The copy carries an ETag, so it can never qualify for the
+		// guess itself; keep the source's answer.
+		if ct := guessedContentType(srcStrg, srcObj, srcKey); ct != "" {
+			md[contentTypeMetadataKey] = ct
 		}
 	}
 
