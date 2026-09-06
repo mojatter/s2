@@ -63,6 +63,9 @@ func handleView(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", resolvedContentType(obj, objectName))
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"%s\"", path.Base(objectName)))
+	// The type served here is the uploader's, so an object stored as
+	// text/html would otherwise run on the console origin (#199).
+	w.Header().Set("Content-Security-Policy", "sandbox")
 
 	if _, err := io.Copy(w, rc); err != nil {
 		slog.Error("Failed to copy object content", "error", err)

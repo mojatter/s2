@@ -111,6 +111,22 @@ func (s *ViewTestSuite) TestHandleView() {
 		s.Equal("application/octet-stream", w.Header().Get("Content-Type"))
 	})
 
+	s.Run("served objects are sandboxed", func() {
+		// The stored Content-Type is the uploader's, and the preview
+		// modal links straight here (#199).
+		s.createBucket("view-csp")
+		s.putObject("view-csp", "page.html", []byte("<h1>hi</h1>"))
+
+		req := httptest.NewRequest("GET", "/buckets/view-csp/view/page.html", nil)
+		req.SetPathValue("name", "view-csp")
+		req.SetPathValue("object", "page.html")
+		w := httptest.NewRecorder()
+		handleView(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+		s.Equal("sandbox", w.Header().Get("Content-Security-Policy"))
+	})
+
 	s.Run("nested path", func() {
 		s.createBucket("view-nest")
 		s.server.Buckets.CreateFolder(context.Background(), "view-nest", "a/b")
