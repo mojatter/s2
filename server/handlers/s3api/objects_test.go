@@ -1069,6 +1069,45 @@ func (s *ObjectsTestSuite) TestDeleteObjects() {
 		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
 		s.Len(result.Deleted, 1)
 	})
+
+	s.Run("oversized body is rejected with EntityTooLarge", func() {
+		// A DeleteObjects body is parsed with a streaming xml.Decoder, which
+		// would otherwise grow req.Objects until the process runs out of
+		// memory. MaxBytesReader must reject a body over the cap, and the
+		// handler must surface that as 413 EntityTooLarge (not MalformedXML),
+		// matching S3's behavior for this failure mode.
+		s.createBucket("bomb")
+
+		var b strings.Builder
+		b.WriteString("<Delete>")
+		entry := "<Object><Key>" + strings.Repeat("k", 64) + "</Key></Object>"
+		for b.Len() < 12<<20 { // ~12 MiB, over maxXMLRequestBody (8 MiB)
+			b.WriteString(entry)
+		}
+		b.WriteString("</Delete>")
+
+		req := httptest.NewRequest("POST", "/bomb?delete", strings.NewReader(b.String()))
+		req.SetPathValue("bucket", "bomb")
+		w := httptest.NewRecorder()
+		handleDeleteObjects(s.server, w, req)
+
+		s.Equal(http.StatusRequestEntityTooLarge, w.Code)
+		var errResp ErrorResponse
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+		s.Equal("EntityTooLarge", errResp.Code)
+	})
+
+	s.Run("small body under the cap still works", func() {
+		s.putObject("okdel", "a.txt", "1")
+
+		body := `<Delete><Object><Key>a.txt</Key></Object></Delete>`
+		req := httptest.NewRequest("POST", "/okdel?delete", strings.NewReader(body))
+		req.SetPathValue("bucket", "okdel")
+		w := httptest.NewRecorder()
+		handleDeleteObjects(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+	})
 }
 
 // --- Range requests ---

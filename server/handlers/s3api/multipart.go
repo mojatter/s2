@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -134,6 +135,11 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 	var req CompleteMultipartUploadRequest
 	r.Body = http.MaxBytesReader(w, r.Body, maxXMLRequestBody)
 	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, r, "EntityTooLarge", fmt.Sprintf("Your proposed upload exceeds the maximum allowed size (%d bytes)", maxXMLRequestBody), http.StatusRequestEntityTooLarge)
+			return
+		}
 		writeError(w, r, "MalformedXML", "The XML you provided was not well-formed", http.StatusBadRequest)
 		return
 	}
