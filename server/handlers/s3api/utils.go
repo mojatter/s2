@@ -2,6 +2,7 @@ package s3api
 
 import (
 	"bufio"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -25,7 +26,25 @@ const (
 	// few MiB is generous, while an uncapped xml.Decoder would let a client grow
 	// the decoded slice until the process runs out of memory.
 	maxXMLRequestBody = 8 << 20 // 8 MiB
+
+	maxUploadParts = 10000 // S3's per-upload part ceiling
 )
+
+// decodeXMLBody decodes a capped XML request body, writing the S3 error
+// response itself on failure. It reports whether v was decoded.
+func decodeXMLBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxXMLRequestBody)
+	if err := xml.NewDecoder(r.Body).Decode(v); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeError(w, r, "MaxMessageLengthExceeded", fmt.Sprintf("Your request was too big (maximum %d bytes)", maxXMLRequestBody), http.StatusBadRequest)
+			return false
+		}
+		writeError(w, r, "MalformedXML", "The XML you provided was not well-formed", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
 
 func writeXML(w http.ResponseWriter, status int, v interface{}) {
 	server.WriteXML(w, status, v)

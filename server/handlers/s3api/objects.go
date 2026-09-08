@@ -4,8 +4,6 @@ import (
 	"context"
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
 	"encoding/hex"
-	"encoding/xml"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -629,14 +627,7 @@ func handleDeleteObjects(s *server.Server, w http.ResponseWriter, r *http.Reques
 	bucketName := r.PathValue("bucket")
 
 	var req DeleteObjectsRequest
-	r.Body = http.MaxBytesReader(w, r.Body, maxXMLRequestBody)
-	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			writeError(w, r, "EntityTooLarge", fmt.Sprintf("Your proposed upload exceeds the maximum allowed size (%d bytes)", maxXMLRequestBody), http.StatusRequestEntityTooLarge)
-			return
-		}
-		writeError(w, r, "MalformedXML", "The XML you provided was not well-formed", http.StatusBadRequest)
+	if !decodeXMLBody(w, r, &req) {
 		return
 	}
 	if len(req.Objects) > maxObjectKeys {
