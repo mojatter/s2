@@ -223,6 +223,44 @@ func (s *MultipartTestSuite) storage(bucket string) s2.Storage {
 	return strg
 }
 
+// smuggledInternalKeys sends every reserved key as an x-amz-meta-* header.
+func smuggledInternalKeys() http.Header {
+	h := http.Header{}
+	for k := range server.InternalMetadataKeys {
+		h.Set(metaHeaderPrefix+k, "smuggled")
+	}
+	return h
+}
+
+// An absent Content-Type stays unstored so the console can still guess.
+func (s *MultipartTestSuite) TestCreateMultipartUploadLeavesAbsentContentTypeUnstored() {
+	testCases := []struct {
+		caseName string
+		headers  http.Header
+	}{
+		{caseName: "no header"},
+		{caseName: "whitespace-only header", headers: http.Header{"Content-Type": {"   "}}},
+		{
+			// Derived from the reserved set, so a key added to it is
+			// covered here rather than silently going untested.
+			caseName: "reserved keys smuggled through x-amz-meta-*",
+			headers:  smuggledInternalKeys(),
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.createBucket("mp-noct")
+			uploadID := s.initiateUpload("mp-noct", "movie.mp4", tc.headers)
+
+			obj, err := s.storage("mp-noct").Get(context.Background(), manifestKey(uploadID))
+			s.Require().NoError(err)
+			for k := range server.InternalMetadataKeys {
+				s.NotContains(obj.Metadata(), k)
+			}
+		})
+	}
+}
+
 // failingStorage fails every Get; uploadMetadata calls nothing else.
 type failingStorage struct {
 	s2.Storage

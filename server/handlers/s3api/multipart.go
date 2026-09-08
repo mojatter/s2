@@ -104,7 +104,14 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 	// S3 takes the object's headers from the initiate request. Record them
 	// on the manifest's own metadata, which Put persists in the same call.
 	md := parseMetadataHeaders(r)
-	md[contentTypeMetadataKey] = resolveContentType(r)
+	// The store below is conditional, so x-amz-meta-s2-content-type would
+	// otherwise reach the reserved key it shares a namespace with (#192).
+	dropInternalMetadata(md)
+	// An absent Content-Type stays unstored: GetObject answers with the
+	// default either way, and the console can still guess from the key.
+	if ct := requestContentType(r); ct != "" {
+		md[contentTypeMetadataKey] = ct
+	}
 	if err := strg.Put(ctx, s2.NewObjectBytes(manifestKey(uploadID), nil, s2.WithMetadata(md))); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
