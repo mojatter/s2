@@ -1,6 +1,7 @@
 package s3api
 
 import (
+	"context"
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible multipart ETag
 	"crypto/rand"
 	"encoding/binary"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -32,13 +34,33 @@ func filterMultipart(objs []s2.Object) []s2.Object {
 	return out
 }
 
-// uploadPrefix is the key prefix holding one upload's parts.
+// uploadPrefix is the key prefix holding one upload's parts and manifest.
 func uploadPrefix(uploadID string) string {
 	return multipartPrefix + uploadID + "/"
 }
 
 func partKey(uploadID string, partNumber int) string {
 	return fmt.Sprintf("%s%05d", uploadPrefix(uploadID), partNumber)
+}
+
+// manifestKey names the zero-length object whose metadata carries the
+// initiate request's headers. Part keys are digits, so it cannot collide.
+func manifestKey(uploadID string) string {
+	return uploadPrefix(uploadID) + "manifest"
+}
+
+// uploadMetadata returns the metadata CreateMultipartUpload recorded. An
+// upload initiated before manifests existed has none, and falls back to
+// the default Content-Type rather than failing.
+func uploadMetadata(ctx context.Context, strg s2.Storage, uploadID string) s2.Metadata {
+	md := make(s2.Metadata)
+	if obj, err := strg.Get(ctx, manifestKey(uploadID)); err == nil {
+		maps.Copy(md, obj.Metadata())
+	}
+	if _, ok := md.Get(contentTypeMetadataKey); !ok {
+		md[contentTypeMetadataKey] = defaultContentType
+	}
+	return md
 }
 
 // newUploadID generates a 16-byte upload ID: 4 bytes of elapsed seconds
@@ -57,7 +79,8 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 	bucketName := r.PathValue("bucket")
 	key := r.PathValue("key")
 
-	if _, err := s.Buckets.Get(ctx, bucketName); err != nil {
+	strg, err := s.Buckets.Get(ctx, bucketName)
+	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
@@ -66,6 +89,16 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 	uploadID, err := newUploadID(s.StartedAt)
 	if err != nil {
 		writeError(w, r, "InternalError", "Failed to generate upload ID", http.StatusInternalServerError)
+		return
+	}
+
+	// S3 takes the object's headers from the initiate request. Record them
+	// on the manifest's own metadata, which Put persists in the same call.
+	md := parseMetadataHeaders(r)
+	md[contentTypeMetadataKey] = resolveContentType(r)
+	if err := strg.Put(ctx, s2.NewObjectBytes(manifestKey(uploadID), nil, s2.WithMetadata(md))); err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
 		return
 	}
 
@@ -174,6 +207,10 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 		totalLen += obj.Length()
 	}
 
+	// This request carries no headers of its own; they were recorded at
+	// initiate time.
+	md := uploadMetadata(ctx, strg, uploadID)
+
 	// Stream all parts through a single reader, tee-ing each part into its own
 	// MD5 hash as it flows by. This avoids buffering the assembled object in
 	// memory — critical for the memfs backend, and a peak-memory win for all
@@ -181,7 +218,7 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 	// + "-" + partCount; we collect the per-part MD5s after Put has drained
 	// the reader.
 	pr := &partsReader{parts: partObjs}
-	finalObj := s2.NewObjectReader(key, pr, totalLen)
+	finalObj := s2.NewObjectReader(key, pr, totalLen, s2.WithMetadata(md))
 	if err := strg.Put(ctx, finalObj); err != nil {
 		_ = pr.Close()
 		code, msg, status := s2ErrorToS3Error(err)
@@ -191,12 +228,16 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 
 	combined := md5.Sum(pr.partMD5s) // #nosec G401 -- MD5 is required for S3-compatible multipart ETag
 	etag := `"` + hex.EncodeToString(combined[:]) + `-` + strconv.Itoa(len(req.Parts)) + `"`
-	_ = strg.PutMetadata(ctx, key, s2.Metadata{etagMetadataKey: etag})
-
-	// Clean up part objects
-	for _, p := range req.Parts {
-		_ = strg.Delete(ctx, partKey(uploadID, p.PartNumber))
+	md[etagMetadataKey] = etag
+	if err := strg.PutMetadata(ctx, key, md); err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
 	}
+
+	// Drop the whole tree: deleting the listed parts one by one left the
+	// manifest and any unlisted part behind.
+	_ = strg.DeleteRecursive(ctx, uploadPrefix(uploadID))
 
 	writeXML(w, http.StatusOK, CompleteMultipartUploadResult{
 		Location: "/" + bucketName + "/" + key,

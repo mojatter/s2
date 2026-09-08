@@ -1,8 +1,10 @@
 package s3api
 
 import (
+	"context"
 	"crypto/md5" // #nosec G501 -- MD5 is used here only to mirror S3 multipart ETag semantics under test.
 	"encoding/xml"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -142,6 +144,193 @@ func (s *MultipartTestSuite) TestCompleteMultipartUploadRejects() {
 		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
 		s.Equal("MaxMessageLengthExceeded", errResp.Code)
 	})
+}
+
+// initiateUpload returns the upload ID for a create request carrying headers.
+func (s *MultipartTestSuite) initiateUpload(bucket, key string, headers http.Header) string {
+	s.T().Helper()
+
+	req := httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploads", nil)
+	req.SetPathValue("bucket", bucket)
+	req.SetPathValue("key", key)
+	for name, values := range headers {
+		req.Header[name] = values
+	}
+	w := httptest.NewRecorder()
+	handleCreateMultipartUpload(s.server, w, req)
+	s.Require().Equal(http.StatusOK, w.Code)
+
+	var created InitiateMultipartUploadResult
+	s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &created))
+	s.Require().NotEmpty(created.UploadID)
+	return created.UploadID
+}
+
+func (s *MultipartTestSuite) uploadPart(bucket, key, uploadID string, partNumber int, body string) {
+	s.T().Helper()
+
+	target := fmt.Sprintf("/%s/%s?partNumber=%d&uploadId=%s", bucket, key, partNumber, uploadID)
+	req := httptest.NewRequest("PUT", target, strings.NewReader(body))
+	req.SetPathValue("bucket", bucket)
+	req.SetPathValue("key", key)
+	req.ContentLength = int64(len(body))
+	w := httptest.NewRecorder()
+	handleUploadPart(s.server, w, req)
+	s.Require().Equal(http.StatusOK, w.Code)
+}
+
+// completeUpload assembles partNumbers into the final object.
+func (s *MultipartTestSuite) completeUpload(bucket, key, uploadID string, partNumbers ...int) {
+	s.T().Helper()
+
+	var body strings.Builder
+	body.WriteString("<CompleteMultipartUpload>")
+	for _, n := range partNumbers {
+		fmt.Fprintf(&body, "<Part><PartNumber>%d</PartNumber><ETag>x</ETag></Part>", n)
+	}
+	body.WriteString("</CompleteMultipartUpload>")
+
+	req := httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploadId="+uploadID, strings.NewReader(body.String()))
+	req.SetPathValue("bucket", bucket)
+	req.SetPathValue("key", key)
+	w := httptest.NewRecorder()
+	handleCompleteMultipartUpload(s.server, w, req)
+	s.Require().Equal(http.StatusOK, w.Code, w.Body.String())
+}
+
+// getObject reads the object back through the handler that has to surface
+// the recorded metadata.
+func (s *MultipartTestSuite) getObject(bucket, key string) *httptest.ResponseRecorder {
+	s.T().Helper()
+
+	req := httptest.NewRequest("GET", "/"+bucket+"/"+key, nil)
+	req.SetPathValue("bucket", bucket)
+	req.SetPathValue("key", key)
+	w := httptest.NewRecorder()
+	handleGetObject(s.server, w, req)
+	s.Require().Equal(http.StatusOK, w.Code)
+	return w
+}
+
+func (s *MultipartTestSuite) storage(bucket string) s2.Storage {
+	s.T().Helper()
+
+	strg, err := s.server.Buckets.Get(context.Background(), bucket)
+	s.Require().NoError(err)
+	return strg
+}
+
+func (s *MultipartTestSuite) TestCreateMultipartUploadRecordsMetadata() {
+	s.createBucket("mp-manifest")
+	uploadID := s.initiateUpload("mp-manifest", "file.bin", http.Header{
+		"Content-Type":      {"video/mp4"},
+		"X-Amz-Meta-Author": {"uz"},
+	})
+
+	obj, err := s.storage("mp-manifest").Get(context.Background(), manifestKey(uploadID))
+	s.Require().NoError(err)
+	s.Equal("video/mp4", obj.Metadata()[contentTypeMetadataKey])
+	s.Equal("uz", obj.Metadata()["author"])
+	s.Zero(obj.Length())
+}
+
+func (s *MultipartTestSuite) TestCompleteMultipartUploadCarriesInitiateMetadata() {
+	testCases := []struct {
+		caseName        string
+		headers         http.Header
+		wantContentType string
+		wantMeta        map[string]string
+	}{
+		{
+			caseName: "content type and user metadata",
+			headers: http.Header{
+				"Content-Type":      {"video/mp4"},
+				"X-Amz-Meta-Author": {"uz"},
+				"X-Amz-Meta-Origin": {"camera"},
+			},
+			wantContentType: "video/mp4",
+			wantMeta:        map[string]string{"author": "uz", "origin": "camera"},
+		},
+		{
+			caseName:        "no content type falls back to the default",
+			wantContentType: defaultContentType,
+		},
+		{
+			caseName:        "whitespace-only content type falls back to the default",
+			headers:         http.Header{"Content-Type": {"   "}},
+			wantContentType: defaultContentType,
+		},
+		{
+			caseName:        "user metadata without a content type",
+			headers:         http.Header{"X-Amz-Meta-Author": {"uz"}},
+			wantContentType: defaultContentType,
+			wantMeta:        map[string]string{"author": "uz"},
+		},
+	}
+	for i, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			// A key per row: rows must not read each other's object.
+			bucket, key := "mp-meta", fmt.Sprintf("movie-%d.bin", i)
+			s.createBucket(bucket)
+
+			uploadID := s.initiateUpload(bucket, key, tc.headers)
+			s.uploadPart(bucket, key, uploadID, 1, "hello ")
+			s.uploadPart(bucket, key, uploadID, 2, "world")
+			s.completeUpload(bucket, key, uploadID, 1, 2)
+
+			w := s.getObject(bucket, key)
+			s.Equal("hello world", w.Body.String())
+			s.Equal(tc.wantContentType, w.Header().Get("Content-Type"))
+			for name, want := range tc.wantMeta {
+				s.Equal(want, w.Header().Get("x-amz-meta-"+name))
+			}
+			// The ETag survives alongside the recorded metadata.
+			s.Regexp(`^"[0-9a-f]{32}-2"$`, w.Header().Get("ETag"))
+			// s2's own bookkeeping keys must not leak as user metadata.
+			s.Empty(w.Header().Get("x-amz-meta-" + contentTypeMetadataKey))
+			s.Empty(w.Header().Get("x-amz-meta-" + etagMetadataKey))
+		})
+	}
+}
+
+// An upload in flight across a server upgrade has no manifest.
+func (s *MultipartTestSuite) TestCompleteMultipartUploadWithoutManifest() {
+	const bucket, key = "mp-nomanifest", "file.bin"
+	s.createBucket(bucket)
+
+	uploadID := s.initiateUpload(bucket, key, http.Header{"Content-Type": {"video/mp4"}})
+	s.uploadPart(bucket, key, uploadID, 1, "hello")
+	s.Require().NoError(s.storage(bucket).Delete(context.Background(), manifestKey(uploadID)))
+
+	s.completeUpload(bucket, key, uploadID, 1)
+
+	w := s.getObject(bucket, key)
+	s.Equal("hello", w.Body.String())
+	s.Equal(defaultContentType, w.Header().Get("Content-Type"))
+}
+
+// Complete used to delete only the parts it was given (#202).
+func (s *MultipartTestSuite) TestCompleteMultipartUploadClearsTheUploadTree() {
+	const bucket, key = "mp-cleanup", "file.bin"
+	s.createBucket(bucket)
+
+	uploadID := s.initiateUpload(bucket, key, nil)
+	s.uploadPart(bucket, key, uploadID, 1, "hello")
+	s.uploadPart(bucket, key, uploadID, 2, "orphan")
+	s.completeUpload(bucket, key, uploadID, 1)
+
+	ctx := context.Background()
+	strg := s.storage(bucket)
+	for _, name := range []string{
+		manifestKey(uploadID),
+		partKey(uploadID, 1),
+		partKey(uploadID, 2),
+		multipartPrefix + uploadID,
+	} {
+		exists, err := strg.Exists(ctx, name)
+		s.Require().NoError(err)
+		s.Falsef(exists, "%s should have been removed", name)
+	}
 }
 
 func TestPartsReader(t *testing.T) {
