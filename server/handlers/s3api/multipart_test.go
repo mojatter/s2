@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5" // #nosec G501 -- MD5 is used here only to mirror S3 multipart ETag semantics under test.
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -220,6 +221,46 @@ func (s *MultipartTestSuite) storage(bucket string) s2.Storage {
 	strg, err := s.server.Buckets.Get(context.Background(), bucket)
 	s.Require().NoError(err)
 	return strg
+}
+
+// failingStorage fails every Get; uploadMetadata calls nothing else.
+type failingStorage struct {
+	s2.Storage
+	err error
+}
+
+func (f failingStorage) Get(context.Context, string) (s2.Object, error) { return nil, f.err }
+
+func (s *MultipartTestSuite) TestUploadMetadata() {
+	testCases := []struct {
+		caseName string
+		err      error
+		wantErr  bool
+	}{
+		{
+			caseName: "a missing manifest is not an error",
+			err:      fmt.Errorf("%w: manifest", s2.ErrNotExist),
+		},
+		{
+			// Completing anyway would silently drop the caller's metadata.
+			caseName: "any other read failure is surfaced",
+			err:      errors.New("backend unavailable"),
+			wantErr:  true,
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			md, err := uploadMetadata(context.Background(), failingStorage{err: tc.err}, "x")
+
+			if tc.wantErr {
+				s.Require().ErrorIs(err, tc.err)
+				s.Nil(md)
+				return
+			}
+			s.Require().NoError(err)
+			s.Empty(md)
+		})
+	}
 }
 
 // An uploadId s2 never issued must not reach the storage layer as a key.

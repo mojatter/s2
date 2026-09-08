@@ -6,10 +6,10 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
-	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -49,18 +49,21 @@ func manifestKey(uploadID string) string {
 	return uploadPrefix(uploadID) + "manifest"
 }
 
-// uploadMetadata returns the metadata CreateMultipartUpload recorded. An
-// upload initiated before manifests existed has none, and falls back to
-// the default Content-Type rather than failing.
-func uploadMetadata(ctx context.Context, strg s2.Storage, uploadID string) s2.Metadata {
-	md := make(s2.Metadata)
-	if obj, err := strg.Get(ctx, manifestKey(uploadID)); err == nil {
-		maps.Copy(md, obj.Metadata())
+// uploadMetadata returns what CreateMultipartUpload recorded. A missing
+// manifest yields an empty map; any other read failure is returned.
+func uploadMetadata(ctx context.Context, strg s2.Storage, uploadID string) (s2.Metadata, error) {
+	obj, err := strg.Get(ctx, manifestKey(uploadID))
+	if errors.Is(err, s2.ErrNotExist) {
+		return make(s2.Metadata), nil
 	}
-	if _, ok := md.Get(contentTypeMetadataKey); !ok {
-		md[contentTypeMetadataKey] = defaultContentType
+	if err != nil {
+		return nil, err
 	}
-	return md
+	md := obj.Metadata().Clone()
+	if md == nil {
+		md = make(s2.Metadata)
+	}
+	return md, nil
 }
 
 // newUploadID generates a 16-byte upload ID: 4 bytes of elapsed seconds
@@ -223,7 +226,12 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 
 	// This request carries no headers of its own; they were recorded at
 	// initiate time.
-	md := uploadMetadata(ctx, strg, uploadID)
+	md, err := uploadMetadata(ctx, strg, uploadID)
+	if err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
 
 	// Stream all parts through a single reader, tee-ing each part into its own
 	// MD5 hash as it flows by. This avoids buffering the assembled object in
