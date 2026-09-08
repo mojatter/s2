@@ -250,7 +250,7 @@ func stripQueryParam(rawQuery, name string) string {
 
 func parseAuthHeader(s string) map[string]string {
 	result := make(map[string]string)
-	for _, part := range strings.Split(s, ", ") {
+	for _, part := range strings.Split(s, ",") {
 		part = strings.TrimSpace(part)
 		idx := strings.IndexByte(part, '=')
 		if idx > 0 {
