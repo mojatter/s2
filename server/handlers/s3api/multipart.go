@@ -32,8 +32,13 @@ func filterMultipart(objs []s2.Object) []s2.Object {
 	return out
 }
 
+// uploadPrefix is the key prefix holding one upload's parts.
+func uploadPrefix(uploadID string) string {
+	return multipartPrefix + uploadID + "/"
+}
+
 func partKey(uploadID string, partNumber int) string {
-	return fmt.Sprintf("%s%s/%05d", multipartPrefix, uploadID, partNumber)
+	return fmt.Sprintf("%s%05d", uploadPrefix(uploadID), partNumber)
 }
 
 // newUploadID generates a 16-byte upload ID: 4 bytes of elapsed seconds
@@ -218,7 +223,7 @@ func handleAbortMultipartUpload(s *server.Server, w http.ResponseWriter, r *http
 		return
 	}
 
-	_ = strg.DeleteRecursive(ctx, multipartPrefix+uploadID+"/")
+	_ = strg.DeleteRecursive(ctx, uploadPrefix(uploadID))
 	w.WriteHeader(http.StatusNoContent)
 }
 
