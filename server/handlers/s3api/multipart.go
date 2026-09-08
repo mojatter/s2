@@ -5,13 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/xml"
-	"errors"
 	"fmt"
 	"hash"
 	"io"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -85,7 +82,7 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	partNumber, err := strconv.Atoi(partNumberStr)
-	if err != nil || partNumber < 1 || partNumber > 10000 {
+	if err != nil || partNumber < 1 || partNumber > maxUploadParts {
 		writeError(w, r, "InvalidArgument", "Part number must be between 1 and 10000", http.StatusBadRequest)
 		return
 	}
@@ -133,14 +130,7 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 	}
 
 	var req CompleteMultipartUploadRequest
-	r.Body = http.MaxBytesReader(w, r.Body, maxXMLRequestBody)
-	if err := xml.NewDecoder(r.Body).Decode(&req); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			writeError(w, r, "EntityTooLarge", fmt.Sprintf("Your proposed upload exceeds the maximum allowed size (%d bytes)", maxXMLRequestBody), http.StatusRequestEntityTooLarge)
-			return
-		}
-		writeError(w, r, "MalformedXML", "The XML you provided was not well-formed", http.StatusBadRequest)
+	if !decodeXMLBody(w, r, &req) {
 		return
 	}
 
@@ -151,9 +141,18 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 		return
 	}
 
-	sort.Slice(req.Parts, func(i, j int) bool {
-		return req.Parts[i].PartNumber < req.Parts[j].PartNumber
-	})
+	// S3 rejects an unordered parts list rather than sorting it; sorting also
+	// hides a repeated part number, which assembles that part many times over.
+	for i, p := range req.Parts {
+		if p.PartNumber < 1 || p.PartNumber > maxUploadParts {
+			writeError(w, r, "InvalidArgument", "Part number must be between 1 and 10000", http.StatusBadRequest)
+			return
+		}
+		if i > 0 && p.PartNumber <= req.Parts[i-1].PartNumber {
+			writeError(w, r, "InvalidPartOrder", "The list of parts was not in ascending order. Parts list must be specified in order by part number.", http.StatusBadRequest)
+			return
+		}
+	}
 
 	// Stat each part once up front: verify existence and compute the total
 	// length required by NewObjectReader. We intentionally do NOT read part

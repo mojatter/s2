@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -70,6 +71,77 @@ func (s *MultipartTestSuite) TestCreateMultipartUpload() {
 			s.Equal(tc.wantErrCode, errResp.Code)
 		})
 	}
+}
+
+func (s *MultipartTestSuite) TestCompleteMultipartUploadRejects() {
+	// Upload a real part so these cases fail on validation, not on a missing part.
+	s.createBucket("cmp")
+	createReq := httptest.NewRequest("POST", "/cmp/o.txt?uploads", nil)
+	createReq.SetPathValue("bucket", "cmp")
+	createReq.SetPathValue("key", "o.txt")
+	createW := httptest.NewRecorder()
+	handleCreateMultipartUpload(s.server, createW, createReq)
+	s.Require().Equal(http.StatusOK, createW.Code)
+
+	var created InitiateMultipartUploadResult
+	s.Require().NoError(xml.Unmarshal(createW.Body.Bytes(), &created))
+
+	partReq := httptest.NewRequest("PUT", "/cmp/o.txt?partNumber=1&uploadId="+created.UploadID, strings.NewReader("hello"))
+	partReq.SetPathValue("bucket", "cmp")
+	partReq.SetPathValue("key", "o.txt")
+	partReq.ContentLength = 5
+	partW := httptest.NewRecorder()
+	handleUploadPart(s.server, partW, partReq)
+	s.Require().Equal(http.StatusOK, partW.Code)
+
+	part := func(n string) string {
+		return "<Part><PartNumber>" + n + "</PartNumber><ETag>x</ETag></Part>"
+	}
+	testCases := []struct {
+		caseName string
+		parts    string
+		wantCode string
+	}{
+		{caseName: "duplicate part number", parts: part("1") + part("1"), wantCode: "InvalidPartOrder"},
+		{caseName: "descending order", parts: part("2") + part("1"), wantCode: "InvalidPartOrder"},
+		{caseName: "part number zero", parts: part("0"), wantCode: "InvalidArgument"},
+		{caseName: "part number above the ceiling", parts: part("10001"), wantCode: "InvalidArgument"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			body := "<CompleteMultipartUpload>" + tc.parts + "</CompleteMultipartUpload>"
+			req := httptest.NewRequest("POST", "/cmp/o.txt?uploadId="+created.UploadID, strings.NewReader(body))
+			req.SetPathValue("bucket", "cmp")
+			req.SetPathValue("key", "o.txt")
+			w := httptest.NewRecorder()
+			handleCompleteMultipartUpload(s.server, w, req)
+
+			s.Equal(http.StatusBadRequest, w.Code)
+			var errResp ErrorResponse
+			s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+			s.Equal(tc.wantCode, errResp.Code)
+		})
+	}
+
+	s.Run("body over the cap", func() {
+		var b strings.Builder
+		b.WriteString("<CompleteMultipartUpload>")
+		for b.Len() < 12<<20 { // ~12 MiB, over maxXMLRequestBody (8 MiB)
+			b.WriteString(part("1"))
+		}
+		b.WriteString("</CompleteMultipartUpload>")
+
+		req := httptest.NewRequest("POST", "/cmp/o.txt?uploadId="+created.UploadID, strings.NewReader(b.String()))
+		req.SetPathValue("bucket", "cmp")
+		req.SetPathValue("key", "o.txt")
+		w := httptest.NewRecorder()
+		handleCompleteMultipartUpload(s.server, w, req)
+
+		s.Equal(http.StatusBadRequest, w.Code)
+		var errResp ErrorResponse
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+		s.Equal("MaxMessageLengthExceeded", errResp.Code)
+	})
 }
 
 func TestPartsReader(t *testing.T) {
