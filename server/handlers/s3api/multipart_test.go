@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/mojatter/s2"
+	"github.com/mojatter/s2/server"
 )
 
 type MultipartTestSuite struct{ s3apiSuite }
@@ -218,6 +220,36 @@ func (s *MultipartTestSuite) storage(bucket string) s2.Storage {
 	strg, err := s.server.Buckets.Get(context.Background(), bucket)
 	s.Require().NoError(err)
 	return strg
+}
+
+// An uploadId s2 never issued must not reach the storage layer as a key.
+func (s *MultipartTestSuite) TestMalformedUploadID() {
+	testCases := []struct {
+		caseName string
+		method   string
+		handler  func(*server.Server, http.ResponseWriter, *http.Request)
+	}{
+		{caseName: "upload part", method: "PUT", handler: handleUploadPart},
+		{caseName: "complete", method: "POST", handler: handleCompleteMultipartUpload},
+		{caseName: "abort", method: "DELETE", handler: handleAbortMultipartUpload},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.createBucket("mp-bad")
+			target := "/mp-bad/o.txt?partNumber=1&uploadId=" + url.QueryEscape("../evil")
+			req := httptest.NewRequest(tc.method, target, strings.NewReader(""))
+			req.SetPathValue("bucket", "mp-bad")
+			req.SetPathValue("key", "o.txt")
+			w := httptest.NewRecorder()
+			tc.handler(s.server, w, req)
+
+			s.Equal(http.StatusNotFound, w.Code)
+			s.NotContains(w.Body.String(), multipartPrefix)
+			var errResp ErrorResponse
+			s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+			s.Equal("NoSuchUpload", errResp.Code)
+		})
+	}
 }
 
 func (s *MultipartTestSuite) TestCreateMultipartUploadRecordsMetadata() {

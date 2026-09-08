@@ -74,6 +74,12 @@ func newUploadID(started time.Time) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// validUploadID reports whether id could have come from newUploadID.
+func validUploadID(id string) bool {
+	b, err := hex.DecodeString(id)
+	return err == nil && len(b) == 16
+}
+
 func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
@@ -117,6 +123,10 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	partNumberStr := r.URL.Query().Get("partNumber")
 	if uploadID == "" || partNumberStr == "" {
 		writeError(w, r, "InvalidArgument", "Missing uploadId or partNumber", http.StatusBadRequest)
+		return
+	}
+	if !validUploadID(uploadID) {
+		writeError(w, r, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
 		return
 	}
 	partNumber, err := strconv.Atoi(partNumberStr)
@@ -164,6 +174,10 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 	uploadID := r.URL.Query().Get("uploadId")
 	if uploadID == "" {
 		writeError(w, r, "InvalidArgument", "Missing uploadId", http.StatusBadRequest)
+		return
+	}
+	if !validUploadID(uploadID) {
+		writeError(w, r, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
 		return
 	}
 
@@ -254,6 +268,10 @@ func handleAbortMultipartUpload(s *server.Server, w http.ResponseWriter, r *http
 	uploadID := r.URL.Query().Get("uploadId")
 	if uploadID == "" {
 		writeError(w, r, "InvalidArgument", "Missing uploadId", http.StatusBadRequest)
+		return
+	}
+	if !validUploadID(uploadID) {
+		writeError(w, r, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
 		return
 	}
 
