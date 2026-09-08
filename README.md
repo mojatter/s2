@@ -345,10 +345,11 @@ type Storage interface {
 // One List method covers flat and recursive listings, with explicit
 // pagination via continuation token.
 type ListOptions struct {
-	Prefix    string
-	After     string // continuation token; empty = first page
-	Limit     int    // 0 = backend default
-	Recursive bool
+	Prefix     string
+	After      string // opaque continuation token; empty = first page
+	StartAfter string // caller-chosen key to resume after; ignored when After is set
+	Limit      int    // 0 = backend default
+	Recursive  bool
 }
 
 type ListResult struct {

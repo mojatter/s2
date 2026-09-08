@@ -21,9 +21,15 @@ type ListOptions struct {
 	Prefix string
 	// After is an opaque continuation token returned by a previous call as
 	// ListResult.NextAfter; pass it to fetch the next page. Empty for the
-	// first page.
+	// first page. Its encoding is backend-specific: never construct one or
+	// carry one across storages. After wins over StartAfter.
 	After string
-	// Limit caps the number of returned Objects. Zero means no limit.
+	// StartAfter is a key name picked by the caller, existing or not; the
+	// listing resumes at the first entry sorting after it. Ignored when
+	// After is set.
+	StartAfter string
+	// Limit caps the number of returned entries. Backends may count
+	// CommonPrefixes toward it, as S3's max-keys does. Zero means no limit.
 	Limit int
 	// Recursive, when true, walks subdirectories and returns no
 	// CommonPrefixes; when false, the listing stops at the first "/" past

@@ -257,6 +257,42 @@ func (s *ObjectsTestSuite) TestListObjects() {
 
 // --- ListObjects pagination ---
 
+// startKeyStorage records the ListOptions the handler passes.
+type startKeyStorage struct {
+	s2.Storage
+	opts s2.ListOptions
+}
+
+func (t *startKeyStorage) List(_ context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	t.opts = opts
+	return s2.ListResult{}, nil
+}
+
+// TestListObjectsResumesWithStartAfter pins that the caller's resume key goes
+// into StartAfter: After is reserved for a token a backend handed out.
+func (s *ObjectsTestSuite) TestListObjectsResumesWithStartAfter() {
+	testCases := []struct {
+		caseName string
+		params   listObjectsParams
+		want     string
+	}{
+		{"continuation token", listObjectsParams{continuationToken: "a.txt", maxKeys: 10}, "a.txt"},
+		{"start after", listObjectsParams{startAfter: "b.txt", maxKeys: 10}, "b.txt"},
+		{"continuation token wins", listObjectsParams{continuationToken: "a.txt", startAfter: "b.txt", maxKeys: 10}, "a.txt"},
+		{"delimited", listObjectsParams{delimiter: "/", startAfter: "b.txt", maxKeys: 10}, "b.txt"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			strg := &startKeyStorage{}
+
+			_, _, err := listObjects(context.Background(), strg, tc.params)
+			s.Require().NoError(err)
+			s.Empty(strg.opts.After)
+			s.Equal(tc.want, strg.opts.StartAfter)
+		})
+	}
+}
+
 func (s *ObjectsTestSuite) TestListObjects_Pagination() {
 	s.putObject("pg", "a.txt", "1")
 	s.putObject("pg", "b.txt", "2")

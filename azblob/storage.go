@@ -120,6 +120,10 @@ func (s *azblobStorage) Sub(_ context.Context, prefix string) (s2.Storage, error
 
 const defaultListLimit = 1000
 
+// List implements s2.Storage. ListOptions.After is Azure's own list marker.
+// Azure has no start-after parameter, so ListOptions.StartAfter is emulated
+// by paging from the start and discarding names up to it, one request per
+// page skipped; prefer After for pagination.
 func (s *azblobStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
 	limit := opts.Limit
 	if limit <= 0 {
@@ -127,45 +131,62 @@ func (s *azblobStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListR
 	}
 
 	prefix := s.fullPrefix(opts.Prefix)
-
-	var res listBlobsResult
-	var err error
-	if opts.Recursive {
-		res, err = s.client.listBlobs(ctx, s.container, prefix, int32(limit), opts.After)
-	} else {
-		res, err = s.client.listBlobsHierarchy(ctx, s.container, prefix, "/", int32(limit), opts.After)
-	}
-	if err != nil {
-		return s2.ListResult{}, fmt.Errorf("azblob: list blobs: %w", err)
+	marker := opts.After
+	// TODO: the s3api handler resumes with a key, not a marker, so paging a
+	// bucket rescans from the start on every request.
+	startAfter := ""
+	if opts.After == "" && opts.StartAfter != "" {
+		startAfter = s.key(opts.StartAfter)
 	}
 
 	out := s2.ListResult{
-		Objects:        make([]s2.Object, 0, len(res.items)),
-		CommonPrefixes: make([]string, 0, len(res.prefixes)),
+		Objects:        make([]s2.Object, 0),
+		CommonPrefixes: make([]string, 0),
 	}
+	for {
+		var res listBlobsResult
+		var err error
+		if opts.Recursive {
+			res, err = s.client.listBlobs(ctx, s.container, prefix, int32(limit), marker)
+		} else {
+			res, err = s.client.listBlobsHierarchy(ctx, s.container, prefix, "/", int32(limit), marker)
+		}
+		if err != nil {
+			return s2.ListResult{}, fmt.Errorf("azblob: list blobs: %w", err)
+		}
+		marker = res.nextMarker
 
-	for _, item := range res.items {
-		name := item.name
-		if s.prefix != "" {
-			name = name[len(s.prefix)+1:]
+		for _, item := range res.items {
+			// Names are sorted, so this only discards a leading run: what
+			// survives is a page tail the marker still points just past.
+			if item.name <= startAfter {
+				continue
+			}
+			out.Objects = append(out.Objects, &object{
+				client:    s.client,
+				container: s.container,
+				prefix:    s.prefix,
+				name:      s2.RelName(s.prefix, item.name),
+				length:    s2.MustUint64(item.contentLength),
+				modified:  item.lastModified,
+				metadata:  s2.Metadata(fromPtrMetadata(item.metadata)),
+			})
 		}
 
-		out.Objects = append(out.Objects, &object{
-			client:    s.client,
-			container: s.container,
-			prefix:    s.prefix,
-			name:      name,
-			length:    s2.MustUint64(item.contentLength),
-			modified:  item.lastModified,
-			metadata:  s2.Metadata(fromPtrMetadata(item.metadata)),
-		})
+		for _, p := range res.prefixes {
+			// A prefix holding keys past startAfter still belongs here.
+			if startAfter >= p && !strings.HasPrefix(startAfter, p) {
+				continue
+			}
+			out.CommonPrefixes = append(out.CommonPrefixes, s2.RelName(s.prefix, p))
+		}
+
+		if len(out.Objects) > 0 || len(out.CommonPrefixes) > 0 || marker == "" {
+			break
+		}
 	}
 
-	out.CommonPrefixes = append(out.CommonPrefixes, res.prefixes...)
-
-	if res.nextMarker != "" {
-		out.NextAfter = res.nextMarker
-	}
+	out.NextAfter = marker
 	return out, nil
 }
 

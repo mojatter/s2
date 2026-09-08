@@ -31,8 +31,9 @@ type mockObject struct {
 }
 
 type mockS3Client struct {
-	mu      sync.RWMutex
-	objects map[string]*mockObject
+	mu            sync.RWMutex
+	objects       map[string]*mockObject
+	lastListInput *s3.ListObjectsV2Input
 }
 
 func newMockS3Client() *mockS3Client {
@@ -71,13 +72,29 @@ func (m *mockS3Client) get(bucket, key string) (*mockObject, bool) {
 
 // clientAPI and presignClientAPI implementation
 
+// mockContinuationPrefix marks the mock's continuation tokens. Real ones are
+// opaque, so the mock rejects anything it did not hand out itself.
+const mockContinuationPrefix = "mock-token:"
+
 func (m *mockS3Client) ListObjectsV2(ctx context.Context, params *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error) {
+	m.mu.Lock()
+	m.lastListInput = params
+	m.mu.Unlock()
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	bucket := aws.ToString(params.Bucket)
 	prefix := aws.ToString(params.Prefix)
 	after := aws.ToString(params.StartAfter)
+	if tok := aws.ToString(params.ContinuationToken); tok != "" {
+		key, ok := strings.CutPrefix(tok, mockContinuationPrefix)
+		if !ok {
+			return nil, fmt.Errorf("invalid continuation token %q", tok)
+		}
+		// A continuation token overrides start-after, as in the real service.
+		after = key
+	}
 	delimiter := aws.ToString(params.Delimiter)
 	limit := int(aws.ToInt32(params.MaxKeys))
 	if limit == 0 {
@@ -85,6 +102,8 @@ func (m *mockS3Client) ListObjectsV2(ctx context.Context, params *s3.ListObjects
 	}
 
 	var contents []s3types.Object
+	var commonPrefixes []s3types.CommonPrefix
+	prefixSet := make(map[string]bool)
 	var keys []string
 	for k := range m.objects {
 		keys = append(keys, k)
@@ -98,14 +117,19 @@ func (m *mockS3Client) ListObjectsV2(ctx context.Context, params *s3.ListObjects
 		if !strings.HasPrefix(obj.key, prefix) {
 			continue
 		}
-		remainder := obj.key[len(prefix):]
-		if delimiter != "" {
-			if strings.Contains(remainder, delimiter) {
-				continue // skip objects deep in subdirectories
-			}
-		}
 		if after != "" && obj.key <= after {
 			continue
+		}
+		remainder := obj.key[len(prefix):]
+		if delimiter != "" {
+			if idx := strings.Index(remainder, delimiter); idx >= 0 {
+				cp := prefix + remainder[:idx+len(delimiter)]
+				if !prefixSet[cp] {
+					prefixSet[cp] = true
+					commonPrefixes = append(commonPrefixes, s3types.CommonPrefix{Prefix: aws.String(cp)})
+				}
+				continue
+			}
 		}
 		contents = append(contents, s3types.Object{
 			Key:          aws.String(obj.key),
@@ -123,13 +147,20 @@ func (m *mockS3Client) ListObjectsV2(ctx context.Context, params *s3.ListObjects
 		}
 	}
 
-	if len(contents) > limit {
+	truncated := len(contents) > limit
+	if truncated {
 		contents = contents[:limit]
 	}
 
-	return &s3.ListObjectsV2Output{
-		Contents: contents,
-	}, nil
+	out := &s3.ListObjectsV2Output{
+		Contents:       contents,
+		CommonPrefixes: commonPrefixes,
+		IsTruncated:    aws.Bool(truncated),
+	}
+	if truncated {
+		out.NextContinuationToken = aws.String(mockContinuationPrefix + aws.ToString(contents[len(contents)-1].Key))
+	}
+	return out, nil
 }
 
 func (m *mockS3Client) HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
@@ -262,6 +293,91 @@ func (s *StorageTestSuite) TestS2TestList() {
 
 	err = s2test.TestStorageList(ctx, strg, "cc", "cc/c1.txt", "cc/c2.txt")
 	s.Require().NoError(err)
+}
+
+// TestListCursorMapping pins which ListObjectsV2 parameter each cursor field
+// reaches: AWS reads StartAfter as a key name, so a token must never land
+// there.
+func (s *StorageTestSuite) TestListCursorMapping() {
+	testCases := []struct {
+		caseName       string
+		prefix         string
+		opts           s2.ListOptions
+		wantToken      string
+		wantStartAfter string
+	}{
+		{
+			caseName:  "after becomes a continuation token",
+			opts:      s2.ListOptions{After: mockContinuationPrefix + "a.txt"},
+			wantToken: mockContinuationPrefix + "a.txt",
+		},
+		{
+			caseName:       "start after becomes start-after",
+			opts:           s2.ListOptions{StartAfter: "a.txt"},
+			wantStartAfter: "a.txt",
+		},
+		{
+			caseName:  "after wins over start after",
+			opts:      s2.ListOptions{After: mockContinuationPrefix + "a.txt", StartAfter: "b.txt"},
+			wantToken: mockContinuationPrefix + "a.txt",
+		},
+		{
+			caseName:       "start after keeps a trailing delimiter",
+			opts:           s2.ListOptions{StartAfter: "dir/"},
+			wantStartAfter: "dir/",
+		},
+		{
+			caseName:       "start after is resolved against the storage prefix",
+			prefix:         "cc",
+			opts:           s2.ListOptions{StartAfter: "c1.txt"},
+			wantStartAfter: "cc/c1.txt",
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m, strg := s.testMockClient()
+			strg.(*storage).prefix = tc.prefix
+
+			_, err := strg.List(context.Background(), tc.opts)
+			s.Require().NoError(err)
+			s.Equal(tc.wantToken, aws.ToString(m.lastListInput.ContinuationToken))
+			s.Equal(tc.wantStartAfter, aws.ToString(m.lastListInput.StartAfter))
+		})
+	}
+}
+
+// TestListSubPrefixBoundary pins that a Sub storage lists only its own
+// subtree: "data" must not pull in "data2/" keys.
+func (s *StorageTestSuite) TestListSubPrefixBoundary() {
+	m, strg := s.testMockClient()
+	m.put("mybucket", "data", []byte("root key"), nil)
+	m.put("mybucket", "data/a.txt", []byte("a"), nil)
+	m.put("mybucket", "data2/secret.txt", []byte("s"), nil)
+	strg.(*storage).prefix = "data"
+
+	res, err := strg.List(context.Background(), s2.ListOptions{Recursive: true})
+	s.Require().NoError(err)
+	s.Equal([]string{"a.txt"}, objectNames(res.Objects))
+}
+
+func objectNames(objs []s2.Object) []string {
+	names := make([]string, 0, len(objs))
+	for _, obj := range objs {
+		names = append(names, obj.Name())
+	}
+	return names
+}
+
+// TestListPrefixesAreRelative pins that CommonPrefixes drop the storage
+// prefix, as object names do.
+func (s *StorageTestSuite) TestListPrefixesAreRelative() {
+	m, strg := s.testMockClient()
+	m.put("mybucket", "cc/dd/x.txt", []byte("x"), nil)
+	strg.(*storage).prefix = "cc"
+
+	res, err := strg.List(context.Background(), s2.ListOptions{})
+	s.Require().NoError(err)
+	s.Equal([]string{"dd/"}, res.CommonPrefixes)
 }
 
 func (s *StorageTestSuite) TestS2TestGetPut() {

@@ -86,3 +86,48 @@ func TestMustUint64Panic(t *testing.T) {
 		})
 	}
 }
+
+func TestKey(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		prefix   string
+		name     string
+		want     string
+	}{
+		{"no prefix", "", "a.txt", "a.txt"},
+		{"no prefix keeps the trailing slash", "", "dir/", "dir/"},
+		{"with prefix", "data", "a.txt", "data/a.txt"},
+		{"prefix with a trailing slash", "data/", "a.txt", "data/a.txt"},
+		{"nested prefix", "data/sub", "a.txt", "data/sub/a.txt"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			if got := Key(tc.prefix, tc.name); got != tc.want {
+				t.Errorf("Key(%q, %q) = %q, want %q", tc.prefix, tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRelName(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		prefix   string
+		name     string
+		want     string
+	}{
+		{"no prefix", "", "a.txt", "a.txt"},
+		{"strips the prefix", "data", "data/a.txt", "a.txt"},
+		{"prefix with a trailing slash", "data/", "data/a.txt", "a.txt"},
+		{"unnormalized prefix", "data//sub", "data/sub/a.txt", "a.txt"},
+		{"name without the prefix is untouched", "data", "data2/a.txt", "data2/a.txt"},
+		{"name equal to the prefix is untouched", "data", "data", "data"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			if got := RelName(tc.prefix, tc.name); got != tc.want {
+				t.Errorf("RelName(%q, %q) = %q, want %q", tc.prefix, tc.name, got, tc.want)
+			}
+		})
+	}
+}

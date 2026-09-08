@@ -90,8 +90,10 @@ type listObjectsParams struct {
 	maxKeys           int
 }
 
-// after returns the continuation point: continuation-token wins over start-after.
-func (p listObjectsParams) after() string {
+// startKey returns the key the listing resumes after: continuation-token wins
+// over start-after. Both are key names -- the token this handler hands out is
+// the last key of the page (see applyMaxKeys), not a backend token.
+func (p listObjectsParams) startKey() string {
 	if p.continuationToken != "" {
 		return p.continuationToken
 	}
@@ -126,10 +128,10 @@ func listObjects(ctx context.Context, strg s2.Storage, p listObjectsParams) ([]s
 		// Recursive: List already does string-prefix matching, so an
 		// arbitrary S3 prefix (e.g. "im" matching "images/a.png") works as-is.
 		res, err := strg.List(ctx, s2.ListOptions{
-			Prefix:    p.prefix,
-			After:     p.after(),
-			Limit:     fetchLimit,
-			Recursive: true,
+			Prefix:     p.prefix,
+			StartAfter: p.startKey(),
+			Limit:      fetchLimit,
+			Recursive:  true,
 		})
 		if err != nil {
 			return nil, nil, err
@@ -142,9 +144,9 @@ func listObjects(ctx context.Context, strg s2.Storage, p listObjectsParams) ([]s
 	// directory portion and filter the entries by the remaining basename.
 	listDir, baseFilter := splitS3Prefix(p.prefix)
 	res, err := strg.List(ctx, s2.ListOptions{
-		Prefix: listDir,
-		After:  p.after(),
-		Limit:  fetchLimit,
+		Prefix:     listDir,
+		StartAfter: p.startKey(),
+		Limit:      fetchLimit,
 	})
 	if err != nil {
 		return nil, nil, err

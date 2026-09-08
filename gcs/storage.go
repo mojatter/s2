@@ -85,11 +85,15 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 	if !opts.Recursive {
 		q.Delimiter = "/"
 	}
-	if opts.After != "" {
-		q.StartOffset = opts.After
+	if opts.After == "" && opts.StartAfter != "" {
+		q.StartOffset = s.key(opts.StartAfter)
 	}
 
 	it := s.client.bucket(s.bucket).objects(ctx, q)
+	// One s2 page is one SDK page, so the token the SDK hands back resumes
+	// where this call stops.
+	it.setMaxSize(limit)
+	it.setPageToken(opts.After)
 
 	out := s2.ListResult{
 		Objects:        make([]s2.Object, 0),
@@ -104,36 +108,28 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 			return s2.ListResult{}, fmt.Errorf("gcs: list objects: %w", err)
 		}
 
-		// Common prefix (directory marker in non-recursive listing).
+		// A common prefix is a directory marker in a non-recursive listing.
+		// StartOffset is inclusive, so objects skip the match itself.
 		if attrs.Prefix != "" {
-			out.CommonPrefixes = append(out.CommonPrefixes, attrs.Prefix)
-			continue
+			out.CommonPrefixes = append(out.CommonPrefixes, s2.RelName(s.prefix, attrs.Prefix))
+		} else if name := s2.RelName(s.prefix, attrs.Name); q.StartOffset == "" || name != opts.StartAfter {
+			out.Objects = append(out.Objects, &object{
+				client:       s.client,
+				bucket:       s.bucket,
+				prefix:       s.prefix,
+				name:         name,
+				length:       s2.MustUint64(attrs.Size),
+				lastModified: attrs.Updated,
+				metadata:     s2.Metadata(attrs.Metadata),
+			})
 		}
 
-		name := attrs.Name
-		if s.prefix != "" {
-			name = name[len(s.prefix)+1:]
-		}
-
-		// StartOffset is inclusive; skip the exact match for "after" semantics.
-		if opts.After != "" && name == opts.After {
-			continue
-		}
-
-		if len(out.Objects) >= limit {
-			out.NextAfter = name
+		// Once the buffered page is drained, the token the SDK holds resumes
+		// at the next one.
+		if it.remaining() == 0 {
+			out.NextAfter = it.nextPageToken()
 			break
 		}
-
-		out.Objects = append(out.Objects, &object{
-			client:       s.client,
-			bucket:       s.bucket,
-			prefix:       s.prefix,
-			name:         name,
-			length:       s2.MustUint64(attrs.Size),
-			lastModified: attrs.Updated,
-			metadata:     s2.Metadata(attrs.Metadata),
-		})
 	}
 	return out, nil
 }

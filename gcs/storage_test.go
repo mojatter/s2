@@ -8,6 +8,7 @@ import (
 	"io"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -24,11 +25,11 @@ import (
 // --- mock implementations ---
 
 type mockObject struct {
-	bucket       string
-	key          string
-	body         []byte
-	updated      time.Time
-	metadata     map[string]string
+	bucket   string
+	key      string
+	body     []byte
+	updated  time.Time
+	metadata map[string]string
 }
 
 type mockGCSClient struct {
@@ -259,20 +260,66 @@ func (w *mockWriter) Close() error {
 	return nil
 }
 
+// mockPageTokenPrefix marks the mock's page tokens. Real ones are opaque, so
+// the mock rejects anything it did not hand out itself.
+const mockPageTokenPrefix = "mock-page:"
+
 type mockIterator struct {
 	entries []struct {
 		attrs *storage.ObjectAttrs
 	}
-	idx int
+	idx     int // next entry to return
+	pageEnd int // exclusive end of the page currently buffered
+	maxSize int
+	err     error
 }
 
 func (i *mockIterator) next() (*storage.ObjectAttrs, error) {
+	if i.err != nil {
+		return nil, i.err
+	}
 	if i.idx >= len(i.entries) {
 		return nil, iterator.Done
+	}
+	if i.idx >= i.pageEnd {
+		// The buffered page is drained; fetch the next one.
+		size := i.maxSize
+		if size <= 0 {
+			size = len(i.entries)
+		}
+		i.pageEnd = min(i.idx+size, len(i.entries))
 	}
 	a := i.entries[i.idx].attrs
 	i.idx++
 	return a, nil
+}
+
+func (i *mockIterator) setPageToken(token string) {
+	if token == "" {
+		return
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(token, mockPageTokenPrefix))
+	if !strings.HasPrefix(token, mockPageTokenPrefix) || err != nil {
+		i.err = fmt.Errorf("invalid page token %q", token)
+		return
+	}
+	i.idx = n
+	i.pageEnd = n
+}
+
+func (i *mockIterator) setMaxSize(n int) {
+	i.maxSize = n
+}
+
+func (i *mockIterator) remaining() int {
+	return i.pageEnd - i.idx
+}
+
+func (i *mockIterator) nextPageToken() string {
+	if i.pageEnd >= len(i.entries) {
+		return ""
+	}
+	return mockPageTokenPrefix + strconv.Itoa(i.pageEnd)
 }
 
 // --- test suite ---
@@ -331,6 +378,91 @@ func (s *StorageTestSuite) TestS2TestList() {
 
 	err = s2test.TestStorageList(ctx, strg, "cc", "cc/c1.txt", "cc/c2.txt")
 	s.Require().NoError(err)
+}
+
+// TestListCursors separates the two resume paths: After is the SDK's page
+// token, StartAfter a caller-chosen key mapped onto StartOffset.
+func (s *StorageTestSuite) TestListCursors() {
+	testCases := []struct {
+		caseName   string
+		prefix     string
+		startAfter string
+		limit      int
+		want       []string
+		wantNext   bool
+	}{
+		{
+			caseName:   "start after skips the key itself",
+			startAfter: "a.txt",
+			want:       []string{"b.txt", "cc/c1.txt", "cc/c2.txt"},
+		},
+		{
+			caseName:   "resolves the key against the storage prefix",
+			prefix:     "cc",
+			startAfter: "c1.txt",
+			want:       []string{"c2.txt"},
+		},
+		{
+			caseName: "limit yields a page token",
+			limit:    2,
+			want:     []string{"a.txt", "b.txt"},
+			wantNext: true,
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			_, strg := s.testMockStorage()
+			strg.(*gcsStorage).prefix = tc.prefix
+			ctx := context.Background()
+
+			res, err := strg.List(ctx, s2.ListOptions{
+				StartAfter: tc.startAfter,
+				Limit:      tc.limit,
+				Recursive:  true,
+			})
+			s.Require().NoError(err)
+			s.Equal(tc.want, objectNames(res.Objects))
+			if !tc.wantNext {
+				s.Empty(res.NextAfter)
+				return
+			}
+
+			// The token must round-trip as After.
+			s.Require().NotEmpty(res.NextAfter)
+			res2, err := strg.List(ctx, s2.ListOptions{After: res.NextAfter, Recursive: true})
+			s.Require().NoError(err)
+			s.Equal([]string{"cc/c1.txt", "cc/c2.txt"}, objectNames(res2.Objects))
+		})
+	}
+}
+
+// TestListAfterNotAKey passes a key name where a token belongs; the real SDK
+// would fail the request too.
+func (s *StorageTestSuite) TestListAfterNotAKey() {
+	_, strg := s.testMockStorage()
+
+	_, err := strg.List(context.Background(), s2.ListOptions{After: "a.txt", Recursive: true})
+	s.Require().Error(err)
+}
+
+func objectNames(objs []s2.Object) []string {
+	names := make([]string, 0, len(objs))
+	for _, obj := range objs {
+		names = append(names, obj.Name())
+	}
+	return names
+}
+
+// TestListPrefixesAreRelative pins that CommonPrefixes drop the storage
+// prefix, as object names do.
+func (s *StorageTestSuite) TestListPrefixesAreRelative() {
+	m, strg := s.testMockStorage()
+	m.put("mybucket", "cc/dd/x.txt", []byte("x"), nil)
+	strg.(*gcsStorage).prefix = "cc"
+
+	res, err := strg.List(context.Background(), s2.ListOptions{})
+	s.Require().NoError(err)
+	s.Equal([]string{"dd/"}, res.CommonPrefixes)
 }
 
 func (s *StorageTestSuite) TestS2TestGetPut() {

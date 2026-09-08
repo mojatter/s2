@@ -97,10 +97,23 @@ func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult,
 	if limit <= 0 {
 		limit = defaultListLimit
 	}
-	if opts.Recursive {
-		return s.listRecursive(opts.Prefix, opts.After, limit)
+	// Both cursors are plain key names here, so they collapse into one
+	// comparison; After wins.
+	after := opts.After
+	if after == "" {
+		after = opts.StartAfter
 	}
-	return s.listFlat(opts.Prefix, opts.After, limit)
+	if opts.Recursive {
+		return s.listRecursive(opts.Prefix, after, limit)
+	}
+	return s.listFlat(opts.Prefix, after, limit)
+}
+
+// pastSubtree reports whether after sorts beyond every key under dir. A
+// directory holding keys past after is still a common prefix.
+func pastSubtree(dir, after string) bool {
+	sub := dir + "/"
+	return after >= sub && !strings.HasPrefix(after, sub)
 }
 
 func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, error) {
@@ -127,9 +140,6 @@ func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, erro
 		if dir != "." {
 			name = path.Join(dir, entry.Name())
 		}
-		if after != "" && name <= after {
-			continue
-		}
 		if isMetaDir(entry.Name()) || isTempFile(entry.Name()) {
 			continue
 		}
@@ -138,7 +148,13 @@ func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, erro
 			return s2.ListResult{}, fmt.Errorf("failed to get info: %w", err)
 		}
 		if info.IsDir() {
+			if pastSubtree(name, after) {
+				continue
+			}
 			res.CommonPrefixes = append(res.CommonPrefixes, name)
+			continue
+		}
+		if after != "" && name <= after {
 			continue
 		}
 		res.Objects = append(res.Objects, newObjectFileInfo(s.fsys, name, info))

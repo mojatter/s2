@@ -160,17 +160,31 @@ func (m *mockAzblobClient) copyBlob(_ context.Context, container, src, dst strin
 	return nil
 }
 
+// mockMarkerPrefix marks the mock's markers. Azure's are opaque, so the mock
+// rejects anything it did not hand out itself.
+const mockMarkerPrefix = "mock-marker:"
+
 func (m *mockAzblobClient) listBlobs(_ context.Context, ctr, prefix string, maxResults int32, marker string) (listBlobsResult, error) {
-	return m.doList(ctr, prefix, "", maxResults, marker), nil
+	return m.doList(ctr, prefix, "", maxResults, marker)
 }
 
 func (m *mockAzblobClient) listBlobsHierarchy(_ context.Context, ctr, prefix, delimiter string, maxResults int32, marker string) (listBlobsResult, error) {
-	return m.doList(ctr, prefix, delimiter, maxResults, marker), nil
+	return m.doList(ctr, prefix, delimiter, maxResults, marker)
 }
 
-func (m *mockAzblobClient) doList(ctr, prefix, delimiter string, maxResults int32, marker string) listBlobsResult {
+func (m *mockAzblobClient) doList(ctr, prefix, delimiter string, maxResults int32, marker string) (listBlobsResult, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	// The marker names the page's first key, inclusive.
+	from := ""
+	if marker != "" {
+		key, ok := strings.CutPrefix(marker, mockMarkerPrefix)
+		if !ok {
+			return listBlobsResult{}, fmt.Errorf("invalid marker %q", marker)
+		}
+		from = key
+	}
 
 	var keys []string
 	for k := range m.blobs {
@@ -189,7 +203,7 @@ func (m *mockAzblobClient) doList(ctr, prefix, delimiter string, maxResults int3
 		if !strings.HasPrefix(b.key, prefix) {
 			continue
 		}
-		if marker != "" && b.key <= marker {
+		if from != "" && b.key < from {
 			continue
 		}
 
@@ -207,7 +221,7 @@ func (m *mockAzblobClient) doList(ctr, prefix, delimiter string, maxResults int3
 		}
 
 		if int32(len(result.items)) >= maxResults {
-			result.nextMarker = b.key
+			result.nextMarker = mockMarkerPrefix + b.key
 			break
 		}
 
@@ -218,7 +232,7 @@ func (m *mockAzblobClient) doList(ctr, prefix, delimiter string, maxResults int3
 			metadata:      b.metadata,
 		})
 	}
-	return result
+	return result, nil
 }
 
 func (m *mockAzblobClient) signedURL(container, blobName string, _ string, _ time.Time) (string, error) {
@@ -338,6 +352,86 @@ func (s *StorageTestSuite) TestS2TestList() {
 
 	err = s2test.TestStorageList(ctx, strg, "cc", "cc/c1.txt", "cc/c2.txt")
 	s.Require().NoError(err)
+}
+
+// TestListStartAfter covers the emulated start-after: the backend pages from
+// the start and drops the names before the key.
+func (s *StorageTestSuite) TestListStartAfter() {
+	testCases := []struct {
+		caseName     string
+		prefix       string
+		after        string
+		startAfter   string
+		limit        int
+		flat         bool
+		want         []string
+		wantPrefixes []string
+	}{
+		{
+			caseName:   "skips names up to the key",
+			startAfter: "a.txt",
+			want:       []string{"b.txt", "cc/c1.txt", "cc/c2.txt"},
+		},
+		{
+			caseName:   "pages past a fully skipped page",
+			startAfter: "b.txt",
+			limit:      1,
+			want:       []string{"cc/c1.txt"},
+		},
+		{
+			caseName:   "resolves the key against the storage prefix",
+			prefix:     "cc",
+			startAfter: "c1.txt",
+			want:       []string{"c2.txt"},
+		},
+		{
+			caseName:   "after wins over start after",
+			after:      mockMarkerPrefix + "b.txt",
+			startAfter: "cc/c2.txt",
+			want:       []string{"b.txt", "cc/c1.txt", "cc/c2.txt"},
+		},
+		{
+			caseName:     "keeps the prefix holding the key",
+			startAfter:   "cc/c1.txt",
+			flat:         true,
+			want:         []string{},
+			wantPrefixes: []string{"cc/"},
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			_, strg := s.testMockStorage()
+			strg.(*azblobStorage).prefix = tc.prefix
+
+			res, err := strg.List(context.Background(), s2.ListOptions{
+				After:      tc.after,
+				StartAfter: tc.startAfter,
+				Limit:      tc.limit,
+				Recursive:  !tc.flat,
+			})
+			s.Require().NoError(err)
+			got := make([]string, 0, len(res.Objects))
+			for _, obj := range res.Objects {
+				got = append(got, obj.Name())
+			}
+			s.Equal(tc.want, got)
+			if tc.wantPrefixes != nil {
+				s.Equal(tc.wantPrefixes, res.CommonPrefixes)
+			}
+		})
+	}
+}
+
+// TestListPrefixesAreRelative pins that CommonPrefixes drop the storage
+// prefix, as object names do.
+func (s *StorageTestSuite) TestListPrefixesAreRelative() {
+	m, strg := s.testMockStorage()
+	m.put("mycontainer", "cc/dd/x.txt", []byte("x"), nil)
+	strg.(*azblobStorage).prefix = "cc"
+
+	res, err := strg.List(context.Background(), s2.ListOptions{})
+	s.Require().NoError(err)
+	s.Equal([]string{"dd/"}, res.CommonPrefixes)
 }
 
 func (s *StorageTestSuite) TestS2TestGetPut() {
