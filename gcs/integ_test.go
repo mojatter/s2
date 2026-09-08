@@ -56,6 +56,10 @@ func (s *GCSIntegrationSuite) TestGetPut() {
 	s.Require().NoError(s2test.TestStorageGetPut(context.Background(), s.strg))
 }
 
+func (s *GCSIntegrationSuite) TestList() {
+	s.Require().NoError(s2test.TestStorageListPaging(context.Background(), s.strg))
+}
+
 func (s *GCSIntegrationSuite) TestGetNotExist() {
 	s.Require().NoError(s2test.TestStorageGetNotExist(context.Background(), s.strg))
 }

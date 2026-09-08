@@ -334,6 +334,79 @@ func (s *StorageTestSuite) TestListAfter() {
 	}
 }
 
+func (s *StorageTestSuite) TestListStartAfter() {
+	testCases := []struct {
+		caseName     string
+		prefix       string
+		after        string
+		startAfter   string
+		recursive    bool
+		want         []string
+		wantPrefixes []string
+	}{
+		{
+			caseName:   "start after key",
+			startAfter: "a.txt",
+			want:       []string{"b.txt"},
+		},
+		{
+			caseName:   "start after a key that does not exist",
+			startAfter: "a0.txt",
+			want:       []string{"b.txt"},
+		},
+		{
+			caseName:   "after wins over start after",
+			after:      "a.txt",
+			startAfter: "b.txt",
+			want:       []string{"b.txt"},
+		},
+		{
+			caseName:   "recursive",
+			startAfter: "b.txt",
+			recursive:  true,
+			want:       []string{"cc/c1.txt", "cc/c2.txt"},
+		},
+		{
+			caseName:   "with prefix",
+			prefix:     "cc",
+			startAfter: "cc/c1.txt",
+			want:       []string{"cc/c2.txt"},
+		},
+		{
+			caseName:     "keeps the prefix holding the key",
+			startAfter:   "cc/c1.txt",
+			want:         []string{},
+			wantPrefixes: []string{"cc"},
+		},
+		{
+			caseName:     "drops a prefix sorting before the key",
+			startAfter:   "d",
+			want:         []string{},
+			wantPrefixes: []string{},
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			strg := &storage{fsys: s.testMemFS()}
+			res, err := strg.List(context.Background(), s2.ListOptions{
+				Prefix:     tc.prefix,
+				After:      tc.after,
+				StartAfter: tc.startAfter,
+				Recursive:  tc.recursive,
+			})
+			s.Require().NoError(err)
+			got := make([]string, 0, len(res.Objects))
+			for _, obj := range res.Objects {
+				got = append(got, obj.Name())
+			}
+			s.Equal(tc.want, got)
+			if tc.wantPrefixes != nil {
+				s.Equal(tc.wantPrefixes, res.CommonPrefixes)
+			}
+		})
+	}
+}
+
 func (s *StorageTestSuite) TestListRecursiveAfter() {
 	testCases := []struct {
 		caseName string

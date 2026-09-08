@@ -30,6 +30,15 @@ type gcsObject interface {
 
 type gcsObjectIterator interface {
 	next() (*storage.ObjectAttrs, error)
+	// setPageToken resumes the iteration at the given page token.
+	setPageToken(token string)
+	// setMaxSize caps how many items one page holds.
+	setMaxSize(n int)
+	// remaining reports how many items of the current page are still buffered.
+	remaining() int
+	// nextPageToken is the token for the page after the current one, empty
+	// once the listing is exhausted.
+	nextPageToken() string
 }
 
 // --- sdk implementations wrapping the GCS SDK ---
@@ -104,4 +113,20 @@ type sdkObjectIterator struct {
 
 func (i *sdkObjectIterator) next() (*storage.ObjectAttrs, error) {
 	return i.it.Next()
+}
+
+func (i *sdkObjectIterator) setPageToken(token string) {
+	i.it.PageInfo().Token = token
+}
+
+func (i *sdkObjectIterator) setMaxSize(n int) {
+	i.it.PageInfo().MaxSize = n
+}
+
+func (i *sdkObjectIterator) remaining() int {
+	return i.it.PageInfo().Remaining()
+}
+
+func (i *sdkObjectIterator) nextPageToken() string {
+	return i.it.PageInfo().Token
 }

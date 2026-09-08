@@ -173,15 +173,18 @@ func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult,
 		Bucket:  aws.String(s.bucket),
 		MaxKeys: aws.Int32(int32(limit)),
 	}
-	inputPrefix := path.Join(s.prefix, opts.Prefix)
+	inputPrefix := s.listPrefix(opts.Prefix)
 	if delimiter != "" && inputPrefix != "" && !strings.HasSuffix(inputPrefix, delimiter) {
 		inputPrefix += delimiter
 	}
 	if inputPrefix != "" {
 		input.Prefix = aws.String(inputPrefix)
 	}
-	if opts.After != "" {
-		input.StartAfter = aws.String(opts.After)
+	switch {
+	case opts.After != "":
+		input.ContinuationToken = aws.String(opts.After)
+	case opts.StartAfter != "":
+		input.StartAfter = aws.String(s2.Key(s.prefix, opts.StartAfter))
 	}
 	if delimiter != "" {
 		input.Delimiter = aws.String(delimiter)
@@ -197,13 +200,10 @@ func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult,
 		Objects:        make([]s2.Object, 0, len(res.Contents)),
 	}
 	for _, p := range res.CommonPrefixes {
-		out.CommonPrefixes = append(out.CommonPrefixes, aws.ToString(p.Prefix))
+		out.CommonPrefixes = append(out.CommonPrefixes, s2.RelName(s.prefix, aws.ToString(p.Prefix)))
 	}
 	for _, c := range res.Contents {
-		key := aws.ToString(c.Key)
-		if s.prefix != "" {
-			key = key[len(s.prefix)+1:]
-		}
+		key := s2.RelName(s.prefix, aws.ToString(c.Key))
 		out.Objects = append(out.Objects, &object{
 			client:       s.client,
 			bucket:       s.bucket,
@@ -217,6 +217,19 @@ func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult,
 		out.NextAfter = aws.ToString(res.NextContinuationToken)
 	}
 	return out, nil
+}
+
+// listPrefix joins the storage prefix with the caller's, restoring the
+// separator path.Join drops: "data" must not match "data2/".
+func (s *storage) listPrefix(prefix string) string {
+	full := path.Join(s.prefix, prefix)
+	if full == "" {
+		return ""
+	}
+	if strings.HasSuffix(prefix, "/") || (prefix == "" && s.prefix != "") {
+		full += "/"
+	}
+	return full
 }
 
 func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {

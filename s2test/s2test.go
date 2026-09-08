@@ -13,8 +13,8 @@ import (
 
 // TestStorageList is a test helper for validating s2.Storage list operations.
 // It exercises the flat-listing path of Storage.List (Recursive: false) for a
-// particular prefix against the expected direct object names, including a
-// pagination round-trip via the After continuation token.
+// particular prefix against the expected direct object names, including both
+// resume paths: the After continuation token and the StartAfter key.
 // The expected array should only contain names of objects immediately beneath the prefix.
 // expectedPrefixes is an optional list of expected common prefixes (subdirectories).
 func TestStorageList(ctx context.Context, strg s2.Storage, prefix string, expected ...string) error {
@@ -71,18 +71,35 @@ func TestStorageListWithPrefixes(ctx context.Context, strg s2.Storage, prefix st
 		res1, err := strg.List(ctx, s2.ListOptions{Prefix: prefix, Limit: limit})
 		if err != nil {
 			errorf("List(prefix=%q, limit=%d) failed: %v", prefix, limit, err)
-		} else if len(res1.Objects) != limit {
-			errorf("List(prefix=%q, limit=%d) returned %d objects", prefix, limit, len(res1.Objects))
+		} else if n := len(res1.Objects); n == 0 || n > limit {
+			// Limit caps entries, so CommonPrefixes may take part of the page.
+			errorf("List(prefix=%q, limit=%d) returned %d objects", prefix, limit, n)
 		} else {
+			// NextAfter fed back as After.
+			if res1.NextAfter == "" {
+				errorf("List(prefix=%q, limit=%d) returned no NextAfter", prefix, limit)
+			} else {
+				res2, err := strg.List(ctx, s2.ListOptions{Prefix: prefix, After: res1.NextAfter})
+				if err != nil {
+					errorf("List(prefix=%q, after=<token>) failed: %v", prefix, err)
+				} else {
+					var combined []s2.Object
+					combined = append(combined, res1.Objects...)
+					combined = append(combined, res2.Objects...)
+					checkMatch(fmt.Sprintf("List Pagination (prefix %q, limit %d, after token)", prefix, limit), combined, expected)
+				}
+			}
+
+			// The caller-chosen resume key.
 			last := res1.Objects[len(res1.Objects)-1].Name()
-			res2, err := strg.List(ctx, s2.ListOptions{Prefix: prefix, After: last})
+			res2, err := strg.List(ctx, s2.ListOptions{Prefix: prefix, StartAfter: last})
 			if err != nil {
-				errorf("List(prefix=%q, after=%q) failed: %v", prefix, last, err)
+				errorf("List(prefix=%q, start-after=%q) failed: %v", prefix, last, err)
 			} else {
 				var combined []s2.Object
 				combined = append(combined, res1.Objects...)
 				combined = append(combined, res2.Objects...)
-				checkMatch(fmt.Sprintf("List Pagination (prefix %q, limit %d, after %q)", prefix, limit, last), combined, expected)
+				checkMatch(fmt.Sprintf("List StartAfter (prefix %q, limit %d, start-after %q)", prefix, limit, last), combined, expected)
 			}
 		}
 	}
@@ -95,8 +112,8 @@ func TestStorageListWithPrefixes(ctx context.Context, strg s2.Storage, prefix st
 
 // TestStorageListRecursive is a test helper for validating s2.Storage recursive list operations.
 // It exercises the recursive path of Storage.List (Recursive: true) — including
-// a prefix-filter case and a pagination round-trip via the After continuation
-// token — against the expected object names.
+// a prefix-filter case and both resume paths, the After continuation token
+// and the StartAfter key — against the expected object names.
 // The provided expected array must be the comprehensive list of object names in the storage.
 func TestStorageListRecursive(ctx context.Context, strg s2.Storage, expected ...string) error {
 	sort.Strings(expected)
@@ -149,7 +166,7 @@ func TestStorageListRecursive(ctx context.Context, strg s2.Storage, expected ...
 		}
 	}
 
-	// 3. Test pagination via After
+	// 3. Test both resume paths
 	if len(expected) > 1 {
 		limit := len(expected) / 2
 		res1, err := strg.List(ctx, s2.ListOptions{Limit: limit, Recursive: true})
@@ -158,15 +175,31 @@ func TestStorageListRecursive(ctx context.Context, strg s2.Storage, expected ...
 		} else if len(res1.Objects) != limit {
 			errorf("List(limit=%d, recursive) returned %d objects", limit, len(res1.Objects))
 		} else {
+			// NextAfter fed back as After.
+			if res1.NextAfter == "" {
+				errorf("List(limit=%d, recursive) returned no NextAfter", limit)
+			} else {
+				res2, err := strg.List(ctx, s2.ListOptions{After: res1.NextAfter, Recursive: true})
+				if err != nil {
+					errorf("List(after=<token>, recursive) failed: %v", err)
+				} else {
+					var combined []s2.Object
+					combined = append(combined, res1.Objects...)
+					combined = append(combined, res2.Objects...)
+					checkMatch(fmt.Sprintf("Pagination combined (limit %d, after token)", limit), combined, expected)
+				}
+			}
+
+			// The caller-chosen resume key.
 			last := res1.Objects[len(res1.Objects)-1].Name()
-			res2, err := strg.List(ctx, s2.ListOptions{After: last, Recursive: true})
+			res2, err := strg.List(ctx, s2.ListOptions{StartAfter: last, Recursive: true})
 			if err != nil {
-				errorf("List(after=%q, recursive) failed: %v", last, err)
+				errorf("List(start-after=%q, recursive) failed: %v", last, err)
 			} else {
 				var combined []s2.Object
 				combined = append(combined, res1.Objects...)
 				combined = append(combined, res2.Objects...)
-				checkMatch(fmt.Sprintf("Pagination combined (limit %d, after %q)", limit, last), combined, expected)
+				checkMatch(fmt.Sprintf("StartAfter combined (limit %d, start-after %q)", limit, last), combined, expected)
 			}
 		}
 	}
@@ -175,6 +208,37 @@ func TestStorageListRecursive(ctx context.Context, strg s2.Storage, expected ...
 		return fmt.Errorf("TestStorageListRecursive found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
 	}
 	return nil
+}
+
+// TestStorageListPaging writes its own fixture, then lists it flat and
+// recursively (on a Sub storage), covering both resume paths.
+func TestStorageListPaging(ctx context.Context, strg s2.Storage) error {
+	const dir = "s2test-list"
+	names := []string{
+		dir + "/a.txt",
+		dir + "/b.txt",
+		dir + "/c.txt",
+		dir + "/d.txt",
+		dir + "/sub/e.txt",
+	}
+	for _, name := range names {
+		if err := strg.Put(ctx, s2.NewObjectBytes(name, []byte("x"))); err != nil {
+			return fmt.Errorf("Put(%q) failed: %w", name, err)
+		}
+	}
+
+	if err := TestStorageListWithPrefixes(ctx, strg, dir, []string{dir + "/sub/"},
+		dir+"/a.txt", dir+"/b.txt", dir+"/c.txt", dir+"/d.txt"); err != nil {
+		return err
+	}
+
+	// A Sub storage isolates the recursive listing from other objects.
+	sub, err := strg.Sub(ctx, dir)
+	if err != nil {
+		return fmt.Errorf("Sub(%q) failed: %w", dir, err)
+	}
+
+	return TestStorageListRecursive(ctx, sub, "a.txt", "b.txt", "c.txt", "d.txt", "sub/e.txt")
 }
 
 // TestStorageGetPut validates that Put writes an object and Get reads it back correctly.
