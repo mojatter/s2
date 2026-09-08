@@ -736,6 +736,18 @@ func TestParseAuthHeader(t *testing.T) {
 			wantKey:  "Signature",
 			wantVal:  "abc123",
 		},
+		{
+			caseName: "no space after comma",
+			input:    "Credential=AKID/20130524/us-east-1/s3/aws4_request,SignedHeaders=host;x-amz-date,Signature=abc123",
+			wantKey:  "SignedHeaders",
+			wantVal:  "host;x-amz-date",
+		},
+		{
+			caseName: "mixed spacing after comma",
+			input:    "Credential=AKID/20130524/us-east-1/s3/aws4_request,SignedHeaders=host;x-amz-date, Signature=abc123",
+			wantKey:  "Signature",
+			wantVal:  "abc123",
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
