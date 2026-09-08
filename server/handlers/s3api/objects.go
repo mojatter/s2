@@ -25,7 +25,10 @@ const (
 	etagMetadataKey        = server.EtagMetadataKey
 	contentTypeMetadataKey = server.ContentTypeMetadataKey
 	defaultContentType     = server.DefaultContentType
-	defaultMaxKeys         = 1000
+
+	// maxObjectKeys is S3's per-request key ceiling: ListObjects' default
+	// (and maximum) max-keys, and DeleteObjects' <Object> limit.
+	maxObjectKeys = 1000
 )
 
 // resolveContentType returns r's Content-Type header, or defaultContentType
@@ -100,7 +103,7 @@ func (p listObjectsParams) startKey() string {
 	return p.startAfter
 }
 
-func parseListObjectsParams(r *http.Request) listObjectsParams {
+func parseListObjectsParams(r *http.Request) (listObjectsParams, error) {
 	query := r.URL.Query()
 	p := listObjectsParams{
 		bucketName:        r.PathValue("bucket"),
@@ -108,14 +111,18 @@ func parseListObjectsParams(r *http.Request) listObjectsParams {
 		delimiter:         query.Get("delimiter"),
 		continuationToken: query.Get("continuation-token"),
 		startAfter:        query.Get("start-after"),
-		maxKeys:           defaultMaxKeys,
+		maxKeys:           maxObjectKeys,
 	}
 	if v := query.Get("max-keys"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			p.maxKeys = n
+		// bitSize 32: Atoi would accept up to int64 on a 64-bit build.
+		n, err := strconv.ParseInt(v, 10, 32)
+		if err != nil || n < 0 {
+			return p, fmt.Errorf("max-keys must be an integer between 0 and 2147483647, got %q", v)
 		}
+		// S3 caps max-keys rather than rejecting an over-large one.
+		p.maxKeys = min(int(n), maxObjectKeys)
 	}
-	return p
+	return p, nil
 }
 
 // listObjects fetches objects (and common prefixes for delimited requests)
@@ -209,7 +216,11 @@ func buildListBucketResult(p listObjectsParams, objs []s2.Object, prefixes []str
 
 func handleListObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	p := parseListObjectsParams(r)
+	p, err := parseListObjectsParams(r)
+	if err != nil {
+		writeError(w, r, "InvalidArgument", err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	strg, err := s.Buckets.Get(ctx, p.bucketName)
 	if err != nil {
@@ -626,6 +637,10 @@ func handleDeleteObjects(s *server.Server, w http.ResponseWriter, r *http.Reques
 			return
 		}
 		writeError(w, r, "MalformedXML", "The XML you provided was not well-formed", http.StatusBadRequest)
+		return
+	}
+	if len(req.Objects) > maxObjectKeys {
+		writeError(w, r, "MalformedXML", fmt.Sprintf("The XML you provided was not well-formed: a request may contain at most %d keys", maxObjectKeys), http.StatusBadRequest)
 		return
 	}
 

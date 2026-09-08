@@ -44,7 +44,7 @@ func (s *ObjectsTestSuite) TestListObjects() {
 		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
 		s.Equal("b", result.Name)
 		s.Equal("/", result.Delimiter)
-		s.Equal(defaultMaxKeys, result.MaxKeys)
+		s.Equal(maxObjectKeys, result.MaxKeys)
 		s.False(result.IsTruncated)
 		s.Len(result.Contents, 1)
 		s.Equal("file.txt", result.Contents[0].Key)
@@ -359,15 +359,42 @@ func (s *ObjectsTestSuite) TestListObjects_Pagination() {
 		s.Empty(result.Contents)
 	})
 
-	s.Run("invalid max-keys uses default", func() {
-		req := httptest.NewRequest("GET", "/pg?max-keys=abc", nil)
+	s.Run("max-keys above the limit is clamped", func() {
+		req := httptest.NewRequest("GET", "/pg?max-keys=100000", nil)
 		req.SetPathValue("bucket", "pg")
 		w := httptest.NewRecorder()
 		handleListObjects(s.server, w, req)
 
+		s.Equal(http.StatusOK, w.Code)
 		var result ListBucketResult
 		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
-		s.Equal(defaultMaxKeys, result.MaxKeys)
+		s.Equal(maxObjectKeys, result.MaxKeys)
+	})
+
+	s.Run("invalid max-keys is rejected", func() {
+		testCases := []struct {
+			caseName string
+			maxKeys  string
+		}{
+			{caseName: "non-numeric", maxKeys: "abc"},
+			{caseName: "negative", maxKeys: "-1"},
+			{caseName: "float", maxKeys: "1.5"},
+			{caseName: "above int32", maxKeys: "2147483648"},
+			{caseName: "above int64", maxKeys: "99999999999999999999"},
+		}
+		for _, tc := range testCases {
+			s.Run(tc.caseName, func() {
+				req := httptest.NewRequest("GET", "/pg?max-keys="+tc.maxKeys, nil)
+				req.SetPathValue("bucket", "pg")
+				w := httptest.NewRecorder()
+				handleListObjects(s.server, w, req)
+
+				s.Equal(http.StatusBadRequest, w.Code)
+				var errResp ErrorResponse
+				s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+				s.Equal("InvalidArgument", errResp.Code)
+			})
+		}
 	})
 
 	s.Run("delimiter with start-after", func() {
@@ -1339,6 +1366,52 @@ func (s *ObjectsTestSuite) TestDeleteObjects() {
 		s.Len(result.Deleted, 1)
 		s.Equal("ghost.txt", result.Deleted[0].Key)
 		s.Empty(result.Errors)
+	})
+
+	s.Run("at the 1000-key limit", func() {
+		s.createBucket("dl")
+
+		var sb strings.Builder
+		sb.WriteString("<Delete>")
+		for i := range 1000 {
+			fmt.Fprintf(&sb, "<Object><Key>k%d.txt</Key></Object>", i)
+		}
+		sb.WriteString("</Delete>")
+
+		req := httptest.NewRequest("POST", "/dl?delete", strings.NewReader(sb.String()))
+		req.SetPathValue("bucket", "dl")
+		w := httptest.NewRecorder()
+		handleDeleteObjects(s.server, w, req)
+
+		s.Equal(http.StatusOK, w.Code)
+	})
+
+	s.Run("more than 1000 keys is rejected", func() {
+		s.createBucket("dx")
+		s.putObject("dx", "k0.txt", "data")
+
+		var sb strings.Builder
+		sb.WriteString("<Delete>")
+		for i := range 1001 {
+			fmt.Fprintf(&sb, "<Object><Key>k%d.txt</Key></Object>", i)
+		}
+		sb.WriteString("</Delete>")
+
+		req := httptest.NewRequest("POST", "/dx?delete", strings.NewReader(sb.String()))
+		req.SetPathValue("bucket", "dx")
+		w := httptest.NewRecorder()
+		handleDeleteObjects(s.server, w, req)
+
+		s.Equal(http.StatusBadRequest, w.Code)
+		s.Contains(w.Body.String(), "MalformedXML")
+
+		// Rejected before any key is deleted.
+		getReq := httptest.NewRequest("GET", "/dx/k0.txt", nil)
+		getReq.SetPathValue("bucket", "dx")
+		getReq.SetPathValue("key", "k0.txt")
+		getW := httptest.NewRecorder()
+		handleGetObject(s.server, getW, getReq)
+		s.Equal(http.StatusOK, getW.Code)
 	})
 
 	s.Run("nonexistent bucket", func() {
