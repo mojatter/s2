@@ -264,9 +264,12 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 		return
 	}
 
-	// Drop the whole tree: deleting the listed parts one by one left the
-	// manifest and any unlisted part behind.
-	_ = strg.DeleteRecursive(ctx, uploadPrefix(uploadID))
+	// By key, not DeleteRecursive: the fs backend walks the whole bucket
+	// for that. A part uploaded but not listed here stays behind (#202).
+	for _, p := range req.Parts {
+		_ = strg.Delete(ctx, partKey(uploadID, p.PartNumber))
+	}
+	_ = strg.Delete(ctx, manifestKey(uploadID))
 
 	writeXML(w, http.StatusOK, CompleteMultipartUploadResult{
 		Location: "/" + bucketName + "/" + key,

@@ -420,24 +420,18 @@ func (s *MultipartTestSuite) TestCompleteMultipartUploadWithoutManifest() {
 	s.Equal(defaultContentType, w.Header().Get("Content-Type"))
 }
 
-// Complete used to delete only the parts it was given (#202).
-func (s *MultipartTestSuite) TestCompleteMultipartUploadClearsTheUploadTree() {
+// Complete removes what it consumed: the listed parts and the manifest.
+func (s *MultipartTestSuite) TestCompleteMultipartUploadRemovesPartsAndManifest() {
 	const bucket, key = "mp-cleanup", "file.bin"
 	s.createBucket(bucket)
 
 	uploadID := s.initiateUpload(bucket, key, nil)
 	s.uploadPart(bucket, key, uploadID, 1, "hello")
-	s.uploadPart(bucket, key, uploadID, 2, "orphan")
 	s.completeUpload(bucket, key, uploadID, 1)
 
 	ctx := context.Background()
 	strg := s.storage(bucket)
-	for _, name := range []string{
-		manifestKey(uploadID),
-		partKey(uploadID, 1),
-		partKey(uploadID, 2),
-		multipartPrefix + uploadID,
-	} {
+	for _, name := range []string{manifestKey(uploadID), partKey(uploadID, 1)} {
 		exists, err := strg.Exists(ctx, name)
 		s.Require().NoError(err)
 		s.Falsef(exists, "%s should have been removed", name)
