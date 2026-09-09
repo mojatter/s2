@@ -1,10 +1,12 @@
 package s3api
 
 import (
+	"context"
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible multipart ETag
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -32,8 +34,36 @@ func filterMultipart(objs []s2.Object) []s2.Object {
 	return out
 }
 
+// uploadPrefix is the key prefix holding one upload's parts and manifest.
+func uploadPrefix(uploadID string) string {
+	return multipartPrefix + uploadID + "/"
+}
+
 func partKey(uploadID string, partNumber int) string {
-	return fmt.Sprintf("%s%s/%05d", multipartPrefix, uploadID, partNumber)
+	return fmt.Sprintf("%s%05d", uploadPrefix(uploadID), partNumber)
+}
+
+// manifestKey names the zero-length object whose metadata carries the
+// initiate request's headers. Part keys are digits, so it cannot collide.
+func manifestKey(uploadID string) string {
+	return uploadPrefix(uploadID) + "manifest"
+}
+
+// uploadMetadata returns what CreateMultipartUpload recorded. A missing
+// manifest yields an empty map; any other read failure is returned.
+func uploadMetadata(ctx context.Context, strg s2.Storage, uploadID string) (s2.Metadata, error) {
+	obj, err := strg.Get(ctx, manifestKey(uploadID))
+	if errors.Is(err, s2.ErrNotExist) {
+		return make(s2.Metadata), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	md := obj.Metadata().Clone()
+	if md == nil {
+		md = make(s2.Metadata)
+	}
+	return md, nil
 }
 
 // newUploadID generates a 16-byte upload ID: 4 bytes of elapsed seconds
@@ -47,12 +77,19 @@ func newUploadID(started time.Time) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// validUploadID reports whether id could have come from newUploadID.
+func validUploadID(id string) bool {
+	b, err := hex.DecodeString(id)
+	return err == nil && len(b) == 16
+}
+
 func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
 	key := r.PathValue("key")
 
-	if _, err := s.Buckets.Get(ctx, bucketName); err != nil {
+	strg, err := s.Buckets.Get(ctx, bucketName)
+	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
@@ -61,6 +98,23 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 	uploadID, err := newUploadID(s.StartedAt)
 	if err != nil {
 		writeError(w, r, "InternalError", "Failed to generate upload ID", http.StatusInternalServerError)
+		return
+	}
+
+	// S3 takes the object's headers from the initiate request. Record them
+	// on the manifest's own metadata, which Put persists in the same call.
+	md := parseMetadataHeaders(r)
+	// The store below is conditional, so x-amz-meta-s2-content-type would
+	// otherwise reach the reserved key it shares a namespace with (#192).
+	dropInternalMetadata(md)
+	// An absent Content-Type stays unstored: GetObject answers with the
+	// default either way, and the console can still guess from the key.
+	if ct := requestContentType(r); ct != "" {
+		md[contentTypeMetadataKey] = ct
+	}
+	if err := strg.Put(ctx, s2.NewObjectBytes(manifestKey(uploadID), nil, s2.WithMetadata(md))); err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
 		return
 	}
 
@@ -79,6 +133,10 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	partNumberStr := r.URL.Query().Get("partNumber")
 	if uploadID == "" || partNumberStr == "" {
 		writeError(w, r, "InvalidArgument", "Missing uploadId or partNumber", http.StatusBadRequest)
+		return
+	}
+	if !validUploadID(uploadID) {
+		writeError(w, r, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
 		return
 	}
 	partNumber, err := strconv.Atoi(partNumberStr)
@@ -128,6 +186,10 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 		writeError(w, r, "InvalidArgument", "Missing uploadId", http.StatusBadRequest)
 		return
 	}
+	if !validUploadID(uploadID) {
+		writeError(w, r, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
+		return
+	}
 
 	var req CompleteMultipartUploadRequest
 	if !decodeXMLBody(w, r, &req) {
@@ -169,6 +231,15 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 		totalLen += obj.Length()
 	}
 
+	// This request carries no headers of its own; they were recorded at
+	// initiate time.
+	md, err := uploadMetadata(ctx, strg, uploadID)
+	if err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+
 	// Stream all parts through a single reader, tee-ing each part into its own
 	// MD5 hash as it flows by. This avoids buffering the assembled object in
 	// memory — critical for the memfs backend, and a peak-memory win for all
@@ -176,7 +247,7 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 	// + "-" + partCount; we collect the per-part MD5s after Put has drained
 	// the reader.
 	pr := &partsReader{parts: partObjs}
-	finalObj := s2.NewObjectReader(key, pr, totalLen)
+	finalObj := s2.NewObjectReader(key, pr, totalLen, s2.WithMetadata(md))
 	if err := strg.Put(ctx, finalObj); err != nil {
 		_ = pr.Close()
 		code, msg, status := s2ErrorToS3Error(err)
@@ -186,12 +257,19 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 
 	combined := md5.Sum(pr.partMD5s) // #nosec G401 -- MD5 is required for S3-compatible multipart ETag
 	etag := `"` + hex.EncodeToString(combined[:]) + `-` + strconv.Itoa(len(req.Parts)) + `"`
-	_ = strg.PutMetadata(ctx, key, s2.Metadata{etagMetadataKey: etag})
+	md[etagMetadataKey] = etag
+	if err := strg.PutMetadata(ctx, key, md); err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
 
-	// Clean up part objects
+	// By key, not DeleteRecursive: the fs backend walks the whole bucket
+	// for that. A part uploaded but not listed here stays behind (#202).
 	for _, p := range req.Parts {
 		_ = strg.Delete(ctx, partKey(uploadID, p.PartNumber))
 	}
+	_ = strg.Delete(ctx, manifestKey(uploadID))
 
 	writeXML(w, http.StatusOK, CompleteMultipartUploadResult{
 		Location: "/" + bucketName + "/" + key,
@@ -210,6 +288,10 @@ func handleAbortMultipartUpload(s *server.Server, w http.ResponseWriter, r *http
 		writeError(w, r, "InvalidArgument", "Missing uploadId", http.StatusBadRequest)
 		return
 	}
+	if !validUploadID(uploadID) {
+		writeError(w, r, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
+		return
+	}
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
@@ -218,7 +300,7 @@ func handleAbortMultipartUpload(s *server.Server, w http.ResponseWriter, r *http
 		return
 	}
 
-	_ = strg.DeleteRecursive(ctx, multipartPrefix+uploadID+"/")
+	_ = strg.DeleteRecursive(ctx, uploadPrefix(uploadID))
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -29,12 +29,16 @@ const (
 	maxObjectKeys = 1000
 )
 
-// resolveContentType returns r's Content-Type header, or defaultContentType
-// if the request didn't send one -- or sent only whitespace, which some
-// HTTP client libraries emit for "no MIME type resolved" and which would
-// otherwise round-trip as a blank Content-Type instead of the default.
+// requestContentType returns r's Content-Type, or "" if it sent none -- or
+// only whitespace, which some HTTP clients emit for "no MIME type resolved".
+func requestContentType(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get("Content-Type"))
+}
+
+// resolveContentType returns r's Content-Type, or defaultContentType if the
+// request didn't send a usable one.
 func resolveContentType(r *http.Request) string {
-	if ct := strings.TrimSpace(r.Header.Get("Content-Type")); ct != "" {
+	if ct := requestContentType(r); ct != "" {
 		return ct
 	}
 	return defaultContentType
@@ -494,6 +498,14 @@ func parseMetadataHeaders(r *http.Request) s2.Metadata {
 		}
 	}
 	return md
+}
+
+// dropInternalMetadata removes s2's own bookkeeping keys from metadata a
+// client supplied, so x-amz-meta-* cannot reach them (#192).
+func dropInternalMetadata(md s2.Metadata) {
+	for k := range server.InternalMetadataKeys {
+		delete(md, k)
+	}
 }
 
 func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, copySource string) {
