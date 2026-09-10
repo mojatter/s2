@@ -168,6 +168,7 @@ type Server struct {
 	Config    *Config
 	Template  *template.Template
 	Buckets   *Buckets
+	Multipart *MultipartStore
 	StartedAt time.Time // server start time, used as epoch for upload ID generation
 }
 
@@ -184,10 +185,15 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	multipart, err := newMultipartStore(ctx, buckets.strg)
+	if err != nil {
+		return nil, err
+	}
 	return &Server{
 		Config:    cfg,
 		Template:  tmpl,
 		Buckets:   buckets,
+		Multipart: multipart,
 		StartedAt: time.Now(),
 	}, nil
 }

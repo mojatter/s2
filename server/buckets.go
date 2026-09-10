@@ -12,9 +12,8 @@ import (
 	_ "github.com/mojatter/s2/fs"
 )
 
-// ErrReservedBucketName is returned by Buckets.Create when the requested
-// name collides with a path reserved on the S3 listener — currently the
-// first segment of cfg.HealthPath.
+// ErrReservedBucketName is returned by Buckets.Create for a name reserved
+// by the health path or by s2 itself.
 var ErrReservedBucketName = errors.New("bucket name is reserved")
 
 const keepFile = ".keep"
@@ -106,7 +105,14 @@ func (bs *Buckets) Names(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return res.CommonPrefixes, nil
+	names := make([]string, 0, len(res.CommonPrefixes))
+	for _, name := range res.CommonPrefixes {
+		if isHiddenBucketEntry(name) {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names, nil
 }
 
 func (bs *Buckets) Get(ctx context.Context, name string) (s2.Storage, error) {
@@ -147,6 +153,9 @@ func (bs *Buckets) CreatedAt(ctx context.Context, name string) time.Time {
 // has no "directory" primitive; s3 is intended for library-style use
 // against a single bucket, not as a multi-bucket server backend.
 func (bs *Buckets) Exists(ctx context.Context, name string) (bool, error) {
+	if isHiddenBucketEntry(name) {
+		return false, nil
+	}
 	return bs.strg.Exists(ctx, name)
 }
 
@@ -154,15 +163,25 @@ func (bs *Buckets) Create(ctx context.Context, name string) error {
 	if bs.reservedName != "" && name == bs.reservedName {
 		return fmt.Errorf("%w: %q is served by the health endpoint", ErrReservedBucketName, name)
 	}
+	if isHiddenBucketEntry(name) {
+		return fmt.Errorf("%w: %q is internal state", ErrReservedBucketName, name)
+	}
 	obj := s2.NewObjectBytes(name+"/"+keepFile, []byte{})
 	return bs.strg.Put(ctx, obj)
 }
 
 func (bs *Buckets) Delete(ctx context.Context, name string) error {
+	// The console calls Delete without Exists.
+	if isHiddenBucketEntry(name) {
+		return &ErrBucketNotFound{Name: name}
+	}
 	return bs.strg.DeleteRecursive(ctx, name)
 }
 
 func (bs *Buckets) CreateFolder(ctx context.Context, bucket, key string) error {
+	if isHiddenBucketEntry(bucket) {
+		return &ErrBucketNotFound{Name: bucket}
+	}
 	sub, err := bs.strg.Sub(ctx, bucket)
 	if err != nil {
 		return err
@@ -170,4 +189,3 @@ func (bs *Buckets) CreateFolder(ctx context.Context, bucket, key string) error {
 	obj := s2.NewObjectBytes(key+"/"+keepFile, []byte{})
 	return sub.Put(ctx, obj)
 }
-
