@@ -24,6 +24,8 @@ profile.cov
 .env
 
 # Editor/IDE
+*~
+*.bak
 .idea/
 .vscode/
 
@@ -32,6 +34,13 @@ dist/
 
 # build output
 bin/
+s2-server
 
 # default data directory
 data/
+
+# macOS
+**/.DS_Store
+
+# Go Workspaces (this should never be committed)
+go.work*

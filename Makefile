@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X github.com/mojatter/s2/server.version=$(VERSION)
 
 .PHONY: build
 build:
-	cd cmd/s2-server && go build -ldflags "$(LDFLAGS)" -o ../../bin/s2-server .
+	go build -ldflags "$(LDFLAGS)" ./cmd/s2-server/...
 
 .PHONY: test
 test:
@@ -61,7 +61,7 @@ BENCH_TIME    ?= 30s
 bench-warp: build
 	@command -v warp >/dev/null || { echo "warp not found on PATH; install with: go install github.com/minio/warp@latest"; exit 1; }
 	@rm -rf $(BENCH_DATA) && mkdir -p $(BENCH_DATA)
-	@S2_SERVER_ROOT=$(BENCH_DATA) S2_SERVER_LISTEN=:$(BENCH_PORT) S2_SERVER_CONSOLE_LISTEN= S2_SERVER_BUCKETS=$(BENCH_BUCKET) ./bin/s2-server >/tmp/s2-bench-warp.log 2>&1 & \
+	@S2_SERVER_ROOT=$(BENCH_DATA) S2_SERVER_LISTEN=:$(BENCH_PORT) S2_SERVER_CONSOLE_LISTEN= S2_SERVER_BUCKETS=$(BENCH_BUCKET) ./s2-server >/tmp/s2-bench-warp.log 2>&1 & \
 	pid=$$!; \
 	trap "kill $$pid 2>/dev/null" EXIT INT TERM; \
 	sleep 1; \
