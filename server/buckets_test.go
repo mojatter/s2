@@ -255,3 +255,44 @@ func (s *BucketsTestSuite) TestKeepFileNotVisibleInList() {
 	s.Len(objs, 1)
 	s.Equal("real.txt", objs[0].Name())
 }
+
+func (s *BucketsTestSuite) TestNamesSkipsHiddenEntries() {
+	ctx := context.Background()
+
+	s.Require().NoError(s.buckets.Create(ctx, "alpha"))
+	s.Require().NoError(s.buckets.strg.Put(ctx, s2.NewObjectBytes(multipartDir+"/deadbeef/00001", []byte("x"))))
+
+	names, err := s.buckets.Names(ctx)
+	s.Require().NoError(err)
+	s.Equal([]string{"alpha"}, names)
+}
+
+func (s *BucketsTestSuite) TestHiddenEntryIsNotABucket() {
+	ctx := context.Background()
+	s.Require().NoError(s.buckets.strg.Put(ctx, s2.NewObjectBytes(multipartDir+"/deadbeef/00001", []byte("x"))))
+
+	err := s.buckets.Create(ctx, multipartDir)
+	s.ErrorIs(err, ErrReservedBucketName)
+
+	exists, err := s.buckets.Exists(ctx, multipartDir)
+	s.Require().NoError(err)
+	s.False(exists)
+
+	_, err = s.buckets.Get(ctx, multipartDir)
+	var notFound *ErrBucketNotFound
+	s.ErrorAs(err, &notFound)
+
+	err = s.buckets.Delete(ctx, multipartDir)
+	s.ErrorAs(err, &notFound)
+
+	err = s.buckets.CreateFolder(ctx, multipartDir, "deadbeef")
+	s.ErrorAs(err, &notFound)
+	keep, err := s.buckets.strg.Exists(ctx, multipartDir+"/deadbeef/"+keepFile)
+	s.Require().NoError(err)
+	s.False(keep)
+
+	// The state itself is untouched.
+	ok, err := s.buckets.strg.Exists(ctx, multipartDir+"/deadbeef/00001")
+	s.Require().NoError(err)
+	s.True(ok)
+}
