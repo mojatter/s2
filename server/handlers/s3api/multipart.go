@@ -203,6 +203,12 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 		return
 	}
 
+	// An empty list would Put a zero-byte object, truncating the key.
+	if len(req.Parts) == 0 {
+		writeError(w, r, "InvalidRequest", "You must specify at least one part", http.StatusBadRequest)
+		return
+	}
+
 	// S3 rejects an unordered parts list rather than sorting it; sorting also
 	// hides a repeated part number, which assembles that part many times over.
 	for i, p := range req.Parts {

@@ -107,6 +107,7 @@ func (s *MultipartTestSuite) TestCompleteMultipartUploadRejects() {
 		parts    string
 		wantCode string
 	}{
+		{caseName: "empty parts list", parts: "", wantCode: "InvalidRequest"},
 		{caseName: "duplicate part number", parts: part("1") + part("1"), wantCode: "InvalidPartOrder"},
 		{caseName: "descending order", parts: part("2") + part("1"), wantCode: "InvalidPartOrder"},
 		{caseName: "part number zero", parts: part("0"), wantCode: "InvalidArgument"},
