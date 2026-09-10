@@ -34,8 +34,8 @@ github.com/aws/aws-sdk-go-v2/service/sts v1.49.0 h1:N7Ey8obY3uSui+cxl0OUzFlFmkxS
 github.com/aws/aws-sdk-go-v2/service/sts v1.49.0/go.mod h1:zMBwjSf4Pt8a1OHYiZ5rPD0PJRK1kQrUaxhS/Dbld8E=
 github.com/aws/smithy-go v1.28.1 h1:R/nXH00c8qcfCzQVELtRw+eLQWtzv+VAIEFJ1/xxXlQ=
 github.com/aws/smithy-go v1.28.1/go.mod h1:YE2RhdIuDbA5E5bTdciG9KrW3+TiEONeUWCqxX9i1Fc=
-github.com/mojatter/wfs v0.5.1 h1:fwIpS83MjndH/VoF4vgBvpTeyKMoNnyWdKXy5aFymwQ=
-github.com/mojatter/wfs v0.5.1/go.mod h1:PlxShpeTA90XFUWkWWi9DmXG7tgFd4v64hPDqrf1n7c=
+github.com/mojatter/wfs v0.6.0 h1:ep3lVfp3TuZtp9ROKY8a87/S6OOgVQsz1rVPodjbSQc=
+github.com/mojatter/wfs v0.6.0/go.mod h1:PlxShpeTA90XFUWkWWi9DmXG7tgFd4v64hPDqrf1n7c=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
