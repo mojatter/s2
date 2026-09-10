@@ -27,6 +27,10 @@ const (
 	// maxObjectKeys is S3's per-request key ceiling: ListObjects' default
 	// (and maximum) max-keys, and DeleteObjects' <Object> limit.
 	maxObjectKeys = 1000
+
+	// maxListFetches bounds the work one ListObjects request may do while
+	// refilling a page. Stopping early yields a short page with a token.
+	maxListFetches = 8
 )
 
 // requestContentType returns r's Content-Type, or "" if it sent none -- or
@@ -95,16 +99,6 @@ type listObjectsParams struct {
 	maxKeys           int
 }
 
-// startKey returns the key the listing resumes after: continuation-token wins
-// over start-after. Both are key names -- the token this handler hands out is
-// the last key of the page (see applyMaxKeys), not a backend token.
-func (p listObjectsParams) startKey() string {
-	if p.continuationToken != "" {
-		return p.continuationToken
-	}
-	return p.startAfter
-}
-
 func parseListObjectsParams(r *http.Request) (listObjectsParams, error) {
 	query := r.URL.Query()
 	p := listObjectsParams{
@@ -127,58 +121,108 @@ func parseListObjectsParams(r *http.Request) (listObjectsParams, error) {
 	return p, nil
 }
 
-// listObjects fetches objects (and common prefixes for delimited requests)
-// from storage according to params.
-func listObjects(ctx context.Context, strg s2.Storage, p listObjectsParams) ([]s2.Object, []string, error) {
-	// Fetch extra to detect truncation (+1) and account for hidden .keep files (+1)
-	fetchLimit := p.maxKeys + 2
+// renderPrefix is a common prefix as S3 shows it, delimiter included.
+func renderPrefix(prefix, delimiter string) string {
+	if delimiter == "" || strings.HasSuffix(prefix, delimiter) {
+		return prefix
+	}
+	return prefix + delimiter
+}
 
-	if p.delimiter == "" {
-		// Recursive: List already does string-prefix matching, so an
-		// arbitrary S3 prefix (e.g. "im" matching "images/a.png") works as-is.
-		res, err := strg.List(ctx, s2.ListOptions{
-			Prefix:     p.prefix,
-			StartAfter: p.startKey(),
-			Limit:      fetchLimit,
-			Recursive:  true,
-		})
-		if err != nil {
-			return nil, nil, err
-		}
-		return res.Objects, nil, nil
+// pastRange reports whether name sorts beyond every key the basename filter
+// can still match.
+func pastRange(name, rangeEnd string) bool {
+	return name > rangeEnd && !strings.HasPrefix(name, rangeEnd)
+}
+
+// listObjects collects one page, refilling it from the backend when hidden
+// entries thin a fetch out. The token returned is the backend's own
+// NextAfter: only the backend knows how to resume itself (#215).
+func listObjects(ctx context.Context, strg s2.Storage, p listObjectsParams) (objs []s2.Object, prefixes []string, nextToken string, err error) {
+	// S3 answers max-keys=0 with an empty, untruncated page, whatever the
+	// request resumes from -- echoing the token back would never terminate.
+	if p.maxKeys == 0 {
+		return nil, nil, "", nil
 	}
 
 	// Delimited: S3 prefixes are arbitrary strings, but storage.List has
 	// directory semantics. Split the prefix at the last "/" so we list the
 	// directory portion and filter the entries by the remaining basename.
 	listDir, baseFilter := splitS3Prefix(p.prefix)
-	res, err := strg.List(ctx, s2.ListOptions{
-		Prefix:     listDir,
-		StartAfter: p.startKey(),
-		Limit:      fetchLimit,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-	objs := res.Objects
-	prefixes := res.CommonPrefixes
-	if baseFilter != "" {
-		objs = filterObjectsByBasename(objs, listDir, baseFilter)
-		prefixes = filterPrefixesByBasename(prefixes, listDir, baseFilter)
-	}
-	return objs, prefixes, nil
-}
 
-// applyMaxKeys clips objs to maxKeys, returning the cursor for the next page
-// when the input was truncated.
-func applyMaxKeys(objs []s2.Object, maxKeys int) (out []s2.Object, nextToken string, isTruncated bool) {
-	if maxKeys == 0 {
-		return nil, "", false
+	after := p.continuationToken
+	seen := make(map[string]struct{})
+	visible := 0
+	for fetches := 0; visible < p.maxKeys && fetches < maxListFetches; fetches++ {
+		opts := s2.ListOptions{
+			Prefix:     listDir,
+			After:      after,
+			StartAfter: p.startAfter,
+			Limit:      max(1, p.maxKeys-visible),
+			Recursive:  p.delimiter == "",
+		}
+		if opts.Recursive {
+			// List already does string-prefix matching, so an arbitrary S3
+			// prefix (e.g. "im" matching "images/a.png") works as-is.
+			opts.Prefix = p.prefix
+		}
+		res, err := strg.List(ctx, opts)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		if res.NextAfter != "" && res.NextAfter == after {
+			return nil, nil, "", fmt.Errorf("storage returned a list token that does not advance: %q", after)
+		}
+
+		// Read the raw page's bounds before the basename filters, which
+		// compact their input in place.
+		lastObj, lastPrefix := "", ""
+		if n := len(res.Objects); n > 0 {
+			lastObj = res.Objects[n-1].Name()
+		}
+		if n := len(res.CommonPrefixes); n > 0 {
+			lastPrefix = res.CommonPrefixes[n-1]
+		}
+
+		pageObjs := filterMultipart(server.FilterKeep(res.Objects))
+		pagePrefixes := res.CommonPrefixes
+		if baseFilter != "" {
+			pageObjs = filterObjectsByBasename(pageObjs, listDir, baseFilter)
+			pagePrefixes = filterPrefixesByBasename(pagePrefixes, listDir, baseFilter)
+		}
+		// A backend may repeat a common prefix across fetches: the fs one
+		// returns every directory past the cursor on each call.
+		kept := pagePrefixes[:0]
+		for _, prefix := range pagePrefixes {
+			if _, dup := seen[prefix]; dup {
+				continue
+			}
+			seen[prefix] = struct{}{}
+			kept = append(kept, prefix)
+		}
+		pagePrefixes = kept
+
+		objs = append(objs, pageObjs...)
+		prefixes = append(prefixes, pagePrefixes...)
+		visible += len(pageObjs) + len(pagePrefixes)
+		after = res.NextAfter
+
+		// Nothing past the basename's range can match. Only an object-less
+		// page may be judged by its prefixes, which fs returns unbounded.
+		if baseFilter != "" {
+			rangeEnd := listDir + baseFilter
+			switch {
+			case lastObj != "" && pastRange(lastObj, rangeEnd):
+				after = ""
+			case lastObj == "" && lastPrefix != "" && pastRange(renderPrefix(lastPrefix, "/"), rangeEnd):
+				after = ""
+			}
+		}
+		if after == "" {
+			break
+		}
 	}
-	if len(objs) > maxKeys {
-		return objs[:maxKeys], objs[maxKeys-1].Name(), true
-	}
-	return objs, "", false
+	return objs, prefixes, after, nil
 }
 
 func buildListBucketResult(p listObjectsParams, objs []s2.Object, prefixes []string, nextToken string, isTruncated bool) ListBucketResult {
@@ -194,13 +238,7 @@ func buildListBucketResult(p listObjectsParams, objs []s2.Object, prefixes []str
 	}
 	commonPrefixes := make([]CommonPrefix, 0, len(prefixes))
 	for _, prefix := range prefixes {
-		prefixWithDelimiter := prefix
-		if p.delimiter != "" && prefix[len(prefix)-1] != p.delimiter[0] {
-			prefixWithDelimiter += p.delimiter
-		}
-		commonPrefixes = append(commonPrefixes, CommonPrefix{
-			Prefix: prefixWithDelimiter,
-		})
+		commonPrefixes = append(commonPrefixes, CommonPrefix{Prefix: renderPrefix(prefix, p.delimiter)})
 	}
 	return ListBucketResult{
 		Name:                  p.bucketName,
@@ -231,18 +269,14 @@ func handleListObjects(s *server.Server, w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	objs, prefixes, err := listObjects(ctx, strg, p)
+	objs, prefixes, nextToken, err := listObjects(ctx, strg, p)
 	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
 	}
 
-	objs = server.FilterKeep(objs)
-	objs = filterMultipart(objs)
-	objs, nextToken, isTruncated := applyMaxKeys(objs, p.maxKeys)
-
-	writeXML(w, http.StatusOK, buildListBucketResult(p, objs, prefixes, nextToken, isTruncated))
+	writeXML(w, http.StatusOK, buildListBucketResult(p, objs, prefixes, nextToken, nextToken != ""))
 }
 
 // isFSBackend reports whether storage type typ is one of the filesystem

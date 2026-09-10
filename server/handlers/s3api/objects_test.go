@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -257,38 +258,389 @@ func (s *ObjectsTestSuite) TestListObjects() {
 
 // --- ListObjects pagination ---
 
-// startKeyStorage records the ListOptions the handler passes.
-type startKeyStorage struct {
+// recordingStorage records every ListOptions the handler passes.
+type recordingStorage struct {
 	s2.Storage
-	opts s2.ListOptions
+	calls []s2.ListOptions
 }
 
-func (t *startKeyStorage) List(_ context.Context, opts s2.ListOptions) (s2.ListResult, error) {
-	t.opts = opts
+func (r *recordingStorage) List(_ context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	r.calls = append(r.calls, opts)
 	return s2.ListResult{}, nil
 }
 
-// TestListObjectsResumesWithStartAfter pins that the caller's resume key goes
-// into StartAfter: After is reserved for a token a backend handed out.
-func (s *ObjectsTestSuite) TestListObjectsResumesWithStartAfter() {
+// The client's continuation token is a backend token and belongs in After;
+// start-after is a key the caller picked and stays in StartAfter (#215).
+func (s *ObjectsTestSuite) TestListObjectsForwardsTokens() {
 	testCases := []struct {
-		caseName string
-		params   listObjectsParams
-		want     string
+		caseName       string
+		params         listObjectsParams
+		wantCalls      int
+		wantAfter      string
+		wantStartAfter string
 	}{
-		{"continuation token", listObjectsParams{continuationToken: "a.txt", maxKeys: 10}, "a.txt"},
-		{"start after", listObjectsParams{startAfter: "b.txt", maxKeys: 10}, "b.txt"},
-		{"continuation token wins", listObjectsParams{continuationToken: "a.txt", startAfter: "b.txt", maxKeys: 10}, "a.txt"},
-		{"delimited", listObjectsParams{delimiter: "/", startAfter: "b.txt", maxKeys: 10}, "b.txt"},
+		{
+			caseName:  "continuation token goes to After",
+			params:    listObjectsParams{continuationToken: "tok", maxKeys: 10},
+			wantCalls: 1,
+			wantAfter: "tok",
+		},
+		{
+			caseName:       "start-after stays a key",
+			params:         listObjectsParams{startAfter: "b.txt", maxKeys: 10},
+			wantCalls:      1,
+			wantStartAfter: "b.txt",
+		},
+		{
+			// The backend decides: the contract says After wins.
+			caseName:       "both are forwarded",
+			params:         listObjectsParams{continuationToken: "tok", startAfter: "b.txt", maxKeys: 10},
+			wantCalls:      1,
+			wantAfter:      "tok",
+			wantStartAfter: "b.txt",
+		},
+		{
+			caseName:  "delimited forwards the same way",
+			params:    listObjectsParams{delimiter: "/", startAfter: "b.txt", maxKeys: 10},
+			wantCalls: 1, wantStartAfter: "b.txt",
+		},
+		{
+			caseName:  "max-keys=0 never reaches the backend",
+			params:    listObjectsParams{maxKeys: 0},
+			wantCalls: 0,
+		},
+		{
+			// Real S3 answers this with an empty, untruncated page; handing
+			// the token back would loop the client forever.
+			caseName:  "max-keys=0 does not echo the token back",
+			params:    listObjectsParams{continuationToken: "tok", maxKeys: 0},
+			wantCalls: 0,
+		},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			strg := &startKeyStorage{}
+			strg := &recordingStorage{}
 
-			_, _, err := listObjects(context.Background(), strg, tc.params)
+			_, _, next, err := listObjects(context.Background(), strg, tc.params)
 			s.Require().NoError(err)
-			s.Empty(strg.opts.After)
-			s.Equal(tc.want, strg.opts.StartAfter)
+			s.Empty(next)
+			s.Require().Len(strg.calls, tc.wantCalls)
+			if tc.wantCalls == 0 {
+				return
+			}
+			s.Equal(tc.wantAfter, strg.calls[0].After)
+			s.Equal(tc.wantStartAfter, strg.calls[0].StartAfter)
+		})
+	}
+}
+
+// pagedStorage serves entries in S3 key order, objects and "dir/" prefixes
+// interleaved, and hands out a token that is deliberately not a key.
+type pagedStorage struct {
+	s2.Storage
+	entries        []string // sorted; a trailing "/" marks a common prefix
+	cap            int      // entries per page, before Limit
+	emptyFirstPage bool     // answer the first call with 0 entries and a token
+	stall          bool     // echo the caller's token back, never advancing
+	everyPageDirs  []string // prefixes repeated on every page, as fs does
+	calls          []s2.ListOptions
+}
+
+func (t *pagedStorage) List(_ context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	t.calls = append(t.calls, opts)
+	if t.stall {
+		return s2.ListResult{NextAfter: opts.After}, nil
+	}
+	if t.emptyFirstPage && opts.After == "" {
+		return s2.ListResult{NextAfter: "0"}, nil
+	}
+
+	start := 0
+	if opts.After != "" {
+		n, err := strconv.Atoi(opts.After)
+		if err != nil {
+			return s2.ListResult{}, fmt.Errorf("bad token %q", opts.After)
+		}
+		start = n
+	} else if opts.StartAfter != "" {
+		for start < len(t.entries) && t.entries[start] <= opts.StartAfter {
+			start++
+		}
+	}
+
+	end := min(start+min(t.cap, opts.Limit), len(t.entries))
+	var res s2.ListResult
+	for _, e := range t.entries[start:end] {
+		if strings.HasSuffix(e, "/") {
+			res.CommonPrefixes = append(res.CommonPrefixes, strings.TrimSuffix(e, "/"))
+		} else {
+			res.Objects = append(res.Objects, s2.NewObjectBytes(e, nil))
+		}
+	}
+	res.CommonPrefixes = append(res.CommonPrefixes, t.everyPageDirs...)
+	if end < len(t.entries) {
+		res.NextAfter = strconv.Itoa(end)
+	}
+	return res, nil
+}
+
+func objectNames(objs []s2.Object) []string {
+	names := make([]string, 0, len(objs))
+	for _, o := range objs {
+		names = append(names, o.Name())
+	}
+	return names
+}
+
+// walkPages follows the handler's own token until the listing ends.
+func (s *ObjectsTestSuite) walkPages(strg s2.Storage, p listObjectsParams) (keys, prefixes []string) {
+	s.T().Helper()
+
+	seen := map[string]bool{}
+	for pages := 0; ; pages++ {
+		s.Require().Less(pages, 20, "listing did not terminate")
+		objs, pfx, next, err := listObjects(context.Background(), strg, p)
+		s.Require().NoError(err)
+		for _, o := range objs {
+			keys = append(keys, o.Name())
+		}
+		for _, pf := range pfx {
+			// The fs backend re-sends directories past the cursor on every
+			// page; dedupe across pages so the set can be asserted.
+			if r := renderPrefix(pf, p.delimiter); !seen[r] {
+				seen[r] = true
+				prefixes = append(prefixes, r)
+			}
+		}
+		if next == "" {
+			return keys, prefixes
+		}
+		p.continuationToken = next
+	}
+}
+
+func (s *ObjectsTestSuite) TestListObjectsPagesWithBackendTokens() {
+	testCases := []struct {
+		caseName     string
+		strg         *pagedStorage
+		params       listObjectsParams
+		wantKeys     []string
+		wantPrefixes []string
+		wantCalls    int // 0 = do not assert
+	}{
+		{
+			// The backend hands back fewer entries than asked but says more
+			// follows; counting alone would call the listing complete.
+			caseName: "pages shorter than max-keys",
+			strg:     &pagedStorage{entries: []string{"a", "b", "c", "d", "e", "f", "g"}, cap: 2},
+			params:   listObjectsParams{maxKeys: 3},
+			wantKeys: []string{"a", "b", "c", "d", "e", "f", "g"},
+		},
+		{
+			caseName:     "page ends on a common prefix",
+			strg:         &pagedStorage{entries: []string{"a.txt", "d1/", "d2/", "z.txt"}, cap: 2},
+			params:       listObjectsParams{delimiter: "/", maxKeys: 2},
+			wantKeys:     []string{"a.txt", "z.txt"},
+			wantPrefixes: []string{"d1/", "d2/"},
+		},
+		{
+			// GCS can answer with no entries and a page token.
+			caseName: "empty page with a token",
+			strg:     &pagedStorage{entries: []string{"a", "b"}, cap: 2, emptyFirstPage: true},
+			params:   listObjectsParams{maxKeys: 3},
+			wantKeys: []string{"a", "b"},
+		},
+		{
+			// Everything past "im" is unreachable for this basename, so the
+			// listing must stop rather than page the rest of the bucket.
+			caseName:     "basename filter stops at the end of its range",
+			strg:         &pagedStorage{entries: []string{"im-a", "images/", "imz", "x1", "x2", "x3", "x4", "x5"}, cap: 4},
+			params:       listObjectsParams{prefix: "im", delimiter: "/", maxKeys: 10},
+			wantKeys:     []string{"im-a", "imz"},
+			wantPrefixes: []string{"images/"},
+			wantCalls:    1,
+		},
+		{
+			// A page of nothing but out-of-range prefixes must end it too,
+			// rather than paging the rest of the bucket one window at a time.
+			caseName: "prefixes alone end the range",
+			strg: &pagedStorage{
+				entries: []string{"z01/", "z02/", "z03/", "z04/", "z05/", "z06/", "z07/", "z08/", "z09/", "z10/", "z11/", "z12/"},
+				cap:     4,
+			},
+			params:    listObjectsParams{prefix: "im", delimiter: "/", maxKeys: 10},
+			wantCalls: 1,
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			keys, prefixes := s.walkPages(tc.strg, tc.params)
+
+			s.Equal(tc.wantKeys, keys)
+			s.Equal(tc.wantPrefixes, prefixes)
+			if tc.wantCalls > 0 {
+				s.Len(tc.strg.calls, tc.wantCalls)
+			}
+			for _, c := range tc.strg.calls[1:] {
+				s.NotEmptyf(c.After, "a refill fetch must resume by the backend's token")
+			}
+		})
+	}
+
+	// The fs backend repeats its directories on every fetch, so one page
+	// must not report the same prefix twice.
+	s.Run("a prefix repeated across fetches is listed once", func() {
+		strg := &pagedStorage{entries: []string{"a", "b", "c", "d", "e"}, cap: 2, everyPageDirs: []string{"d1"}}
+
+		objs, prefixes, _, err := listObjects(context.Background(), strg, listObjectsParams{delimiter: "/", maxKeys: 4})
+		s.Require().NoError(err)
+		s.Require().Greater(len(strg.calls), 1, "the case needs more than one fetch to be meaningful")
+		s.Equal([]string{"a", "b", "c"}, objectNames(objs))
+		s.Equal([]string{"d1"}, prefixes)
+	})
+
+	s.Run("a window of only hidden entries ends the fetch loop", func() {
+		var entries []string
+		for i := range 20 {
+			entries = append(entries, fmt.Sprintf("%sx/%05d", multipartPrefix, i))
+		}
+		entries = append(entries, "a.txt")
+		strg := &pagedStorage{entries: entries, cap: 1}
+
+		objs, prefixes, next, err := listObjects(context.Background(), strg, listObjectsParams{maxKeys: 3})
+		s.Require().NoError(err)
+		s.Empty(objs)
+		s.Empty(prefixes)
+		s.NotEmpty(next, "a short page must carry the token that resumes it")
+		s.Len(strg.calls, maxListFetches)
+	})
+
+	s.Run("a token that does not advance is an error", func() {
+		strg := &pagedStorage{entries: []string{"a"}, cap: 1, stall: true}
+
+		_, _, _, err := listObjects(context.Background(), strg, listObjectsParams{continuationToken: "tok", maxKeys: 3})
+		s.Require().Error(err)
+		s.Contains(err.Error(), "does not advance")
+	})
+}
+
+// walkHandler pages a real listing through the HTTP handler, following the
+// token it hands out, and returns every key and prefix it saw.
+func (s *ObjectsTestSuite) walkHandler(bucket, query string) (keys, prefixes []string) {
+	s.T().Helper()
+
+	seenPrefix := map[string]bool{}
+	token := ""
+	for pages := 0; ; pages++ {
+		s.Require().Less(pages, 20, "listing did not terminate")
+		target := "/" + bucket + "?" + query
+		if token != "" {
+			target += "&continuation-token=" + url.QueryEscape(token)
+		}
+		req := httptest.NewRequest("GET", target, nil)
+		req.SetPathValue("bucket", bucket)
+		w := httptest.NewRecorder()
+		handleListObjects(s.server, w, req)
+		s.Require().Equal(http.StatusOK, w.Code, w.Body.String())
+
+		var page ListBucketResult
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &page))
+		for _, c := range page.Contents {
+			keys = append(keys, c.Key)
+		}
+		for _, pf := range page.CommonPrefixes {
+			// The fs backend re-sends directories past the cursor on every
+			// page, so only the set of prefixes is meaningful here.
+			if !seenPrefix[pf.Prefix] {
+				seenPrefix[pf.Prefix] = true
+				prefixes = append(prefixes, pf.Prefix)
+			}
+		}
+		if !page.IsTruncated {
+			return keys, prefixes
+		}
+		s.Require().NotEmpty(page.NextContinuationToken, "a truncated page must carry a token")
+		token = page.NextContinuationToken
+	}
+}
+
+// The listing must reach every object on the real fs backend, whatever the
+// cursor lands on and however many hidden entries share the window (#215).
+func (s *ObjectsTestSuite) TestListObjectsWalksRealFS() {
+	hidden := []string{multipartPrefix + "u1/manifest", multipartPrefix + "u2/manifest"}
+	testCases := []struct {
+		caseName     string
+		objects      []string
+		query        string
+		wantKeys     []string
+		wantPrefixes []string
+	}{
+		{
+			// fs lists directory "report" before the files, but "report/"
+			// sorts after "report-N.pdf": a cursor built from the rendered
+			// prefix skipped every file in between.
+			caseName: "a directory next to similarly named keys",
+			objects: []string{
+				"report/x.pdf", "report (a).pdf",
+				"report-1.pdf", "report-2.pdf", "report-3.pdf", "report-4.pdf",
+				"report-5.pdf", "report-6.pdf", "report-7.pdf", "report-8.pdf", "report-9.pdf",
+			},
+			query: "prefix=report-&delimiter=/&max-keys=3",
+			wantKeys: []string{
+				"report-1.pdf", "report-2.pdf", "report-3.pdf", "report-4.pdf",
+				"report-5.pdf", "report-6.pdf", "report-7.pdf", "report-8.pdf", "report-9.pdf",
+			},
+		},
+		{
+			caseName: "hidden entries share the window",
+			objects:  append([]string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"}, hidden...),
+			query:    "max-keys=3",
+			wantKeys: []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"},
+		},
+		{
+			caseName:     "hidden entries share the window, delimited",
+			objects:      append([]string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"}, hidden...),
+			query:        "delimiter=/&max-keys=3",
+			wantKeys:     []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"},
+			wantPrefixes: []string{multipartPrefix},
+		},
+		{
+			// The basename filter drops the whole first window; the listing
+			// must keep going rather than report itself complete.
+			caseName:     "basename filter past a full window",
+			objects:      []string{"a1", "a2", "a3", "a4", "a5", "im.txt", "important.txt", "zzz/x"},
+			query:        "prefix=im&delimiter=/&max-keys=1",
+			wantKeys:     []string{"im.txt", "important.txt"},
+			wantPrefixes: nil,
+		},
+		{
+			// Real S3 still reports the folder a start-after key sits in.
+			caseName:     "start-after inside a directory",
+			objects:      []string{"dir/a.txt", "dir/b.txt", "e.txt"},
+			query:        "delimiter=/&start-after=dir/&max-keys=10",
+			wantKeys:     []string{"e.txt"},
+			wantPrefixes: []string{"dir/"},
+		},
+		{
+			// A page landing exactly on max-keys makes the fs backend claim
+			// more follows; the extra empty page must still terminate.
+			caseName: "page boundary on the last object",
+			objects:  []string{"a.txt", "b.txt"},
+			query:    "max-keys=2",
+			wantKeys: []string{"a.txt", "b.txt"},
+		},
+	}
+	for i, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			bucket := fmt.Sprintf("walk%d", i)
+			for _, key := range tc.objects {
+				s.putObject(bucket, key, "x")
+			}
+
+			keys, prefixes := s.walkHandler(bucket, tc.query)
+
+			s.Equal(tc.wantKeys, keys)
+			s.Equal(tc.wantPrefixes, prefixes)
 		})
 	}
 }
@@ -357,6 +709,8 @@ func (s *ObjectsTestSuite) TestListObjects_Pagination() {
 		var result ListBucketResult
 		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
 		s.Empty(result.Contents)
+		s.Empty(result.CommonPrefixes)
+		s.False(result.IsTruncated)
 	})
 
 	s.Run("max-keys above the limit is clamped", func() {
