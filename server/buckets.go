@@ -175,7 +175,8 @@ func (bs *Buckets) Delete(ctx context.Context, name string) error {
 	if isHiddenBucketEntry(name) {
 		return &ErrBucketNotFound{Name: name}
 	}
-	return bs.strg.DeleteRecursive(ctx, name)
+	// The slash keeps the prefix match off buckets whose names merely start with name.
+	return bs.strg.DeleteRecursive(ctx, name+"/")
 }
 
 func (bs *Buckets) CreateFolder(ctx context.Context, bucket, key string) error {

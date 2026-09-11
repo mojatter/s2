@@ -144,15 +144,28 @@ func (s *BucketsTestSuite) TestGetAndPut() {
 
 func (s *BucketsTestSuite) TestDelete() {
 	ctx := context.Background()
-	s.Require().NoError(s.buckets.Create(ctx, "to-delete"))
-
-	ok, _ := s.buckets.Exists(ctx, "to-delete")
-	s.True(ok)
+	for _, name := range []string{"to-delete", "to-delete-archive", "to-delet"} {
+		s.Require().NoError(s.buckets.Create(ctx, name))
+	}
 
 	s.Require().NoError(s.buckets.Delete(ctx, "to-delete"))
 
-	ok, _ = s.buckets.Exists(ctx, "to-delete")
-	s.False(ok)
+	testCases := []struct {
+		caseName string
+		bucket   string
+		want     bool
+	}{
+		{caseName: "the bucket itself is gone", bucket: "to-delete", want: false},
+		{caseName: "a bucket sharing the prefix survives", bucket: "to-delete-archive", want: true},
+		{caseName: "a shorter name survives", bucket: "to-delet", want: true},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ok, err := s.buckets.Exists(ctx, tc.bucket)
+			s.Require().NoError(err)
+			s.Equal(tc.want, ok)
+		})
+	}
 }
 
 func (s *BucketsTestSuite) TestCreateFolder() {
