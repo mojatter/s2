@@ -218,7 +218,7 @@ func (s *gcsStorage) Delete(_ context.Context, name string) error {
 }
 
 func (s *gcsStorage) DeleteRecursive(ctx context.Context, prefix string) error {
-	q := &storage.Query{Prefix: s.key(prefix)}
+	q := &storage.Query{Prefix: joinKeepSlash(s.prefix, prefix)}
 	it := s.client.bucket(s.bucket).objects(ctx, q)
 
 	for {
@@ -276,4 +276,13 @@ func mapNotExist(err error, name string) error {
 		return fmt.Errorf("%w: %s", s2.ErrNotExist, name)
 	}
 	return err
+}
+
+// joinKeepSlash is path.Join that keeps prefix's trailing slash, which confines a listing to that directory.
+func joinKeepSlash(base, prefix string) string {
+	p := path.Join(base, prefix)
+	if strings.HasSuffix(prefix, "/") && !strings.HasSuffix(p, "/") {
+		p += "/"
+	}
+	return p
 }

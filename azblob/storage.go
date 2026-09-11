@@ -261,7 +261,7 @@ func (s *azblobStorage) Delete(_ context.Context, name string) error {
 }
 
 func (s *azblobStorage) DeleteRecursive(ctx context.Context, prefix string) error {
-	fullPrefix := s.key(prefix)
+	fullPrefix := joinKeepSlash(s.prefix, prefix)
 	for {
 		res, err := s.client.listBlobs(ctx, s.container, fullPrefix, int32(defaultListLimit), "")
 		if err != nil {
@@ -320,4 +320,13 @@ func isBlobNotFound(err error) bool {
 		return false
 	}
 	return bloberror.HasCode(err, bloberror.BlobNotFound, bloberror.ContainerNotFound, bloberror.ResourceNotFound)
+}
+
+// joinKeepSlash is path.Join that keeps prefix's trailing slash, which confines a listing to that directory.
+func joinKeepSlash(base, prefix string) string {
+	p := path.Join(base, prefix)
+	if strings.HasSuffix(prefix, "/") && !strings.HasSuffix(p, "/") {
+		p += "/"
+	}
+	return p
 }
