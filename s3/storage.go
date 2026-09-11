@@ -394,7 +394,7 @@ func (s *storage) Delete(ctx context.Context, name string) error {
 func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(s.bucket),
-		Prefix: aws.String(path.Join(s.prefix, prefix)),
+		Prefix: aws.String(joinKeepSlash(s.prefix, prefix)),
 	})
 
 	for paginator.HasMorePages() {
@@ -465,4 +465,13 @@ func (s *storage) SignedURL(ctx context.Context, opts s2.SignedURLOptions) (stri
 		}
 		return req.URL, nil
 	}
+}
+
+// joinKeepSlash is path.Join that keeps prefix's trailing slash, which confines a listing to that directory.
+func joinKeepSlash(base, prefix string) string {
+	p := path.Join(base, prefix)
+	if strings.HasSuffix(prefix, "/") && !strings.HasSuffix(p, "/") {
+		p += "/"
+	}
+	return p
 }

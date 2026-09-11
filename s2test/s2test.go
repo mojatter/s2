@@ -462,6 +462,30 @@ func TestStorageDelete(ctx context.Context, strg s2.Storage) error {
 		}
 	}
 
+	// A trailing slash confines the prefix to that directory, sparing names that merely share it.
+	nested := []string{"s2test-dir/a.txt", "s2test-dir/sub/b.txt"}
+	sibling := "s2test-dir-sibling/c.txt"
+	for _, f := range append(nested, sibling) {
+		if err := strg.Put(ctx, s2.NewObjectBytes(f, []byte("x"))); err != nil {
+			return fmt.Errorf("Put(%q) failed: %w", f, err)
+		}
+	}
+	if err := strg.DeleteRecursive(ctx, "s2test-dir/"); err != nil {
+		return fmt.Errorf("DeleteRecursive(%q) failed: %w", "s2test-dir/", err)
+	}
+	for _, f := range nested {
+		if ok, _ := strg.Exists(ctx, f); ok {
+			errorf("DeleteRecursive(%q): %q still exists", "s2test-dir/", f)
+		}
+	}
+	if ok, _ := strg.Exists(ctx, "s2test-dir"); ok {
+		errorf("DeleteRecursive(%q): the directory itself still exists", "s2test-dir/")
+	}
+	if ok, _ := strg.Exists(ctx, sibling); !ok {
+		errorf("DeleteRecursive(%q) removed %q, which only shares the prefix", "s2test-dir/", sibling)
+	}
+	_ = strg.Delete(ctx, sibling)
+
 	if len(errs) > 0 {
 		return fmt.Errorf("TestStorageDelete found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
 	}

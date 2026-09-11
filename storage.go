@@ -112,6 +112,7 @@ type Storage interface {
 	// a no-op and does not return an error.
 	Delete(ctx context.Context, name string) error
 	// DeleteRecursive removes every object whose name begins with prefix.
+	// A prefix ending in "/" covers only that directory, not names that merely share it.
 	// The operation is best-effort and not atomic across objects.
 	DeleteRecursive(ctx context.Context, prefix string) error
 	// SignedURL returns a presigned URL for the object identified by opts.
