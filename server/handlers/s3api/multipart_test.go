@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/md5" // #nosec G501 -- MD5 is used here only to mirror S3 multipart ETag semantics under test.
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -170,7 +169,8 @@ func (s *MultipartTestSuite) initiateUpload(bucket, key string, headers http.Hea
 	return created.UploadID
 }
 
-func (s *MultipartTestSuite) uploadPart(bucket, key, uploadID string, partNumber int, body string) {
+// uploadPart returns the entry Complete needs for the part.
+func (s *MultipartTestSuite) uploadPart(bucket, key, uploadID string, partNumber int, body string) CompletePart {
 	s.T().Helper()
 
 	target := fmt.Sprintf("/%s/%s?partNumber=%d&uploadId=%s", bucket, key, partNumber, uploadID)
@@ -180,26 +180,48 @@ func (s *MultipartTestSuite) uploadPart(bucket, key, uploadID string, partNumber
 	req.ContentLength = int64(len(body))
 	w := httptest.NewRecorder()
 	handleUploadPart(s.server, w, req)
-	s.Require().Equal(http.StatusOK, w.Code)
+	s.Require().Equal(http.StatusOK, w.Code, w.Body.String())
+	return CompletePart{PartNumber: partNumber, ETag: w.Header().Get("ETag")}
 }
 
-// completeUpload assembles partNumbers into the final object.
-func (s *MultipartTestSuite) completeUpload(bucket, key, uploadID string, partNumbers ...int) {
-	s.T().Helper()
-
+func completeBody(parts ...CompletePart) string {
 	var body strings.Builder
 	body.WriteString("<CompleteMultipartUpload>")
-	for _, n := range partNumbers {
-		fmt.Fprintf(&body, "<Part><PartNumber>%d</PartNumber><ETag>x</ETag></Part>", n)
+	for _, p := range parts {
+		fmt.Fprintf(&body, "<Part><PartNumber>%d</PartNumber><ETag>%s</ETag></Part>", p.PartNumber, p.ETag)
 	}
 	body.WriteString("</CompleteMultipartUpload>")
+	return body.String()
+}
 
-	req := httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploadId="+uploadID, strings.NewReader(body.String()))
+func (s *MultipartTestSuite) complete(bucket, key, uploadID string, parts ...CompletePart) *httptest.ResponseRecorder {
+	s.T().Helper()
+
+	req := httptest.NewRequest("POST", "/"+bucket+"/"+key+"?uploadId="+uploadID, strings.NewReader(completeBody(parts...)))
 	req.SetPathValue("bucket", bucket)
 	req.SetPathValue("key", key)
 	w := httptest.NewRecorder()
 	handleCompleteMultipartUpload(s.server, w, req)
+	return w
+}
+
+// completeUpload assembles parts into the final object.
+func (s *MultipartTestSuite) completeUpload(bucket, key, uploadID string, parts ...CompletePart) {
+	s.T().Helper()
+
+	w := s.complete(bucket, key, uploadID, parts...)
 	s.Require().Equal(http.StatusOK, w.Code, w.Body.String())
+}
+
+func (s *MultipartTestSuite) abortUpload(bucket, key, uploadID string) {
+	s.T().Helper()
+
+	req := httptest.NewRequest("DELETE", "/"+bucket+"/"+key+"?uploadId="+uploadID, nil)
+	req.SetPathValue("bucket", bucket)
+	req.SetPathValue("key", key)
+	w := httptest.NewRecorder()
+	handleAbortMultipartUpload(s.server, w, req)
+	s.Require().Equal(http.StatusNoContent, w.Code, w.Body.String())
 }
 
 // getObject reads the object back through the handler that has to surface
@@ -222,6 +244,17 @@ func (s *MultipartTestSuite) storage(bucket string) s2.Storage {
 	strg, err := s.server.Buckets.Get(context.Background(), bucket)
 	s.Require().NoError(err)
 	return strg
+}
+
+// multipartETag is S3's ETag for parts: the MD5 of their MD5s, then "-N".
+func multipartETag(parts ...string) string {
+	var digests []byte
+	for _, p := range parts {
+		h := md5.Sum([]byte(p)) // #nosec G401
+		digests = append(digests, h[:]...)
+	}
+	sum := md5.Sum(digests) // #nosec G401
+	return fmt.Sprintf(`"%x-%d"`, sum, len(parts))
 }
 
 // smuggledInternalKeys sends every reserved key as an x-amz-meta-* header.
@@ -253,51 +286,11 @@ func (s *MultipartTestSuite) TestCreateMultipartUploadLeavesAbsentContentTypeUns
 			s.createBucket("mp-noct")
 			uploadID := s.initiateUpload("mp-noct", "movie.mp4", tc.headers)
 
-			obj, err := s.storage("mp-noct").Get(context.Background(), manifestKey(uploadID))
+			md, err := s.server.Multipart.Metadata(context.Background(), uploadID, "mp-noct", "movie.mp4")
 			s.Require().NoError(err)
 			for k := range server.InternalMetadataKeys {
-				s.NotContains(obj.Metadata(), k)
+				s.NotContains(md, k)
 			}
-		})
-	}
-}
-
-// failingStorage fails every Get; uploadMetadata calls nothing else.
-type failingStorage struct {
-	s2.Storage
-	err error
-}
-
-func (f failingStorage) Get(context.Context, string) (s2.Object, error) { return nil, f.err }
-
-func (s *MultipartTestSuite) TestUploadMetadata() {
-	testCases := []struct {
-		caseName string
-		err      error
-		wantErr  bool
-	}{
-		{
-			caseName: "a missing manifest is not an error",
-			err:      fmt.Errorf("%w: manifest", s2.ErrNotExist),
-		},
-		{
-			// Completing anyway would silently drop the caller's metadata.
-			caseName: "any other read failure is surfaced",
-			err:      errors.New("backend unavailable"),
-			wantErr:  true,
-		},
-	}
-	for _, tc := range testCases {
-		s.Run(tc.caseName, func() {
-			md, err := uploadMetadata(context.Background(), failingStorage{err: tc.err}, "x")
-
-			if tc.wantErr {
-				s.Require().ErrorIs(err, tc.err)
-				s.Nil(md)
-				return
-			}
-			s.Require().NoError(err)
-			s.Empty(md)
 		})
 	}
 }
@@ -339,11 +332,10 @@ func (s *MultipartTestSuite) TestCreateMultipartUploadRecordsMetadata() {
 		"X-Amz-Meta-Author": {"uz"},
 	})
 
-	obj, err := s.storage("mp-manifest").Get(context.Background(), manifestKey(uploadID))
+	md, err := s.server.Multipart.Metadata(context.Background(), uploadID, "mp-manifest", "file.bin")
 	s.Require().NoError(err)
-	s.Equal("video/mp4", obj.Metadata()[contentTypeMetadataKey])
-	s.Equal("uz", obj.Metadata()["author"])
-	s.Zero(obj.Length())
+	s.Equal("video/mp4", md[contentTypeMetadataKey])
+	s.Equal("uz", md["author"])
 }
 
 func (s *MultipartTestSuite) TestCompleteMultipartUploadCarriesInitiateMetadata() {
@@ -386,9 +378,9 @@ func (s *MultipartTestSuite) TestCompleteMultipartUploadCarriesInitiateMetadata(
 			s.createBucket(bucket)
 
 			uploadID := s.initiateUpload(bucket, key, tc.headers)
-			s.uploadPart(bucket, key, uploadID, 1, "hello ")
-			s.uploadPart(bucket, key, uploadID, 2, "world")
-			s.completeUpload(bucket, key, uploadID, 1, 2)
+			p1 := s.uploadPart(bucket, key, uploadID, 1, "hello ")
+			p2 := s.uploadPart(bucket, key, uploadID, 2, "world")
+			s.completeUpload(bucket, key, uploadID, p1, p2)
 
 			w := s.getObject(bucket, key)
 			s.Equal("hello world", w.Body.String())
@@ -397,7 +389,7 @@ func (s *MultipartTestSuite) TestCompleteMultipartUploadCarriesInitiateMetadata(
 				s.Equal(want, w.Header().Get("x-amz-meta-"+name))
 			}
 			// The ETag survives alongside the recorded metadata.
-			s.Regexp(`^"[0-9a-f]{32}-2"$`, w.Header().Get("ETag"))
+			s.Equal(multipartETag("hello ", "world"), w.Header().Get("ETag"))
 			// s2's own bookkeeping keys must not leak as user metadata.
 			s.Empty(w.Header().Get("x-amz-meta-" + contentTypeMetadataKey))
 			s.Empty(w.Header().Get("x-amz-meta-" + etagMetadataKey))
@@ -405,38 +397,203 @@ func (s *MultipartTestSuite) TestCompleteMultipartUploadCarriesInitiateMetadata(
 	}
 }
 
-// An upload in flight across a server upgrade has no manifest.
-func (s *MultipartTestSuite) TestCompleteMultipartUploadWithoutManifest() {
-	const bucket, key = "mp-nomanifest", "file.bin"
-	s.createBucket(bucket)
+// Uploads are bound to their bucket/key; pre-v0.16 IDs have no record.
+func (s *MultipartTestSuite) TestUnknownOrMismatchedUpload() {
+	s.createBucket("mp-bind")
+	s.createBucket("mp-other")
+	uploadID := s.initiateUpload("mp-bind", "file.bin", nil)
+	p1 := s.uploadPart("mp-bind", "file.bin", uploadID, 1, "hello")
 
-	uploadID := s.initiateUpload(bucket, key, http.Header{"Content-Type": {"video/mp4"}})
-	s.uploadPart(bucket, key, uploadID, 1, "hello")
-	s.Require().NoError(s.storage(bucket).Delete(context.Background(), manifestKey(uploadID)))
+	handlers := []struct {
+		name    string
+		method  string
+		handler func(*server.Server, http.ResponseWriter, *http.Request)
+	}{
+		{name: "upload part", method: "PUT", handler: handleUploadPart},
+		{name: "complete", method: "POST", handler: handleCompleteMultipartUpload},
+		{name: "abort", method: "DELETE", handler: handleAbortMultipartUpload},
+	}
+	testCases := []struct {
+		caseName string
+		bucket   string
+		key      string
+		uploadID string
+	}{
+		{caseName: "never issued", bucket: "mp-bind", key: "file.bin", uploadID: strings.Repeat("0", 32)},
+		{caseName: "another key", bucket: "mp-bind", key: "other.bin", uploadID: uploadID},
+		{caseName: "another bucket", bucket: "mp-other", key: "file.bin", uploadID: uploadID},
+	}
+	for _, tc := range testCases {
+		for _, h := range handlers {
+			s.Run(tc.caseName+"/"+h.name, func() {
+				target := fmt.Sprintf("/%s/%s?partNumber=1&uploadId=%s", tc.bucket, tc.key, tc.uploadID)
+				req := httptest.NewRequest(h.method, target, strings.NewReader(completeBody(p1)))
+				req.SetPathValue("bucket", tc.bucket)
+				req.SetPathValue("key", tc.key)
+				w := httptest.NewRecorder()
+				h.handler(s.server, w, req)
 
-	s.completeUpload(bucket, key, uploadID, 1)
+				s.Equal(http.StatusNotFound, w.Code, w.Body.String())
+				var errResp ErrorResponse
+				s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+				s.Equal("NoSuchUpload", errResp.Code)
+			})
+		}
+	}
 
-	w := s.getObject(bucket, key)
-	s.Equal("hello", w.Body.String())
-	s.Equal(defaultContentType, w.Header().Get("Content-Type"))
+	// None of the rejected requests touched the real upload.
+	s.completeUpload("mp-bind", "file.bin", uploadID, p1)
+	s.Equal("hello", s.getObject("mp-bind", "file.bin").Body.String())
 }
 
-// Complete removes what it consumed: the listed parts and the manifest.
-func (s *MultipartTestSuite) TestCompleteMultipartUploadRemovesPartsAndManifest() {
-	const bucket, key = "mp-cleanup", "file.bin"
-	s.createBucket(bucket)
+func (s *MultipartTestSuite) TestCompleteMultipartUploadChecksPartETags() {
+	s.createBucket("mp-etag")
+	uploadID := s.initiateUpload("mp-etag", "file.bin", nil)
+	p1 := s.uploadPart("mp-etag", "file.bin", uploadID, 1, "hello")
+	hexETag := strings.Trim(p1.ETag, `"`)
 
-	uploadID := s.initiateUpload(bucket, key, nil)
-	s.uploadPart(bucket, key, uploadID, 1, "hello")
-	s.completeUpload(bucket, key, uploadID, 1)
-
-	ctx := context.Background()
-	strg := s.storage(bucket)
-	for _, name := range []string{manifestKey(uploadID), partKey(uploadID, 1)} {
-		exists, err := strg.Exists(ctx, name)
-		s.Require().NoError(err)
-		s.Falsef(exists, "%s should have been removed", name)
+	testCases := []struct {
+		caseName string
+		etag     string
+		wantCode int
+	}{
+		{caseName: "as returned", etag: p1.ETag, wantCode: http.StatusOK},
+		{caseName: "without quotes", etag: hexETag, wantCode: http.StatusOK},
+		{caseName: "upper case hex", etag: strings.ToUpper(hexETag), wantCode: http.StatusOK},
+		{caseName: "pretty-printed element", etag: "\n  " + p1.ETag + "\n", wantCode: http.StatusOK},
+		{caseName: "another part's etag", etag: `"` + strings.Repeat("0", 32) + `"`, wantCode: http.StatusBadRequest},
+		{caseName: "empty", etag: "", wantCode: http.StatusBadRequest},
 	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			// A fresh upload per row: a successful Complete consumes the parts.
+			uploadID := s.initiateUpload("mp-etag", "file.bin", nil)
+			s.uploadPart("mp-etag", "file.bin", uploadID, 1, "hello")
+
+			w := s.complete("mp-etag", "file.bin", uploadID, CompletePart{PartNumber: 1, ETag: tc.etag})
+
+			s.Equal(tc.wantCode, w.Code, w.Body.String())
+			if tc.wantCode != http.StatusOK {
+				var errResp ErrorResponse
+				s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+				s.Equal("InvalidPart", errResp.Code)
+			}
+		})
+	}
+}
+
+// abortDuring aborts the upload the first time the request body is read.
+type abortDuring struct {
+	abort func()
+	done  bool
+}
+
+func (a *abortDuring) Read([]byte) (int, error) {
+	if !a.done {
+		a.done = true
+		a.abort()
+	}
+	return 0, io.EOF
+}
+
+// An Abort that lands while a part streams in must not leave that part behind.
+func (s *MultipartTestSuite) TestUploadPartRacingAbort() {
+	ctx := context.Background()
+	s.createBucket("mp-race")
+	uploadID := s.initiateUpload("mp-race", "file.bin", nil)
+	s.uploadPart("mp-race", "file.bin", uploadID, 1, "hello")
+
+	trigger := &abortDuring{abort: func() { s.abortUpload("mp-race", "file.bin", uploadID) }}
+	req := httptest.NewRequest("PUT", "/mp-race/file.bin?partNumber=2&uploadId="+uploadID, io.MultiReader(trigger, strings.NewReader("world")))
+	req.SetPathValue("bucket", "mp-race")
+	req.SetPathValue("key", "file.bin")
+	req.ContentLength = 5
+	w := httptest.NewRecorder()
+	handleUploadPart(s.server, w, req)
+
+	s.True(trigger.done)
+	s.Equal(http.StatusNotFound, w.Code, w.Body.String())
+	var errResp ErrorResponse
+	s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+	s.Equal("NoSuchUpload", errResp.Code)
+
+	exists, err := s.server.Multipart.Storage().Exists(ctx, uploadID)
+	s.Require().NoError(err)
+	s.False(exists, "the late part must not outlive the abort")
+}
+
+// A part that exists but cannot be read is the server's fault, not the client's.
+func (s *MultipartTestSuite) TestCompleteMultipartUploadPartReadFailure() {
+	s.createBucket("mp-eio")
+	uploadID := s.initiateUpload("mp-eio", "file.bin", nil)
+	p1 := s.uploadPart("mp-eio", "file.bin", uploadID, 1, "hello")
+	// A corrupt sidecar makes the fs backend's Get fail with a decode error.
+	s.Require().NoError(s.server.Multipart.Storage().Put(context.Background(), s2.NewObjectBytes(uploadID+"/.meta/00001", []byte("{"))))
+
+	w := s.complete("mp-eio", "file.bin", uploadID, p1)
+	s.Equal(http.StatusInternalServerError, w.Code, w.Body.String())
+}
+
+// Parts left without a record are freed by repeating Abort, as on S3.
+func (s *MultipartTestSuite) TestAbortRemovesLeftoverParts() {
+	ctx := context.Background()
+	s.createBucket("mp-leftover")
+	uploadID := s.initiateUpload("mp-leftover", "file.bin", nil)
+	s.abortUpload("mp-leftover", "file.bin", uploadID)
+	// Written straight to the store: a part left by a cleanup that failed.
+	s.Require().NoError(s.server.Multipart.Storage().Put(ctx, s2.NewObjectBytes(uploadID+"/00001", []byte("late"))))
+
+	s.abortUpload("mp-leftover", "file.bin", uploadID)
+
+	exists, err := s.server.Multipart.Storage().Exists(ctx, uploadID)
+	s.Require().NoError(err)
+	s.False(exists)
+}
+
+// State lives outside the bucket and is fully removed on Complete and Abort.
+func (s *MultipartTestSuite) TestMultipartStateLifecycle() {
+	testCases := []struct {
+		caseName string
+		finish   func(bucket, key, uploadID string, p1 CompletePart)
+	}{
+		{caseName: "complete", finish: func(bucket, key, uploadID string, p1 CompletePart) { s.completeUpload(bucket, key, uploadID, p1) }},
+		{caseName: "abort", finish: func(bucket, key, uploadID string, _ CompletePart) { s.abortUpload(bucket, key, uploadID) }},
+	}
+	for i, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			bucket, key := fmt.Sprintf("mp-life-%d", i), "file.bin"
+			s.createBucket(bucket)
+
+			uploadID := s.initiateUpload(bucket, key, nil)
+			p1 := s.uploadPart(bucket, key, uploadID, 1, "hello")
+			s.uploadPart(bucket, key, uploadID, 2, "unlisted")
+
+			res, err := s.storage(bucket).List(ctx, s2.ListOptions{Recursive: true})
+			s.Require().NoError(err)
+			s.Empty(server.FilterKeep(res.Objects))
+
+			tc.finish(bucket, key, uploadID, p1)
+
+			exists, err := s.server.Multipart.Storage().Exists(ctx, uploadID)
+			s.Require().NoError(err)
+			s.False(exists)
+		})
+	}
+}
+
+// A part without a recorded ETag cannot contribute to the multipart ETag.
+func (s *MultipartTestSuite) TestCompleteMultipartUploadRejectsPartWithoutETag() {
+	s.createBucket("mp-noetag")
+	uploadID := s.initiateUpload("mp-noetag", "file.bin", nil)
+	s.Require().NoError(s.server.Multipart.PutPart(context.Background(), uploadID, 1, []byte("hello"), ""))
+
+	w := s.complete("mp-noetag", "file.bin", uploadID, CompletePart{PartNumber: 1, ETag: ""})
+
+	s.Equal(http.StatusBadRequest, w.Code)
+	var errResp ErrorResponse
+	s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+	s.Equal("InvalidPart", errResp.Code)
 }
 
 func TestPartsReader(t *testing.T) {
@@ -454,19 +611,15 @@ func TestPartsReader(t *testing.T) {
 		t.Run(tc.caseName, func(t *testing.T) {
 			parts := make([]s2.Object, len(tc.bodies))
 			var want string
-			var wantMD5s []byte
 			for i, body := range tc.bodies {
 				parts[i] = s2.NewObjectBytes("part", []byte(body))
 				want += body
-				h := md5.Sum([]byte(body)) // #nosec G401
-				wantMD5s = append(wantMD5s, h[:]...)
 			}
 
 			pr := &partsReader{parts: parts}
 			got, err := io.ReadAll(pr)
 			require.NoError(t, err)
 			assert.Equal(t, want, string(got))
-			assert.Equal(t, wantMD5s, pr.partMD5s)
 			assert.NoError(t, pr.Close())
 		})
 	}
@@ -511,5 +664,4 @@ func TestPartsReader_SmallBuffer(t *testing.T) {
 		require.NoError(t, err)
 	}
 	assert.Equal(t, "abcde", string(got))
-	assert.Len(t, pr.partMD5s, 2*md5.Size)
 }

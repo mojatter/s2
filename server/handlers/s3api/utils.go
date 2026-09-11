@@ -160,5 +160,8 @@ func s2ErrorToS3Error(err error) (string, string, int) {
 	if errors.Is(err, server.ErrReservedBucketName) {
 		return "InvalidBucketName", err.Error(), http.StatusBadRequest
 	}
+	if errors.Is(err, server.ErrNoSuchUpload) {
+		return "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound
+	}
 	return "InternalError", err.Error(), http.StatusInternalServerError
 }

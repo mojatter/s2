@@ -324,6 +324,13 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 	dirName := strings.TrimSuffix(prefix, "/")
 	var dirs []string
 	err := fs.WalkDir(s.fsys, ".", func(name string, d fs.DirEntry, err error) error {
+		// A nil entry means the root could not be stat'd; a missing one is a no-op.
+		if d == nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
 		if prefix != "" && !strings.HasPrefix(name, prefix) && name != dirName {
 			return nil
 		}
