@@ -697,6 +697,44 @@ func (s *StorageTestSuite) TestDeleteRecursive() {
 	}
 }
 
+// A missing root is a no-op, as Delete is on a missing name.
+func (s *StorageTestSuite) TestDeleteRecursiveMissingRoot() {
+	testCases := []struct {
+		caseName string
+		strg     s2.Storage
+	}{
+		{caseName: "osfs", strg: NewStorageDir(s.T().TempDir())},
+		{caseName: "memfs", strg: NewStorageMem(s2.Config{})},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			sub, err := tc.strg.Sub(ctx, "missing")
+			s.Require().NoError(err)
+			s.NoError(sub.DeleteRecursive(ctx, ""))
+		})
+	}
+}
+
+// errStatMemFS is a writable memfs whose root cannot be stat'd.
+type errStatMemFS struct {
+	*memfs.MemFS
+}
+
+func (e *errStatMemFS) Stat(name string) (fs.FileInfo, error) {
+	if name == "." {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrPermission}
+	}
+	return e.MemFS.Stat(name)
+}
+
+// An unreadable root is reported, not dereferenced.
+func (s *StorageTestSuite) TestDeleteRecursiveUnreadableRoot() {
+	strg := &storage{fsys: &errStatMemFS{memfs.New()}}
+
+	s.ErrorIs(strg.DeleteRecursive(context.Background(), ""), fs.ErrPermission)
+}
+
 func (s *StorageTestSuite) TestSub() {
 	strg := &storage{fsys: s.testMemFS(), typ: s2.TypeMemFS}
 

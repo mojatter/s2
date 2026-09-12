@@ -1,14 +1,12 @@
 package s3api
 
 import (
-	"context"
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible multipart ETag
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"net/http"
 	"strconv"
@@ -20,8 +18,7 @@ import (
 	"github.com/mojatter/s2/server/middleware"
 )
 
-// multipartPrefix is the reserved key prefix used to store in-progress part data.
-// Keys with this prefix are hidden from ListObjects results.
+// multipartPrefix is the pre-v0.16 in-bucket layout, still hidden from listings.
 const multipartPrefix = "__s2mp__/"
 
 func filterMultipart(objs []s2.Object) []s2.Object {
@@ -32,38 +29,6 @@ func filterMultipart(objs []s2.Object) []s2.Object {
 		}
 	}
 	return out
-}
-
-// uploadPrefix is the key prefix holding one upload's parts and manifest.
-func uploadPrefix(uploadID string) string {
-	return multipartPrefix + uploadID + "/"
-}
-
-func partKey(uploadID string, partNumber int) string {
-	return fmt.Sprintf("%s%05d", uploadPrefix(uploadID), partNumber)
-}
-
-// manifestKey names the zero-length object whose metadata carries the
-// initiate request's headers. Part keys are digits, so it cannot collide.
-func manifestKey(uploadID string) string {
-	return uploadPrefix(uploadID) + "manifest"
-}
-
-// uploadMetadata returns what CreateMultipartUpload recorded. A missing
-// manifest yields an empty map; any other read failure is returned.
-func uploadMetadata(ctx context.Context, strg s2.Storage, uploadID string) (s2.Metadata, error) {
-	obj, err := strg.Get(ctx, manifestKey(uploadID))
-	if errors.Is(err, s2.ErrNotExist) {
-		return make(s2.Metadata), nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	md := obj.Metadata().Clone()
-	if md == nil {
-		md = make(s2.Metadata)
-	}
-	return md, nil
 }
 
 // newUploadID generates a 16-byte upload ID: 4 bytes of elapsed seconds
@@ -88,8 +53,7 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 	bucketName := r.PathValue("bucket")
 	key := r.PathValue("key")
 
-	strg, err := s.Buckets.Get(ctx, bucketName)
-	if err != nil {
+	if _, err := s.Buckets.Get(ctx, bucketName); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
@@ -101,8 +65,7 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 		return
 	}
 
-	// S3 takes the object's headers from the initiate request. Record them
-	// on the manifest's own metadata, which Put persists in the same call.
+	// S3 takes the object's headers from the initiate request.
 	md := parseMetadataHeaders(r)
 	// The store below is conditional, so x-amz-meta-s2-content-type would
 	// otherwise reach the reserved key it shares a namespace with (#192).
@@ -112,12 +75,11 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 	if ct := requestContentType(r); ct != "" {
 		md[contentTypeMetadataKey] = ct
 	}
-	if err := strg.Put(ctx, s2.NewObjectBytes(manifestKey(uploadID), nil, s2.WithMetadata(md))); err != nil {
+	if err := s.Multipart.Create(ctx, uploadID, bucketName, key, md); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
 	}
-
 	writeXML(w, http.StatusOK, InitiateMultipartUploadResult{
 		Bucket:   bucketName,
 		Key:      key,
@@ -128,6 +90,7 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
+	key := r.PathValue("key")
 
 	uploadID := r.URL.Query().Get("uploadId")
 	partNumberStr := r.URL.Query().Get("partNumber")
@@ -145,8 +108,12 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	strg, err := s.Buckets.Get(ctx, bucketName)
-	if err != nil {
+	if _, err := s.Buckets.Get(ctx, bucketName); err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+	if _, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
@@ -161,16 +128,13 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	partObj := s2.NewObjectBytes(partKey(uploadID, partNumber), data)
-	if err := strg.Put(ctx, partObj); err != nil {
+	h := md5.Sum(data) // #nosec G401 -- MD5 is required for S3-compatible ETag
+	etag := `"` + hex.EncodeToString(h[:]) + `"`
+	if err := s.Multipart.PutPart(ctx, uploadID, partNumber, data, etag); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
 	}
-
-	h := md5.Sum(data) // #nosec G401 -- MD5 is required for S3-compatible ETag
-	etag := `"` + hex.EncodeToString(h[:]) + `"`
-	_ = strg.PutMetadata(ctx, partKey(uploadID, partNumber), s2.Metadata{etagMetadataKey: etag})
 
 	w.Header().Set("ETag", etag)
 	w.WriteHeader(http.StatusOK)
@@ -222,60 +186,55 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 		}
 	}
 
-	// Stat each part once up front: verify existence and compute the total
-	// length required by NewObjectReader. We intentionally do NOT read part
-	// bodies here — they are streamed lazily by partsReader below.
-	partObjs := make([]s2.Object, len(req.Parts))
-	var totalLen uint64
-	for i, p := range req.Parts {
-		obj, err := strg.Get(ctx, partKey(uploadID, p.PartNumber))
-		if err != nil {
-			writeError(w, r, "InvalidPart", fmt.Sprintf("Part %d not found", p.PartNumber), http.StatusBadRequest)
-			return
-		}
-		partObjs[i] = obj
-		totalLen += obj.Length()
-	}
-
-	// This request carries no headers of its own; they were recorded at
-	// initiate time.
-	md, err := uploadMetadata(ctx, strg, uploadID)
+	// Complete carries no headers; they were recorded at initiate time.
+	md, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key)
 	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
 	}
 
-	// Stream all parts through a single reader, tee-ing each part into its own
-	// MD5 hash as it flows by. This avoids buffering the assembled object in
-	// memory — critical for the memfs backend, and a peak-memory win for all
-	// backends. The multipart ETag is MD5(concat of each part's raw MD5 bytes)
-	// + "-" + partCount; we collect the per-part MD5s after Put has drained
-	// the reader.
+	// Stat parts up front for length and digest; bodies stream below.
+	partObjs := make([]s2.Object, len(req.Parts))
+	digests := make([]byte, 0, len(req.Parts)*md5.Size)
+	var totalLen uint64
+	for i, p := range req.Parts {
+		obj, err := s.Multipart.Part(ctx, uploadID, p.PartNumber)
+		if errors.Is(err, s2.ErrNotExist) {
+			writeError(w, r, "InvalidPart", fmt.Sprintf("Part %d not found", p.PartNumber), http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			code, msg, status := s2ErrorToS3Error(err)
+			writeError(w, r, code, msg, status)
+			return
+		}
+		digest, err := hex.DecodeString(strings.Trim(obj.Metadata()[etagMetadataKey], `"`))
+		if err != nil || len(digest) != md5.Size {
+			writeError(w, r, "InvalidPart", fmt.Sprintf("Part %d has no ETag", p.PartNumber), http.StatusBadRequest)
+			return
+		}
+		if !strings.EqualFold(strings.Trim(strings.TrimSpace(p.ETag), `"`), hex.EncodeToString(digest)) {
+			writeError(w, r, "InvalidPart", fmt.Sprintf("Part %d: the specified ETag did not match the uploaded part's ETag", p.PartNumber), http.StatusBadRequest)
+			return
+		}
+		digests = append(digests, digest...)
+		partObjs[i] = obj
+		totalLen += obj.Length()
+	}
+
+	combined := md5.Sum(digests) // #nosec G401 -- MD5 is required for S3-compatible multipart ETag
+	etag := `"` + hex.EncodeToString(combined[:]) + `-` + strconv.Itoa(len(req.Parts)) + `"`
+	md[etagMetadataKey] = etag
+
 	pr := &partsReader{parts: partObjs}
-	finalObj := s2.NewObjectReader(key, pr, totalLen, s2.WithMetadata(md))
-	if err := strg.Put(ctx, finalObj); err != nil {
+	if err := strg.Put(ctx, s2.NewObjectReader(key, pr, totalLen, s2.WithMetadata(md))); err != nil {
 		_ = pr.Close()
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
 	}
-
-	combined := md5.Sum(pr.partMD5s) // #nosec G401 -- MD5 is required for S3-compatible multipart ETag
-	etag := `"` + hex.EncodeToString(combined[:]) + `-` + strconv.Itoa(len(req.Parts)) + `"`
-	md[etagMetadataKey] = etag
-	if err := strg.PutMetadata(ctx, key, md); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
-		return
-	}
-
-	// By key, not DeleteRecursive: the fs backend walks the whole bucket
-	// for that. A part uploaded but not listed here stays behind (#202).
-	for _, p := range req.Parts {
-		_ = strg.Delete(ctx, partKey(uploadID, p.PartNumber))
-	}
-	_ = strg.Delete(ctx, manifestKey(uploadID))
+	_ = s.Multipart.Remove(ctx, uploadID)
 
 	writeXML(w, http.StatusOK, CompleteMultipartUploadResult{
 		Location: "/" + bucketName + "/" + key,
@@ -288,6 +247,7 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 func handleAbortMultipartUpload(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
+	key := r.PathValue("key")
 
 	uploadID := r.URL.Query().Get("uploadId")
 	if uploadID == "" {
@@ -299,28 +259,24 @@ func handleAbortMultipartUpload(s *server.Server, w http.ResponseWriter, r *http
 		return
 	}
 
-	strg, err := s.Buckets.Get(ctx, bucketName)
-	if err != nil {
+	if _, err := s.Buckets.Get(ctx, bucketName); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
 	}
-
-	_ = strg.DeleteRecursive(ctx, uploadPrefix(uploadID))
+	if err := s.Multipart.Abort(ctx, uploadID, bucketName, key); err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// partsReader is an io.ReadCloser that concatenates the bodies of a slice of
-// s2.Object parts, opening each one lazily. As each part's body flows through
-// Read, it is also hashed into a per-part MD5; after the reader is fully
-// drained, partMD5s holds the concatenation of those digests in part order —
-// exactly what the S3 multipart ETag formula requires.
+// partsReader concatenates the bodies of parts, opening each one lazily.
 type partsReader struct {
-	parts    []s2.Object
-	idx      int
-	current  io.ReadCloser
-	currentH hash.Hash
-	partMD5s []byte
+	parts   []s2.Object
+	idx     int
+	current io.ReadCloser
 }
 
 func (p *partsReader) Read(buf []byte) (int, error) {
@@ -334,17 +290,11 @@ func (p *partsReader) Read(buf []byte) (int, error) {
 				return 0, err
 			}
 			p.current = rc
-			p.currentH = md5.New() // #nosec G401 -- MD5 is required for S3-compatible multipart ETag
 		}
 		n, err := p.current.Read(buf)
-		if n > 0 {
-			_, _ = p.currentH.Write(buf[:n])
-		}
 		if err == io.EOF {
-			p.partMD5s = append(p.partMD5s, p.currentH.Sum(nil)...)
 			_ = p.current.Close()
 			p.current = nil
-			p.currentH = nil
 			p.idx++
 			if n > 0 {
 				return n, nil
