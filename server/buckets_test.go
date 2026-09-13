@@ -230,6 +230,15 @@ func (s *BucketsTestSuite) TestCreatedAt() {
 			want: func(got time.Time) { s.True(got.IsZero(), got) },
 		},
 		{
+			caseName: "creating over a directory s2 did not make leaves it undated",
+			prepare: func(ctx context.Context, _ string, bs *Buckets) {
+				s.Require().NoError(bs.strg.Delete(ctx, "photos/"+keepFile))
+				s.Require().NoError(bs.strg.Put(ctx, s2.NewObjectBytes("photos/a.txt", []byte("x"))))
+				s.Require().NoError(bs.Create(ctx, "photos"))
+			},
+			want: func(got time.Time) { s.True(got.IsZero(), got) },
+		},
+		{
 			caseName: "a missing bucket is undated",
 			prepare: func(ctx context.Context, _ string, bs *Buckets) {
 				s.Require().NoError(bs.Delete(ctx, "photos"))

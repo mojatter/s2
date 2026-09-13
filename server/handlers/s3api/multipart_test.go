@@ -385,16 +385,39 @@ func (s *MultipartTestSuite) TestUploadOfRecreatedBucket() {
 
 // An ensure-exists PUT of the bucket must not orphan its uploads.
 func (s *MultipartTestSuite) TestUploadSurvivesBucketRePut() {
-	s.createBucket("mp-reput")
-	uploadID := s.initiateUpload("mp-reput", "file.bin", nil)
-	req := httptest.NewRequest("PUT", "/mp-reput", nil)
-	req.SetPathValue("bucket", "mp-reput")
-	w := httptest.NewRecorder()
-	handleCreateBucket(s.server, w, req)
-	s.Require().Equal(http.StatusOK, w.Code, w.Body.String())
+	testCases := []struct {
+		caseName string
+		create   func(root string)
+	}{
+		{caseName: "bucket created by s2", create: func(string) { s.createBucket("mp-reput") }},
+		{
+			caseName: "directory placed under Root by hand",
+			create: func(root string) {
+				s.Require().NoError(os.MkdirAll(filepath.Join(root, "mp-reput"), 0o750))
+			},
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			root := s.T().TempDir()
+			cfg := server.DefaultConfig()
+			cfg.Root = root
+			srv, err := server.NewServer(context.Background(), cfg)
+			s.Require().NoError(err)
+			s.server = srv
+			tc.create(root)
+			uploadID := s.initiateUpload("mp-reput", "file.bin", nil)
 
-	p1 := s.uploadPart("mp-reput", "file.bin", uploadID, 1, "hello")
-	s.completeUpload("mp-reput", "file.bin", uploadID, p1)
+			req := httptest.NewRequest("PUT", "/mp-reput", nil)
+			req.SetPathValue("bucket", "mp-reput")
+			w := httptest.NewRecorder()
+			handleCreateBucket(s.server, w, req)
+			s.Require().Equal(http.StatusOK, w.Code, w.Body.String())
+
+			p1 := s.uploadPart("mp-reput", "file.bin", uploadID, 1, "hello")
+			s.completeUpload("mp-reput", "file.bin", uploadID, p1)
+		})
+	}
 }
 
 // An expired upload is refused before the sweep frees it.
