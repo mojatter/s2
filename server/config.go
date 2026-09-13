@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mojatter/s2"
 )
@@ -30,17 +31,18 @@ func splitBucketList(s string) []string {
 }
 
 const (
-	EnvS2ServerConfig         = "S2_SERVER_CONFIG"
-	EnvS2ServerListen         = "S2_SERVER_LISTEN"
-	EnvS2ServerConsoleListen  = "S2_SERVER_CONSOLE_LISTEN"
-	EnvS2ServerHealthPath     = "S2_SERVER_HEALTH_PATH"
-	EnvS2ServerType           = "S2_SERVER_TYPE"
-	EnvS2ServerRoot           = "S2_SERVER_ROOT"
-	EnvS2ServerMaxUploadSize  = "S2_SERVER_MAX_UPLOAD_SIZE"
-	EnvS2ServerMaxPreviewSize = "S2_SERVER_MAX_PREVIEW_SIZE"
-	EnvS2ServerUser           = "S2_SERVER_USER"
-	EnvS2ServerPassword       = "S2_SERVER_PASSWORD" // #nosec G101 -- env var name, not a credential
-	EnvS2ServerBuckets        = "S2_SERVER_BUCKETS"
+	EnvS2ServerConfig          = "S2_SERVER_CONFIG"
+	EnvS2ServerListen          = "S2_SERVER_LISTEN"
+	EnvS2ServerConsoleListen   = "S2_SERVER_CONSOLE_LISTEN"
+	EnvS2ServerHealthPath      = "S2_SERVER_HEALTH_PATH"
+	EnvS2ServerType            = "S2_SERVER_TYPE"
+	EnvS2ServerRoot            = "S2_SERVER_ROOT"
+	EnvS2ServerMaxUploadSize   = "S2_SERVER_MAX_UPLOAD_SIZE"
+	EnvS2ServerMaxPreviewSize  = "S2_SERVER_MAX_PREVIEW_SIZE"
+	EnvS2ServerMultipartMaxAge = "S2_SERVER_MULTIPART_MAX_AGE"
+	EnvS2ServerUser            = "S2_SERVER_USER"
+	EnvS2ServerPassword        = "S2_SERVER_PASSWORD" // #nosec G101 -- env var name, not a credential
+	EnvS2ServerBuckets         = "S2_SERVER_BUCKETS"
 )
 
 // Config is a configuration for the server.
@@ -68,6 +70,8 @@ type Config struct {
 	MaxUploadSize int64 `json:"max_upload_size"`
 	// MaxPreviewSize is the maximum file size for text preview in bytes (0 = default 10MB).
 	MaxPreviewSize int64 `json:"max_preview_size"`
+	// MultipartMaxAge is the upload lifetime in seconds (0 = default, negative = forever).
+	MultipartMaxAge int64 `json:"multipart_max_age"`
 	// User is the username for authentication (Basic Auth for Web Console, Access Key ID for S3 API).
 	// When empty, authentication is disabled.
 	User string `json:"user"`
@@ -97,6 +101,9 @@ const (
 	DefaultMaxPreviewSize     = 10 << 20 // 10 MiB
 )
 
+// DefaultMultipartMaxAge is the upload lifetime when MultipartMaxAge is 0.
+const DefaultMultipartMaxAge = 24 * time.Hour
+
 // DefaultRoot is the default storage root path used by DefaultConfig when
 // the user does not supply one via -root, -f, or S2_SERVER_ROOT.
 //
@@ -124,6 +131,17 @@ func (cfg *Config) EffectiveMaxUploadSize() int64 {
 		return DefaultMemfsMaxUploadSize
 	}
 	return DefaultMaxUploadSize
+}
+
+// EffectiveMultipartMaxAge returns the upload lifetime, or 0 when uploads never expire.
+func (cfg *Config) EffectiveMultipartMaxAge() time.Duration {
+	if cfg.MultipartMaxAge > 0 {
+		return time.Duration(cfg.MultipartMaxAge) * time.Second
+	}
+	if cfg.MultipartMaxAge < 0 {
+		return 0
+	}
+	return DefaultMultipartMaxAge
 }
 
 // Validate checks the configuration for obvious mistakes that would
@@ -277,6 +295,13 @@ func (cfg *Config) LoadEnv() error {
 			return fmt.Errorf("invalid %s: %w", EnvS2ServerMaxPreviewSize, err)
 		}
 		cfg.MaxPreviewSize = n
+	}
+	if v := os.Getenv(EnvS2ServerMultipartMaxAge); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid %s: %w", EnvS2ServerMultipartMaxAge, err)
+		}
+		cfg.MultipartMaxAge = n
 	}
 	if v := os.Getenv(EnvS2ServerUser); v != "" {
 		cfg.User = v

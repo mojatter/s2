@@ -9,8 +9,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -323,6 +326,48 @@ func (s *MultipartTestSuite) TestMalformedUploadID() {
 			s.Equal("NoSuchUpload", errResp.Code)
 		})
 	}
+}
+
+// An expired upload is refused before the sweep frees it.
+func (s *MultipartTestSuite) TestExpiredUpload() {
+	root := s.T().TempDir()
+	cfg := server.DefaultConfig()
+	cfg.Root = root
+	cfg.MultipartMaxAge = int64(time.Hour.Seconds())
+	srv, err := server.NewServer(context.Background(), cfg)
+	s.Require().NoError(err)
+	s.server = srv
+	s.createBucket("mp-expired")
+	uploadID := s.initiateUpload("mp-expired", "file.bin", nil)
+	at := time.Now().Add(-2 * time.Hour)
+	s.Require().NoError(os.Chtimes(filepath.Join(root, ".multipart", uploadID, "meta"), at, at))
+
+	testCases := []struct {
+		caseName string
+		method   string
+		handler  func(*server.Server, http.ResponseWriter, *http.Request)
+	}{
+		{caseName: "upload part", method: "PUT", handler: handleUploadPart},
+		{caseName: "complete", method: "POST", handler: handleCompleteMultipartUpload},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			body := `<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"x"</ETag></Part></CompleteMultipartUpload>`
+			req := httptest.NewRequest(tc.method, "/mp-expired/file.bin?partNumber=1&uploadId="+uploadID, strings.NewReader(body))
+			req.SetPathValue("bucket", "mp-expired")
+			req.SetPathValue("key", "file.bin")
+			w := httptest.NewRecorder()
+			tc.handler(s.server, w, req)
+
+			s.Equal(http.StatusNotFound, w.Code, w.Body.String())
+			var errResp ErrorResponse
+			s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+			s.Equal("NoSuchUpload", errResp.Code)
+		})
+	}
+
+	// Abort still reclaims it.
+	s.abortUpload("mp-expired", "file.bin", uploadID)
 }
 
 func (s *MultipartTestSuite) TestCreateMultipartUploadRecordsMetadata() {

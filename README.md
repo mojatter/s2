@@ -395,6 +395,7 @@ if _, err := strg.Get(ctx, "missing.txt"); errors.Is(err, s2.ErrNotExist) {
 | `S2_SERVER_USER` | — | Username for authentication (disables auth if empty) |
 | `S2_SERVER_PASSWORD` | — | Password for authentication |
 | `S2_SERVER_BUCKETS` | — | Comma-separated list of buckets to create on startup |
+| `S2_SERVER_MULTIPART_MAX_AGE` | `86400` | Seconds an unfinished multipart upload stays usable; past it the upload is refused and its parts are reclaimed (negative keeps uploads forever) |
 
 Environment variables take precedence over the config file.
 

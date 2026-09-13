@@ -185,7 +185,7 @@ func NewServer(ctx context.Context, cfg *Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	multipart, err := newMultipartStore(ctx, buckets.strg)
+	multipart, err := newMultipartStore(ctx, buckets.strg, cfg.EffectiveMultipartMaxAge())
 	if err != nil {
 		return nil, err
 	}
@@ -231,13 +231,41 @@ func registerHttpServerFactory(fn httpServerFactory) {
 	httpServerFactories = append(httpServerFactories, fn)
 }
 
+// multipartSweepInterval is fixed; MultipartMaxAge is the knob.
+const multipartSweepInterval = time.Hour
+
+// sweepMultipart sweeps once, then every multipartSweepInterval until ctx ends.
+func (s *Server) sweepMultipart(ctx context.Context) {
+	ticker := time.NewTicker(multipartSweepInterval)
+	defer ticker.Stop()
+
+	for {
+		if err := s.Multipart.Sweep(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn("Failed to sweep multipart uploads", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 // Start launches each HTTP server produced by the registered factories.
 // Factories returning nil are skipped. All running servers are shut
 // down gracefully when ctx is cancelled or any listener dies.
 func (s *Server) Start(ctx context.Context) error {
+	// Stop the goroutines below when a listener dies, too.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	registryMux.Lock()
 	factories := slices.Clone(httpServerFactories)
 	registryMux.Unlock()
+
+	if s.Config.EffectiveMultipartMaxAge() > 0 {
+		go s.sweepMultipart(ctx)
+	}
 
 	var httpServers []*http.Server
 	for _, fn := range factories {
