@@ -73,23 +73,25 @@ func (s *MultipartStoreTestSuite) TestIsHiddenBucketEntry() {
 func (s *MultipartStoreTestSuite) TestMetadata() {
 	ctx := context.Background()
 	ms := s.server.Multipart
-	s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", s2.Metadata{"author": "uz"}))
+	s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 1, s2.Metadata{"author": "uz"}))
 
 	testCases := []struct {
 		caseName string
 		id       string
 		bucket   string
 		key      string
+		gen      int64
 		wantErr  error
 	}{
-		{caseName: "match", id: "id1", bucket: "photos", key: "a.jpg"},
-		{caseName: "unknown id", id: "id2", bucket: "photos", key: "a.jpg", wantErr: ErrNoSuchUpload},
-		{caseName: "another key", id: "id1", bucket: "photos", key: "b.jpg", wantErr: ErrNoSuchUpload},
-		{caseName: "another bucket", id: "id1", bucket: "videos", key: "a.jpg", wantErr: ErrNoSuchUpload},
+		{caseName: "match", id: "id1", bucket: "photos", key: "a.jpg", gen: 1},
+		{caseName: "unknown id", id: "id2", bucket: "photos", key: "a.jpg", gen: 1, wantErr: ErrNoSuchUpload},
+		{caseName: "another key", id: "id1", bucket: "photos", key: "b.jpg", gen: 1, wantErr: ErrNoSuchUpload},
+		{caseName: "another bucket", id: "id1", bucket: "videos", key: "a.jpg", gen: 1, wantErr: ErrNoSuchUpload},
+		{caseName: "a recreated bucket", id: "id1", bucket: "photos", key: "a.jpg", gen: 2, wantErr: ErrNoSuchUpload},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			md, err := ms.Metadata(ctx, tc.id, tc.bucket, tc.key)
+			md, err := ms.Metadata(ctx, tc.id, tc.bucket, tc.key, tc.gen)
 			if tc.wantErr != nil {
 				s.ErrorIs(err, tc.wantErr)
 				return
@@ -116,10 +118,10 @@ func (s *MultipartStoreTestSuite) TestMetadataExpiry() {
 			ctx := context.Background()
 			root := s.T().TempDir()
 			ms := s.newStoreAt(s2.TypeOSFS, root, tc.maxAge)
-			s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", nil))
+			s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil))
 			s.backdate(root, "id1", uploadMetaName, 2*time.Hour)
 
-			_, err := ms.Metadata(ctx, "id1", "photos", "a.jpg")
+			_, err := ms.Metadata(ctx, "id1", "photos", "a.jpg", 0)
 
 			if tc.wantErr != nil {
 				s.ErrorIs(err, tc.wantErr)
@@ -154,12 +156,12 @@ func (undatedObject) LastModified() time.Time { return time.Time{} }
 func (s *MultipartStoreTestSuite) TestUndatedUploadNeverExpires() {
 	ctx := context.Background()
 	base := s.newStore(s2.TypeMemFS)
-	s.Require().NoError(base.Create(ctx, "id1", "photos", "a.jpg", nil))
+	s.Require().NoError(base.Create(ctx, "id1", "photos", "a.jpg", 0, nil))
 	ms := &MultipartStore{strg: undatedStorage{base.Storage()}, maxAge: time.Nanosecond}
 
 	s.Require().NoError(ms.Sweep(ctx))
 
-	_, err := ms.Metadata(ctx, "id1", "photos", "a.jpg")
+	_, err := ms.Metadata(ctx, "id1", "photos", "a.jpg", 0)
 	s.NoError(err)
 	exists, err := ms.Storage().Exists(ctx, "id1")
 	s.Require().NoError(err)
@@ -181,7 +183,7 @@ func (s *MultipartStoreTestSuite) TestMetadataSurfacesReadFailure() {
 	want := errors.New("backend unavailable")
 	ms := &MultipartStore{strg: failingStorage{err: want}}
 
-	_, err := ms.Metadata(context.Background(), "id1", "photos", "a.jpg")
+	_, err := ms.Metadata(context.Background(), "id1", "photos", "a.jpg", 0)
 	s.ErrorIs(err, want)
 	s.NotErrorIs(err, ErrNoSuchUpload)
 }
@@ -203,7 +205,7 @@ func (e existsFailingStorage) Exists(context.Context, string) (bool, error) { re
 func (s *MultipartStoreTestSuite) TestPutPartAfterAbort() {
 	ctx := context.Background()
 	ms := s.newStore(s2.TypeOSFS)
-	s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", nil))
+	s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil))
 	s.Require().NoError(ms.Remove(ctx, "id1"))
 
 	err := ms.PutPart(ctx, "id1", 1, []byte("late"), `"x"`)
@@ -218,7 +220,7 @@ func (s *MultipartStoreTestSuite) TestPutPartAfterAbort() {
 func (s *MultipartStoreTestSuite) TestPutPartIgnoresProbeFailure() {
 	ctx := context.Background()
 	ms := s.newStore(s2.TypeOSFS)
-	s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", nil))
+	s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil))
 	probeBroken := &MultipartStore{strg: existsFailingStorage{ms.Storage(), errors.New("probe failed")}}
 
 	s.Require().NoError(probeBroken.PutPart(ctx, "id1", 1, []byte("hello"), `"x"`))
@@ -246,7 +248,7 @@ func (vanishingObject) Open() (io.ReadCloser, error) {
 func (s *MultipartStoreTestSuite) TestMetadataOfVanishingRecord() {
 	ms := &MultipartStore{strg: vanishingStorage{}}
 
-	_, err := ms.Metadata(context.Background(), "id1", "photos", "a.jpg")
+	_, err := ms.Metadata(context.Background(), "id1", "photos", "a.jpg", 0)
 	s.ErrorIs(err, ErrNoSuchUpload)
 }
 
@@ -262,14 +264,14 @@ func (s *MultipartStoreTestSuite) TestAbort() {
 		{
 			caseName: "bound upload",
 			setup: func(ctx context.Context, _ string, ms *MultipartStore) {
-				s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", nil))
+				s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil))
 			},
 			bucket: "photos", key: "a.jpg", wantGone: true,
 		},
 		{
 			caseName: "bound elsewhere is left alone",
 			setup: func(ctx context.Context, _ string, ms *MultipartStore) {
-				s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", nil))
+				s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil))
 			},
 			bucket: "photos", key: "b.jpg", wantErr: ErrNoSuchUpload,
 		},
@@ -277,7 +279,7 @@ func (s *MultipartStoreTestSuite) TestAbort() {
 			// Abort ignores age.
 			caseName: "expired upload",
 			setup: func(ctx context.Context, root string, ms *MultipartStore) {
-				s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", nil))
+				s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil))
 				s.backdate(root, "id1", uploadMetaName, 2*time.Hour)
 			},
 			bucket: "photos", key: "a.jpg", wantGone: true,
@@ -314,7 +316,7 @@ func (s *MultipartStoreTestSuite) TestAbort() {
 			ms := s.newStoreAt(s2.TypeOSFS, root, 3600)
 			tc.setup(ctx, root, ms)
 
-			err := ms.Abort(ctx, "id1", tc.bucket, tc.key)
+			err := ms.Abort(ctx, "id1", tc.bucket, tc.key, 0)
 
 			if tc.wantErr != nil {
 				s.ErrorIs(err, tc.wantErr)
@@ -379,7 +381,7 @@ func (s *MultipartStoreTestSuite) TestSweepPages() {
 	root := s.T().TempDir()
 	base := s.newStoreAt(s2.TypeOSFS, root, 3600)
 	for _, id := range []string{"id1", "id2", "id3"} {
-		s.Require().NoError(base.Create(ctx, id, "photos", id+".jpg", nil))
+		s.Require().NoError(base.Create(ctx, id, "photos", id+".jpg", 0, nil))
 	}
 	s.backdate(root, "id1", uploadMetaName, 2*time.Hour)
 	s.backdate(root, "id3", uploadMetaName, 2*time.Hour)
@@ -405,13 +407,13 @@ func (s *MultipartStoreTestSuite) TestSweep() {
 		{
 			caseName: "a fresh upload is kept",
 			setup: func(ctx context.Context, _ string, ms *MultipartStore) {
-				s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", nil))
+				s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil))
 			},
 		},
 		{
 			caseName: "an upload past maxAge is removed",
 			setup: func(ctx context.Context, root string, ms *MultipartStore) {
-				s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", nil))
+				s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil))
 				s.backdate(root, "id1", uploadMetaName, 2*time.Hour)
 			},
 			wantGone: true,
@@ -419,7 +421,7 @@ func (s *MultipartStoreTestSuite) TestSweep() {
 		{
 			caseName: "a recent part does not refresh a stale record",
 			setup: func(ctx context.Context, root string, ms *MultipartStore) {
-				s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", nil))
+				s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil))
 				s.backdate(root, "id1", uploadMetaName, 2*time.Hour)
 				s.Require().NoError(ms.PutPart(ctx, "id1", 1, []byte("x"), `"etag"`))
 			},
@@ -429,7 +431,7 @@ func (s *MultipartStoreTestSuite) TestSweep() {
 			// Only the sweep can reclaim it.
 			caseName: "a record that cannot be read is dated by its contents",
 			setup: func(ctx context.Context, root string, ms *MultipartStore) {
-				s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", s2.Metadata{"author": "uz"}))
+				s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, s2.Metadata{"author": "uz"}))
 				sidecar := filepath.Join(root, multipartDir, "id1", ".meta", uploadMetaName)
 				s.Require().NoError(os.WriteFile(sidecar, []byte("{"), 0o600))
 				s.backdate(root, "id1", uploadMetaName, 2*time.Hour)
@@ -464,7 +466,7 @@ func (s *MultipartStoreTestSuite) TestSweep() {
 			root := s.T().TempDir()
 			ms := s.newStoreAt(s2.TypeOSFS, root, maxAge)
 			tc.setup(ctx, root, ms)
-			s.Require().NoError(ms.Create(ctx, "id2", "photos", "b.jpg", nil))
+			s.Require().NoError(ms.Create(ctx, "id2", "photos", "b.jpg", 0, nil))
 
 			s.Require().NoError(ms.Sweep(ctx))
 
@@ -528,9 +530,9 @@ func (s *MultipartStoreTestSuite) TestRemove() {
 			ctx := context.Background()
 			ms := s.newStore(tc.typ)
 
-			s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", nil))
+			s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil))
 			s.Require().NoError(ms.PutPart(ctx, "id1", 1, []byte("x"), `"etag"`))
-			s.Require().NoError(ms.Create(ctx, "id2", "photos", "b.jpg", nil))
+			s.Require().NoError(ms.Create(ctx, "id2", "photos", "b.jpg", 0, nil))
 
 			s.Require().NoError(ms.Remove(ctx, "id1"))
 
@@ -540,7 +542,7 @@ func (s *MultipartStoreTestSuite) TestRemove() {
 				s.Require().NoError(err)
 				s.Falsef(exists, "%s should have been removed", name)
 			}
-			_, err := ms.Metadata(ctx, "id2", "photos", "b.jpg")
+			_, err := ms.Metadata(ctx, "id2", "photos", "b.jpg", 0)
 			s.NoError(err, "a sibling upload must survive")
 		})
 	}

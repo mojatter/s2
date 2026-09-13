@@ -27,10 +27,11 @@ func isHiddenBucketEntry(name string) bool {
 	return strings.HasPrefix(name, ".")
 }
 
-// uploadRecord binds an upload ID to its target object.
-type uploadRecord struct {
-	Bucket string `json:"bucket"`
-	Key    string `json:"key"`
+// uploadMeta binds an upload ID to its target object in one bucket generation.
+type uploadMeta struct {
+	Bucket     string `json:"bucket"`
+	Key        string `json:"key"`
+	Generation int64  `json:"generation,omitempty"`
 }
 
 // MultipartStore stores in-progress uploads under <Root>/.multipart/<uploadId>/.
@@ -73,9 +74,9 @@ func isNotExist(err error) bool {
 	return errors.Is(err, s2.ErrNotExist) || errors.Is(err, fs.ErrNotExist)
 }
 
-// Create records an upload of bucket/key; md is applied at completion.
-func (ms *MultipartStore) Create(ctx context.Context, id, bucket, key string, md s2.Metadata) error {
-	body, err := json.Marshal(uploadRecord{Bucket: bucket, Key: key})
+// Create records an upload of bucket/key in generation gen; md is applied at completion.
+func (ms *MultipartStore) Create(ctx context.Context, id, bucket, key string, gen int64, md s2.Metadata) error {
+	body, err := json.Marshal(uploadMeta{Bucket: bucket, Key: key, Generation: gen})
 	if err != nil {
 		return err
 	}
@@ -87,31 +88,31 @@ func (ms *MultipartStore) Create(ctx context.Context, id, bucket, key string, md
 }
 
 // load reads id's record and initiation time; a meta lost before Open counts as missing.
-func (ms *MultipartStore) load(ctx context.Context, id string) (uploadRecord, s2.Metadata, time.Time, error) {
+func (ms *MultipartStore) load(ctx context.Context, id string) (uploadMeta, s2.Metadata, time.Time, error) {
 	u, err := ms.upload(ctx, id)
 	if err != nil {
-		return uploadRecord{}, nil, time.Time{}, err
+		return uploadMeta{}, nil, time.Time{}, err
 	}
 	obj, err := u.Get(ctx, uploadMetaName)
 	if isNotExist(err) {
-		return uploadRecord{}, nil, time.Time{}, errNoRecord
+		return uploadMeta{}, nil, time.Time{}, errNoRecord
 	}
 	if err != nil {
-		return uploadRecord{}, nil, time.Time{}, err
+		return uploadMeta{}, nil, time.Time{}, err
 	}
 	rc, err := obj.Open()
 	if isNotExist(err) {
-		return uploadRecord{}, nil, time.Time{}, errNoRecord
+		return uploadMeta{}, nil, time.Time{}, errNoRecord
 	}
 	if err != nil {
-		return uploadRecord{}, nil, time.Time{}, err
+		return uploadMeta{}, nil, time.Time{}, err
 	}
 
 	defer rc.Close() //nolint:errcheck // read-only
 
-	var rec uploadRecord
+	var rec uploadMeta
 	if err := json.NewDecoder(rc).Decode(&rec); err != nil {
-		return uploadRecord{}, nil, time.Time{}, fmt.Errorf("failed to read upload %s: %w", id, err)
+		return uploadMeta{}, nil, time.Time{}, fmt.Errorf("failed to read upload %s: %w", id, err)
 	}
 	md := obj.Metadata().Clone()
 	if md == nil {
@@ -120,21 +121,21 @@ func (ms *MultipartStore) load(ctx context.Context, id string) (uploadRecord, s2
 	return rec, md, obj.LastModified(), nil
 }
 
-// record is load plus the bucket/key binding check; age is left to the caller.
-func (ms *MultipartStore) record(ctx context.Context, id, bucket, key string) (s2.Metadata, time.Time, error) {
+// record is load plus the bucket/key/generation binding check; age is left to the caller.
+func (ms *MultipartStore) record(ctx context.Context, id, bucket, key string, gen int64) (s2.Metadata, time.Time, error) {
 	rec, md, initiated, err := ms.load(ctx, id)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	if rec.Bucket != bucket || rec.Key != key {
+	if rec.Bucket != bucket || rec.Key != key || rec.Generation != gen {
 		return nil, time.Time{}, ErrNoSuchUpload
 	}
 	return md, initiated, nil
 }
 
-// Metadata returns id's headers; ErrNoSuchUpload unless it targets bucket/key and is unexpired.
-func (ms *MultipartStore) Metadata(ctx context.Context, id, bucket, key string) (s2.Metadata, error) {
-	md, initiated, err := ms.record(ctx, id, bucket, key)
+// Metadata returns id's headers; ErrNoSuchUpload unless it targets bucket/key in gen and is unexpired.
+func (ms *MultipartStore) Metadata(ctx context.Context, id, bucket, key string, gen int64) (s2.Metadata, error) {
+	md, initiated, err := ms.record(ctx, id, bucket, key, gen)
 	if errors.Is(err, errNoRecord) {
 		return nil, ErrNoSuchUpload
 	}
@@ -148,8 +149,8 @@ func (ms *MultipartStore) Metadata(ctx context.Context, id, bucket, key string) 
 }
 
 // Abort removes id, expired or not; only a missing record skips the binding check.
-func (ms *MultipartStore) Abort(ctx context.Context, id, bucket, key string) error {
-	if _, _, err := ms.record(ctx, id, bucket, key); err != nil && !errors.Is(err, errNoRecord) {
+func (ms *MultipartStore) Abort(ctx context.Context, id, bucket, key string, gen int64) error {
+	if _, _, err := ms.record(ctx, id, bucket, key, gen); err != nil && !errors.Is(err, errNoRecord) {
 		return err
 	}
 	exists, err := ms.strg.Exists(ctx, id)

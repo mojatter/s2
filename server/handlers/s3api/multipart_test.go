@@ -289,7 +289,7 @@ func (s *MultipartTestSuite) TestCreateMultipartUploadLeavesAbsentContentTypeUns
 			s.createBucket("mp-noct")
 			uploadID := s.initiateUpload("mp-noct", "movie.mp4", tc.headers)
 
-			md, err := s.server.Multipart.Metadata(context.Background(), uploadID, "mp-noct", "movie.mp4")
+			md, err := s.server.Multipart.Metadata(context.Background(), uploadID, "mp-noct", "movie.mp4", s.generation("mp-noct"))
 			s.Require().NoError(err)
 			for k := range server.InternalMetadataKeys {
 				s.NotContains(md, k)
@@ -326,6 +326,75 @@ func (s *MultipartTestSuite) TestMalformedUploadID() {
 			s.Equal("NoSuchUpload", errResp.Code)
 		})
 	}
+}
+
+// generation returns bucket's current generation.
+func (s *MultipartTestSuite) generation(bucket string) int64 {
+	s.T().Helper()
+
+	created, err := s.server.Buckets.CreatedAt(context.Background(), bucket)
+	s.Require().NoError(err)
+	return created.UnixNano()
+}
+
+// An upload of a deleted bucket must not complete into its same-named successor.
+func (s *MultipartTestSuite) TestUploadOfRecreatedBucket() {
+	root := s.T().TempDir()
+	cfg := server.DefaultConfig()
+	cfg.Root = root
+	srv, err := server.NewServer(context.Background(), cfg)
+	s.Require().NoError(err)
+	s.server = srv
+	s.createBucket("mp-reborn")
+	uploadID := s.initiateUpload("mp-reborn", "file.bin", nil)
+	p1 := s.uploadPart("mp-reborn", "file.bin", uploadID, 1, "hello")
+	// Backdated so the successor's marker cannot share its time.
+	at := time.Now().Add(-time.Hour)
+	s.Require().NoError(os.Chtimes(filepath.Join(root, "mp-reborn", ".keep"), at, at))
+	s.Require().NoError(s.server.Buckets.Delete(context.Background(), "mp-reborn"))
+	s.createBucket("mp-reborn")
+
+	testCases := []struct {
+		caseName string
+		method   string
+		handler  func(*server.Server, http.ResponseWriter, *http.Request)
+		body     string
+	}{
+		{caseName: "upload part", method: "PUT", handler: handleUploadPart, body: "world"},
+		{caseName: "complete", method: "POST", handler: handleCompleteMultipartUpload, body: fmt.Sprintf(`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`, p1.ETag)},
+		{caseName: "abort", method: "DELETE", handler: handleAbortMultipartUpload},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			req := httptest.NewRequest(tc.method, "/mp-reborn/file.bin?partNumber=2&uploadId="+uploadID, strings.NewReader(tc.body))
+			req.SetPathValue("bucket", "mp-reborn")
+			req.SetPathValue("key", "file.bin")
+			w := httptest.NewRecorder()
+			tc.handler(s.server, w, req)
+
+			s.Equal(http.StatusNotFound, w.Code, w.Body.String())
+			var errResp ErrorResponse
+			s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+			s.Equal("NoSuchUpload", errResp.Code)
+		})
+	}
+	exists, err := s.storage("mp-reborn").Exists(context.Background(), "file.bin")
+	s.Require().NoError(err)
+	s.False(exists)
+}
+
+// An ensure-exists PUT of the bucket must not orphan its uploads.
+func (s *MultipartTestSuite) TestUploadSurvivesBucketRePut() {
+	s.createBucket("mp-reput")
+	uploadID := s.initiateUpload("mp-reput", "file.bin", nil)
+	req := httptest.NewRequest("PUT", "/mp-reput", nil)
+	req.SetPathValue("bucket", "mp-reput")
+	w := httptest.NewRecorder()
+	handleCreateBucket(s.server, w, req)
+	s.Require().Equal(http.StatusOK, w.Code, w.Body.String())
+
+	p1 := s.uploadPart("mp-reput", "file.bin", uploadID, 1, "hello")
+	s.completeUpload("mp-reput", "file.bin", uploadID, p1)
 }
 
 // An expired upload is refused before the sweep frees it.
@@ -377,7 +446,7 @@ func (s *MultipartTestSuite) TestCreateMultipartUploadRecordsMetadata() {
 		"X-Amz-Meta-Author": {"uz"},
 	})
 
-	md, err := s.server.Multipart.Metadata(context.Background(), uploadID, "mp-manifest", "file.bin")
+	md, err := s.server.Multipart.Metadata(context.Background(), uploadID, "mp-manifest", "file.bin", s.generation("mp-manifest"))
 	s.Require().NoError(err)
 	s.Equal("video/mp4", md[contentTypeMetadataKey])
 	s.Equal("uz", md["author"])

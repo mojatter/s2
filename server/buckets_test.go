@@ -191,37 +191,68 @@ func (s *BucketsTestSuite) TestCreateFolder() {
 }
 
 func (s *BucketsTestSuite) TestCreatedAt() {
-	ctx := context.Background()
-	before := time.Now()
-	s.Require().NoError(s.buckets.Create(ctx, "ts-bucket"))
-	after := time.Now()
+	hourAgo := time.Now().Add(-time.Hour).Truncate(time.Second)
+	testCases := []struct {
+		caseName string
+		prepare  func(ctx context.Context, root string, bs *Buckets)
+		want     func(got time.Time)
+	}{
+		{
+			caseName: "a new bucket is dated now",
+			prepare:  func(context.Context, string, *Buckets) {},
+			want: func(got time.Time) {
+				s.WithinDuration(time.Now(), got, time.Minute)
+			},
+		},
+		{
+			caseName: "re-creating keeps the date",
+			prepare: func(ctx context.Context, root string, bs *Buckets) {
+				s.Require().NoError(os.Chtimes(filepath.Join(root, "photos", keepFile), hourAgo, hourAgo))
+				s.Require().NoError(bs.Create(ctx, "photos"))
+			},
+			want: func(got time.Time) { s.True(got.Equal(hourAgo), got) },
+		},
+		{
+			caseName: "deleting and creating again moves it",
+			prepare: func(ctx context.Context, root string, bs *Buckets) {
+				s.Require().NoError(os.Chtimes(filepath.Join(root, "photos", keepFile), hourAgo, hourAgo))
+				s.Require().NoError(bs.Delete(ctx, "photos"))
+				s.Require().NoError(bs.Create(ctx, "photos"))
+			},
+			want: func(got time.Time) { s.True(got.After(hourAgo), got) },
+		},
+		{
+			caseName: "a bucket s2 did not create is undated",
+			prepare: func(ctx context.Context, _ string, bs *Buckets) {
+				s.Require().NoError(bs.strg.Delete(ctx, "photos/"+keepFile))
+				s.Require().NoError(bs.strg.Put(ctx, s2.NewObjectBytes("photos/a.txt", []byte("x"))))
+			},
+			want: func(got time.Time) { s.True(got.IsZero(), got) },
+		},
+		{
+			caseName: "a missing bucket is undated",
+			prepare: func(ctx context.Context, _ string, bs *Buckets) {
+				s.Require().NoError(bs.Delete(ctx, "photos"))
+			},
+			want: func(got time.Time) { s.True(got.IsZero(), got) },
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			cfg := DefaultConfig()
+			cfg.Root = s.T().TempDir()
+			bs, err := newBuckets(ctx, cfg)
+			s.Require().NoError(err)
+			s.Require().NoError(bs.Create(ctx, "photos"))
+			tc.prepare(ctx, cfg.Root, bs)
 
-	got := s.buckets.CreatedAt(ctx, "ts-bucket")
-	s.False(got.Before(before.Add(-time.Second)), "CreatedAt should not be before bucket creation")
-	s.False(got.After(after.Add(time.Second)), "CreatedAt should not be after bucket creation")
-}
+			got, err := bs.CreatedAt(ctx, "photos")
 
-// Re-creating an existing bucket must not reset its creation time.
-func (s *BucketsTestSuite) TestCreateKeepsExistingMarker() {
-	ctx := context.Background()
-	cfg := DefaultConfig()
-	cfg.Root = s.T().TempDir()
-	bs, err := newBuckets(ctx, cfg)
-	s.Require().NoError(err)
-	s.Require().NoError(bs.Create(ctx, "photos"))
-	at := time.Now().Add(-time.Hour).Truncate(time.Second)
-	s.Require().NoError(os.Chtimes(filepath.Join(cfg.Root, "photos", keepFile), at, at))
-
-	s.Require().NoError(bs.Create(ctx, "photos"))
-
-	s.True(bs.CreatedAt(ctx, "photos").Equal(at))
-}
-
-func (s *BucketsTestSuite) TestCreatedAtMissing() {
-	ctx := context.Background()
-	before := time.Now()
-	got := s.buckets.CreatedAt(ctx, "nonexistent")
-	s.False(got.Before(before.Add(-time.Second)), "fallback should return approximately now")
+			s.Require().NoError(err)
+			tc.want(got)
+		})
+	}
 }
 
 func (s *BucketsTestSuite) TestGetNotFound() {

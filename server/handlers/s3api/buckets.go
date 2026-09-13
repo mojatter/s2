@@ -2,6 +2,7 @@ package s3api
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/mojatter/s2/server"
 	"github.com/mojatter/s2/server/middleware"
@@ -28,10 +29,12 @@ func HandleListBuckets(s *server.Server, w http.ResponseWriter, r *http.Request)
 
 	buckets := make([]Bucket, 0, len(names))
 	for _, name := range names {
-		buckets = append(buckets, Bucket{
-			Name:         name,
-			CreationDate: s.Buckets.CreatedAt(ctx, name),
-		})
+		// One unreadable marker must not fail the whole listing.
+		created, err := s.Buckets.CreatedAt(ctx, name)
+		if err != nil || created.IsZero() {
+			created = time.Now()
+		}
+		buckets = append(buckets, Bucket{Name: name, CreationDate: created})
 	}
 
 	result := ListAllMyBucketsResult{

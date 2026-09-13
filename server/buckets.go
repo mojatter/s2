@@ -126,18 +126,20 @@ func (bs *Buckets) Get(ctx context.Context, name string) (s2.Storage, error) {
 	return bs.strg.Sub(ctx, name)
 }
 
-// CreatedAt returns the creation time of a bucket by reading the .keep marker file.
-// If the marker is missing, the current time is returned as a fallback.
-func (bs *Buckets) CreatedAt(ctx context.Context, name string) time.Time {
+// CreatedAt returns the bucket's .keep time; zero when s2 did not create the bucket.
+func (bs *Buckets) CreatedAt(ctx context.Context, name string) (time.Time, error) {
 	sub, err := bs.strg.Sub(ctx, name)
 	if err != nil {
-		return time.Now()
+		return time.Time{}, err
 	}
 	obj, err := sub.Get(ctx, keepFile)
-	if err != nil {
-		return time.Now()
+	if isNotExist(err) {
+		return time.Time{}, nil
 	}
-	return obj.LastModified()
+	if err != nil {
+		return time.Time{}, err
+	}
+	return obj.LastModified(), nil
 }
 
 // Exists reports whether a bucket directory exists under the storage
