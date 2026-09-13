@@ -126,18 +126,20 @@ func (bs *Buckets) Get(ctx context.Context, name string) (s2.Storage, error) {
 	return bs.strg.Sub(ctx, name)
 }
 
-// CreatedAt returns the creation time of a bucket by reading the .keep marker file.
-// If the marker is missing, the current time is returned as a fallback.
-func (bs *Buckets) CreatedAt(ctx context.Context, name string) time.Time {
+// CreatedAt returns the bucket's .keep time; zero when s2 did not create the bucket.
+func (bs *Buckets) CreatedAt(ctx context.Context, name string) (time.Time, error) {
 	sub, err := bs.strg.Sub(ctx, name)
 	if err != nil {
-		return time.Now()
+		return time.Time{}, err
 	}
 	obj, err := sub.Get(ctx, keepFile)
-	if err != nil {
-		return time.Now()
+	if isNotExist(err) {
+		return time.Time{}, nil
 	}
-	return obj.LastModified()
+	if err != nil {
+		return time.Time{}, err
+	}
+	return obj.LastModified(), nil
 }
 
 // Exists reports whether a bucket directory exists under the storage
@@ -166,8 +168,14 @@ func (bs *Buckets) Create(ctx context.Context, name string) error {
 	if isHiddenBucketEntry(name) {
 		return fmt.Errorf("%w: %q is internal state", ErrReservedBucketName, name)
 	}
-	obj := s2.NewObjectBytes(name+"/"+keepFile, []byte{})
-	return bs.strg.Put(ctx, obj)
+	// An existing bucket keeps its marker, or its lack of one, so its generation holds.
+	marker := name + "/" + keepFile
+	for _, p := range []string{marker, name} {
+		if exists, err := bs.strg.Exists(ctx, p); err != nil || exists {
+			return err
+		}
+	}
+	return bs.strg.Put(ctx, s2.NewObjectBytes(marker, []byte{}))
 }
 
 func (bs *Buckets) Delete(ctx context.Context, name string) error {

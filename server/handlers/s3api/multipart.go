@@ -48,6 +48,20 @@ func validUploadID(id string) bool {
 	return err == nil && len(b) == 16
 }
 
+// bucketGeneration returns the bucket's CreatedAt in nanoseconds; false once an error is written.
+func bucketGeneration(s *server.Server, w http.ResponseWriter, r *http.Request, bucket string) (int64, bool) {
+	created, err := s.Buckets.CreatedAt(r.Context(), bucket)
+	if err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return 0, false
+	}
+	if created.IsZero() {
+		return 0, true
+	}
+	return created.UnixNano(), true
+}
+
 func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
@@ -56,6 +70,10 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 	if _, err := s.Buckets.Get(ctx, bucketName); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
+		return
+	}
+	gen, ok := bucketGeneration(s, w, r, bucketName)
+	if !ok {
 		return
 	}
 
@@ -75,7 +93,7 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 	if ct := requestContentType(r); ct != "" {
 		md[contentTypeMetadataKey] = ct
 	}
-	if err := s.Multipart.Create(ctx, uploadID, bucketName, key, md); err != nil {
+	if err := s.Multipart.Create(ctx, uploadID, bucketName, key, gen, md); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
@@ -113,7 +131,11 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, code, msg, status)
 		return
 	}
-	if _, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key); err != nil {
+	gen, ok := bucketGeneration(s, w, r, bucketName)
+	if !ok {
+		return
+	}
+	if _, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key, gen); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
@@ -187,7 +209,11 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 	}
 
 	// Complete carries no headers; they were recorded at initiate time.
-	md, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key)
+	gen, ok := bucketGeneration(s, w, r, bucketName)
+	if !ok {
+		return
+	}
+	md, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key, gen)
 	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
@@ -264,7 +290,11 @@ func handleAbortMultipartUpload(s *server.Server, w http.ResponseWriter, r *http
 		writeError(w, r, code, msg, status)
 		return
 	}
-	if err := s.Multipart.Abort(ctx, uploadID, bucketName, key); err != nil {
+	gen, ok := bucketGeneration(s, w, r, bucketName)
+	if !ok {
+		return
+	}
+	if err := s.Multipart.Abort(ctx, uploadID, bucketName, key, gen); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
