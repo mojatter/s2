@@ -4,6 +4,8 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -159,6 +161,52 @@ func TestStart(t *testing.T) {
 			assert.NoError(t, err)
 		case <-time.After(15 * time.Second):
 			t.Fatal("Start did not return after context cancel")
+		}
+	})
+
+	t.Run("sweeps stale multipart uploads", func(t *testing.T) {
+		testCases := []struct {
+			caseName  string
+			maxAge    int64
+			wantSwept bool
+		}{
+			{caseName: "enabled", maxAge: int64(time.Hour.Seconds()), wantSwept: true},
+			{caseName: "disabled", maxAge: -1},
+		}
+		for _, tc := range testCases {
+			t.Run(tc.caseName, func(t *testing.T) {
+				ln, err := net.Listen("tcp", "127.0.0.1:0")
+				require.NoError(t, err)
+				addr := ln.Addr().String()
+				require.NoError(t, ln.Close())
+
+				cfg := DefaultConfig()
+				cfg.Root = t.TempDir()
+				cfg.Listen = addr
+				cfg.ConsoleListen = ""
+				cfg.MultipartMaxAge = tc.maxAge
+
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+
+				srv, err := NewServer(ctx, cfg)
+				require.NoError(t, err)
+				require.NoError(t, srv.Multipart.Create(ctx, "id1", "photos", "a.jpg", nil))
+				at := time.Now().Add(-2 * time.Hour)
+				require.NoError(t, os.Chtimes(filepath.Join(cfg.Root, multipartDir, "id1", uploadMetaName), at, at))
+
+				go func() { _ = srv.Start(ctx) }()
+
+				gone := func() bool {
+					exists, existsErr := srv.Multipart.Storage().Exists(ctx, "id1")
+					return existsErr == nil && !exists
+				}
+				if tc.wantSwept {
+					require.Eventually(t, gone, 3*time.Second, 10*time.Millisecond)
+					return
+				}
+				require.Never(t, gone, 300*time.Millisecond, 10*time.Millisecond)
+			})
 		}
 	})
 

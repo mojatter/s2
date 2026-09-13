@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,6 +34,8 @@ func TestDefaultConfig(t *testing.T) {
 		{caseName: "max upload size", field: "MaxUploadSize", got: DefaultConfig().MaxUploadSize, want: int64(0)},
 		{caseName: "effective max upload size (osfs)", field: "EffectiveMaxUploadSize", got: DefaultConfig().EffectiveMaxUploadSize(), want: int64(5 << 30)},
 		{caseName: "max preview size", field: "MaxPreviewSize", got: DefaultConfig().MaxPreviewSize, want: int64(10 << 20)},
+		{caseName: "multipart max age", field: "MultipartMaxAge", got: DefaultConfig().MultipartMaxAge, want: int64(0)},
+		{caseName: "effective multipart max age", field: "EffectiveMultipartMaxAge", got: DefaultConfig().EffectiveMultipartMaxAge(), want: DefaultMultipartMaxAge},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
@@ -84,6 +87,52 @@ func TestEffectiveMaxUploadSize(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
 			assert.Equal(t, tc.want, tc.cfg.EffectiveMaxUploadSize())
+		})
+	}
+}
+
+func TestEffectiveMultipartMaxAge(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		maxAge   int64
+		want     time.Duration
+	}{
+		{caseName: "unset falls back to the default", maxAge: 0, want: DefaultMultipartMaxAge},
+		{caseName: "seconds are honoured", maxAge: 90, want: 90 * time.Second},
+		{caseName: "negative disables the sweeper", maxAge: -1, want: 0},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.MultipartMaxAge = tc.maxAge
+			assert.Equal(t, tc.want, cfg.EffectiveMultipartMaxAge())
+		})
+	}
+}
+
+func TestLoadEnvMultipartMaxAge(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		env      string
+		want     int64
+		wantErr  bool
+	}{
+		{caseName: "unset keeps the config value", env: "", want: 0},
+		{caseName: "seconds", env: "3600", want: 3600},
+		{caseName: "negative", env: "-1", want: -1},
+		{caseName: "not a number", env: "soon", wantErr: true},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			t.Setenv(EnvS2ServerMultipartMaxAge, tc.env)
+			cfg := DefaultConfig()
+			err := cfg.LoadEnv()
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.MultipartMaxAge)
 		})
 	}
 }
