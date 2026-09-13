@@ -191,26 +191,36 @@ func (ms *MultipartStore) Sweep(ctx context.Context) error {
 	if ms.maxAge <= 0 {
 		return nil
 	}
-	res, err := ms.strg.List(ctx, s2.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to list multipart uploads: %w", err)
-	}
-	for _, id := range res.CommonPrefixes {
-		started, ok, err := ms.startedAt(ctx, id)
+	for after := ""; ; {
+		res, err := ms.strg.List(ctx, s2.ListOptions{After: after})
 		if err != nil {
-			slog.Warn("Failed to age multipart upload", "uploadId", id, "error", err)
-			continue
+			return fmt.Errorf("failed to list multipart uploads: %w", err)
 		}
-		if !ok || !ms.expired(started) {
-			continue
+		for _, id := range res.CommonPrefixes {
+			ms.sweepUpload(ctx, id)
 		}
-		if err := ms.Remove(ctx, id); err != nil {
-			slog.Warn("Failed to remove stale multipart upload", "uploadId", id, "error", err)
-			continue
+		if res.NextAfter == "" {
+			return nil
 		}
-		slog.Info("Removed stale multipart upload", "uploadId", id)
+		after = res.NextAfter
 	}
-	return nil
+}
+
+// sweepUpload removes id if it has expired.
+func (ms *MultipartStore) sweepUpload(ctx context.Context, id string) {
+	started, ok, err := ms.startedAt(ctx, id)
+	if err != nil {
+		slog.Warn("Failed to age multipart upload", "uploadId", id, "error", err)
+		return
+	}
+	if !ok || !ms.expired(started) {
+		return
+	}
+	if err := ms.Remove(ctx, id); err != nil {
+		slog.Warn("Failed to remove stale multipart upload", "uploadId", id, "error", err)
+		return
+	}
+	slog.Info("Removed stale multipart upload", "uploadId", id)
 }
 
 // startedAt dates id by its record, else its newest object; ok is false when undatable.

@@ -353,6 +353,47 @@ func (s *MultipartStoreTestSuite) TestSweepSurfacesListFailure() {
 	s.ErrorIs(ms.Sweep(context.Background()), want)
 }
 
+// pagingStorage lists one upload per page, as s3 does past MaxKeys.
+type pagingStorage struct{ s2.Storage }
+
+func (p pagingStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	res, err := p.Storage.List(ctx, s2.ListOptions{})
+	if err != nil {
+		return s2.ListResult{}, err
+	}
+	for i, id := range res.CommonPrefixes {
+		if id <= opts.After {
+			continue
+		}
+		page := s2.ListResult{CommonPrefixes: []string{id}}
+		if i < len(res.CommonPrefixes)-1 {
+			page.NextAfter = id
+		}
+		return page, nil
+	}
+	return s2.ListResult{}, nil
+}
+
+func (s *MultipartStoreTestSuite) TestSweepPages() {
+	ctx := context.Background()
+	root := s.T().TempDir()
+	base := s.newStoreAt(s2.TypeOSFS, root, 3600)
+	for _, id := range []string{"id1", "id2", "id3"} {
+		s.Require().NoError(base.Create(ctx, id, "photos", id+".jpg", nil))
+	}
+	s.backdate(root, "id1", uploadMetaName, 2*time.Hour)
+	s.backdate(root, "id3", uploadMetaName, 2*time.Hour)
+	ms := &MultipartStore{strg: pagingStorage{base.Storage()}, maxAge: time.Hour}
+
+	s.Require().NoError(ms.Sweep(ctx))
+
+	for id, wantGone := range map[string]bool{"id1": true, "id2": false, "id3": true} {
+		exists, err := base.Storage().Exists(ctx, id)
+		s.Require().NoError(err)
+		s.Equalf(wantGone, !exists, "%s", id)
+	}
+}
+
 func (s *MultipartStoreTestSuite) TestSweep() {
 	const maxAge = int64(3600)
 
