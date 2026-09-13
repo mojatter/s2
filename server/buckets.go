@@ -166,8 +166,12 @@ func (bs *Buckets) Create(ctx context.Context, name string) error {
 	if isHiddenBucketEntry(name) {
 		return fmt.Errorf("%w: %q is internal state", ErrReservedBucketName, name)
 	}
-	obj := s2.NewObjectBytes(name+"/"+keepFile, []byte{})
-	return bs.strg.Put(ctx, obj)
+	// Rewriting an existing marker would reset the bucket's creation time.
+	marker := name + "/" + keepFile
+	if exists, err := bs.strg.Exists(ctx, marker); err != nil || exists {
+		return err
+	}
+	return bs.strg.Put(ctx, s2.NewObjectBytes(marker, []byte{}))
 }
 
 func (bs *Buckets) Delete(ctx context.Context, name string) error {

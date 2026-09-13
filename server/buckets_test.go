@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -197,6 +199,22 @@ func (s *BucketsTestSuite) TestCreatedAt() {
 	got := s.buckets.CreatedAt(ctx, "ts-bucket")
 	s.False(got.Before(before.Add(-time.Second)), "CreatedAt should not be before bucket creation")
 	s.False(got.After(after.Add(time.Second)), "CreatedAt should not be after bucket creation")
+}
+
+// Re-creating an existing bucket must not reset its creation time.
+func (s *BucketsTestSuite) TestCreateKeepsExistingMarker() {
+	ctx := context.Background()
+	cfg := DefaultConfig()
+	cfg.Root = s.T().TempDir()
+	bs, err := newBuckets(ctx, cfg)
+	s.Require().NoError(err)
+	s.Require().NoError(bs.Create(ctx, "photos"))
+	at := time.Now().Add(-time.Hour).Truncate(time.Second)
+	s.Require().NoError(os.Chtimes(filepath.Join(cfg.Root, "photos", keepFile), at, at))
+
+	s.Require().NoError(bs.Create(ctx, "photos"))
+
+	s.True(bs.CreatedAt(ctx, "photos").Equal(at))
 }
 
 func (s *BucketsTestSuite) TestCreatedAtMissing() {
