@@ -3,7 +3,7 @@ module github.com/mojatter/s2
 go 1.25.0
 
 require (
-	github.com/mojatter/wfs v0.6.0
+	github.com/mojatter/wfs v0.7.1
 	github.com/stretchr/testify v1.12.1
 )
 
