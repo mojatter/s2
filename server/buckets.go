@@ -18,6 +18,9 @@ var ErrReservedBucketName = errors.New("bucket name is reserved")
 
 const keepFile = ".keep"
 
+// bucketMetaDir holds per-bucket state, borrowing the directory fs already hides.
+const bucketMetaDir = ".meta"
+
 func isKeepFile(name string) bool {
 	return path.Base(name) == keepFile
 }
@@ -42,6 +45,7 @@ func (e *ErrBucketNotFound) Error() string {
 	return "bucket not found: " + e.Name
 }
 
+// Buckets manages buckets; their contents are always written through Sub, never the root storage.
 type Buckets struct {
 	strg         s2.Storage
 	reservedName string // bucket name that collides with cfg.HealthPath; "" if none
@@ -142,6 +146,25 @@ func (bs *Buckets) CreatedAt(ctx context.Context, name string) (time.Time, error
 	return obj.LastModified(), nil
 }
 
+// Generation returns the bucket's multipart generation, recording one when missing.
+func (bs *Buckets) Generation(ctx context.Context, name string) (int64, error) {
+	strg, err := bs.strg.Sub(ctx, bucketMetaDir)
+	if err != nil {
+		return 0, err
+	}
+	obj, err := strg.Get(ctx, name)
+	if isNotExist(err) {
+		if err := strg.Put(ctx, s2.NewObjectBytes(name, []byte{})); err != nil {
+			return 0, err
+		}
+		obj, err = strg.Get(ctx, name)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return obj.LastModified().UnixNano(), nil
+}
+
 // Exists reports whether a bucket directory exists under the storage
 // root. It is implemented as a single Stat against the bucket path
 // rather than a directory listing of the storage root, so it stays
@@ -175,7 +198,15 @@ func (bs *Buckets) Create(ctx context.Context, name string) error {
 			return err
 		}
 	}
-	return bs.strg.Put(ctx, s2.NewObjectBytes(marker, []byte{}))
+	// A new generation first, so a failed marker write cannot leave a stale one behind.
+	if err := bs.strg.Put(ctx, s2.NewObjectBytes(bucketMetaDir+"/"+name, []byte{})); err != nil {
+		return err
+	}
+	sub, err := bs.strg.Sub(ctx, name)
+	if err != nil {
+		return err
+	}
+	return sub.Put(ctx, s2.NewObjectBytes(keepFile, []byte{}))
 }
 
 func (bs *Buckets) Delete(ctx context.Context, name string) error {
@@ -184,7 +215,10 @@ func (bs *Buckets) Delete(ctx context.Context, name string) error {
 		return &ErrBucketNotFound{Name: name}
 	}
 	// The slash keeps the prefix match off buckets whose names merely start with name.
-	return bs.strg.DeleteRecursive(ctx, name+"/")
+	if err := bs.strg.DeleteRecursive(ctx, name+"/"); err != nil {
+		return err
+	}
+	return bs.strg.Delete(ctx, bucketMetaDir+"/"+name)
 }
 
 // CreateFolder writes a folder marker into an existing bucket; it never creates the bucket.
