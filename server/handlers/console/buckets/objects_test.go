@@ -206,6 +206,20 @@ func (s *ObjectsTestSuite) TestHandleCreateFolder() {
 		s.Contains(w.Body.String(), "photos")
 	})
 
+	s.Run("missing bucket", func() {
+		form := url.Values{"prefix": {""}, "folder_name": {"docs"}}
+		req := httptest.NewRequest("POST", "/buckets/fld-ghost/folders", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.SetPathValue("name", "fld-ghost")
+		w := httptest.NewRecorder()
+		handleCreateFolder(s.server, w, req)
+
+		s.Equal(http.StatusNotFound, w.Code)
+		exists, err := s.server.Buckets.Exists(context.Background(), "fld-ghost")
+		s.Require().NoError(err)
+		s.False(exists)
+	})
+
 	s.Run("empty name", func() {
 		s.createBucket("fld2")
 

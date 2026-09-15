@@ -187,11 +187,9 @@ func (bs *Buckets) Delete(ctx context.Context, name string) error {
 	return bs.strg.DeleteRecursive(ctx, name+"/")
 }
 
+// CreateFolder writes a folder marker into an existing bucket; it never creates the bucket.
 func (bs *Buckets) CreateFolder(ctx context.Context, bucket, key string) error {
-	if isHiddenBucketEntry(bucket) {
-		return &ErrBucketNotFound{Name: bucket}
-	}
-	sub, err := bs.strg.Sub(ctx, bucket)
+	sub, err := bs.Get(ctx, bucket)
 	if err != nil {
 		return err
 	}
