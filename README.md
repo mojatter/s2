@@ -106,6 +106,7 @@ The `osfs` backend stores objects as plain files on disk under the configured ro
 
 ```
 $S2_SERVER_ROOT/
+├── .multipart/             # in-progress multipart uploads (internal, not a bucket)
 ├── assets/                 # each top-level dir is a bucket
 │   ├── .keep               # bucket marker (tracks creation time)
 │   ├── logo.png
