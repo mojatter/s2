@@ -19,6 +19,9 @@ const (
 	ActionCreateBucket      = "s3:CreateBucket"
 	actionDeleteBucket      = "s3:DeleteBucket"
 	actionGetBucketLocation = "s3:GetBucketLocation"
+	// Multipart listings, named as in AWS IAM.
+	actionListBucketMultipartUploads = "s3:ListBucketMultipartUploads"
+	actionListMultipartUploadParts   = "s3:ListMultipartUploadParts"
 	// ActionListBucket is exported for FilterBucketNames' per-bucket check.
 	ActionListBucket = "s3:ListBucket"
 	// ActionGetObject is exported: handleCopyObject checks its copy-source
@@ -379,6 +382,9 @@ func S3Action(r *http.Request, bucket, key string) (action, resource string) {
 		if r.Method == http.MethodHead {
 			return ActionListBucket, bucketARN(bucket)
 		}
+		if _, ok := q["uploads"]; ok {
+			return actionListBucketMultipartUploads, bucketARN(bucket)
+		}
 		if _, ok := q["location"]; ok {
 			return actionGetBucketLocation, bucketARN(bucket)
 		}
@@ -407,6 +413,10 @@ func S3Action(r *http.Request, bucket, key string) (action, resource string) {
 
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
+		// ListParts (GET ?uploadId=...); HEAD has no such operation.
+		if r.Method == http.MethodGet && q.Get("uploadId") != "" {
+			return actionListMultipartUploadParts, objectARN(bucket, key)
+		}
 		return ActionGetObject, objectARN(bucket, key)
 	case http.MethodPut:
 		// Plain PutObject and UploadPart (?uploadId=...&partNumber=...)

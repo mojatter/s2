@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -545,5 +546,83 @@ func (s *MultipartStoreTestSuite) TestRemove() {
 			_, err := ms.Metadata(ctx, "id2", "photos", "b.jpg", 0)
 			s.NoError(err, "a sibling upload must survive")
 		})
+	}
+}
+
+func (s *MultipartStoreTestSuite) TestUploads() {
+	ctx := context.Background()
+	root := s.T().TempDir()
+	ms := s.newStoreAt(s2.TypeOSFS, root, 3600)
+	s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 7, nil))
+	s.Require().NoError(ms.Create(ctx, "id2", "videos", "b.mp4", 0, nil))
+	s.Require().NoError(ms.Create(ctx, "id3", "photos", "old.jpg", 7, nil))
+	s.backdate(root, "id3", uploadMetaName, 2*time.Hour)
+	s.putPart(ctx, ms, "id4", 1)
+	u, err := ms.upload(ctx, "id5")
+	s.Require().NoError(err)
+	s.Require().NoError(u.Put(ctx, s2.NewObjectBytes(uploadMetaName, []byte("{"))))
+
+	got, err := ms.Uploads(ctx)
+
+	s.Require().NoError(err)
+	byID := map[string]Upload{}
+	for _, up := range got {
+		byID[up.ID] = up
+	}
+	s.Len(byID, 2, "only live, readable uploads are listed")
+	s.Equal("photos", byID["id1"].Bucket)
+	s.Equal("a.jpg", byID["id1"].Key)
+	s.Equal(int64(7), byID["id1"].Generation)
+	s.WithinDuration(time.Now(), byID["id1"].Initiated, time.Minute)
+	s.Equal("videos", byID["id2"].Bucket)
+}
+
+// A backend failure must not pass for a complete, shorter listing.
+func (s *MultipartStoreTestSuite) TestUploadsSurfacesReadFailure() {
+	want := errors.New("backend unavailable")
+	base := s.newStore(s2.TypeOSFS)
+	s.Require().NoError(base.Create(context.Background(), "id1", "photos", "a.jpg", 0, nil))
+	ms := &MultipartStore{strg: getFailingStorage{base.Storage(), want}}
+
+	got, err := ms.Uploads(context.Background())
+
+	s.ErrorIs(err, want)
+	s.Empty(got)
+}
+
+// getFailingStorage lists normally but fails every Get below it.
+type getFailingStorage struct {
+	s2.Storage
+	err error
+}
+
+func (g getFailingStorage) Sub(ctx context.Context, name string) (s2.Storage, error) {
+	sub, err := g.Storage.Sub(ctx, name)
+	return getFailingStorage{sub, g.err}, err
+}
+
+func (g getFailingStorage) Get(context.Context, string) (s2.Object, error) { return nil, g.err }
+
+func (s *MultipartStoreTestSuite) TestParts() {
+	ctx := context.Background()
+	ms := s.newStore(s2.TypeOSFS)
+	s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil))
+	for _, n := range []int{10000, 1, 3} {
+		s.Require().NoError(ms.PutPart(ctx, "id1", n, []byte(strconv.Itoa(n)), `"etag-`+strconv.Itoa(n)+`"`))
+	}
+	u, err := ms.upload(ctx, "id1")
+	s.Require().NoError(err)
+	s.Require().NoError(u.Put(ctx, s2.NewObjectBytes("notapart", []byte("x"))))
+	s.Require().NoError(u.Put(ctx, s2.NewObjectBytes("1", []byte("x"))))
+
+	got, err := ms.Parts(ctx, "id1")
+
+	s.Require().NoError(err)
+	s.Require().Len(got, 3)
+	for i, n := range []int{1, 3, 10000} {
+		s.Equal(n, got[i].Number)
+		s.Equal(`"etag-`+strconv.Itoa(n)+`"`, got[i].ETag)
+		s.Equal(uint64(len(strconv.Itoa(n))), got[i].Size)
+		s.False(got[i].LastModified.IsZero())
 	}
 }

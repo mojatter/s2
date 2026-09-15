@@ -399,6 +399,34 @@ func TestConfigValidateUsers(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			caseName: "anonymous principal with list multipart uploads rejected",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Users = []User{{
+					AccessKeyID: AnonymousAccessKeyID,
+					Policy: &Policy{
+						Statement: []Statement{allowStatement("s3:ListBucketMultipartUploads", "*")},
+					},
+				}}
+				return c
+			}(),
+			wantErr: true,
+		},
+		{
+			caseName: "anonymous principal with list parts rejected",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Users = []User{{
+					AccessKeyID: AnonymousAccessKeyID,
+					Policy: &Policy{
+						Statement: []Statement{allowStatement("s3:ListMultipartUploadParts", "*")},
+					},
+				}}
+				return c
+			}(),
+			wantErr: true,
+		},
+		{
 			caseName: "anonymous principal with wildcard action rejected",
 			cfg: func() *Config {
 				c := DefaultConfig()

@@ -141,6 +141,32 @@ run_test "MultipartUpload" sh -c '
   [ "$out" = "part1datapart2data" ]
 '
 
+run_test "ListMultipartUploadsAndParts" sh -c '
+  EP="'"$ENDPOINT"'"
+  set -e
+  upload_id=$(aws s3api --endpoint-url "$EP" create-multipart-upload \
+    --bucket test-bucket --key listed.bin --query "UploadId" --output text)
+  printf "listed" > /tmp/listed.bin
+  etag=$(aws s3api --endpoint-url "$EP" upload-part \
+    --bucket test-bucket --key listed.bin --upload-id "$upload_id" \
+    --part-number 1 --body /tmp/listed.bin --query "ETag" --output text)
+
+  out=$(aws s3api --endpoint-url "$EP" list-multipart-uploads \
+    --bucket test-bucket --prefix listed.bin --query "Uploads[].UploadId" --output text)
+  [ "$out" = "$upload_id" ]
+
+  out=$(aws s3api --endpoint-url "$EP" list-parts \
+    --bucket test-bucket --key listed.bin --upload-id "$upload_id" \
+    --query "Parts[].[PartNumber,ETag,Size]" --output text)
+  [ "$out" = "$(printf "1\t%s\t6" "$etag")" ]
+
+  aws s3api --endpoint-url "$EP" abort-multipart-upload \
+    --bucket test-bucket --key listed.bin --upload-id "$upload_id"
+  out=$(aws s3api --endpoint-url "$EP" list-multipart-uploads \
+    --bucket test-bucket --prefix listed.bin --query "Uploads[].UploadId" --output text)
+  ! echo "$out" | grep -q "$upload_id"
+'
+
 # Listing nonexistent / trailing-slash prefixes (regression for ListAfter bug)
 run_test "ListNonexistentPrefix" sh -c '
   EP="'"$ENDPOINT"'"
@@ -325,6 +351,27 @@ run_test "Users_ReadOnlyCreateBucketDenied" sh -c '
 run_test "Users_UnknownAccessKeyRejected" sh -c '
   ! AWS_ACCESS_KEY_ID=nosuchkey AWS_SECRET_ACCESS_KEY=whatever \
     aws s3api --endpoint-url "'"$ENDPOINT_USERS"'" list-buckets
+'
+
+# s3:ListBucket no longer covers the multipart listings.
+run_test "Users_ReadOnlyMultipartListingsDenied" sh -c '
+  EP="'"$ENDPOINT_USERS"'"
+  set -e
+  upload_id=$(AWS_ACCESS_KEY_ID=rootkey AWS_SECRET_ACCESS_KEY=rootsecret \
+    aws s3api --endpoint-url "$EP" create-multipart-upload \
+    --bucket users-bucket --key mp.bin --query "UploadId" --output text)
+  # set -e ignores a failing "! cmd", so a denial is asserted explicitly.
+  if AWS_ACCESS_KEY_ID=readonlykey AWS_SECRET_ACCESS_KEY=readonlysecret \
+    aws s3api --endpoint-url "$EP" list-multipart-uploads --bucket users-bucket; then exit 1; fi
+  if AWS_ACCESS_KEY_ID=readonlykey AWS_SECRET_ACCESS_KEY=readonlysecret \
+    aws s3api --endpoint-url "$EP" list-parts --bucket users-bucket --key mp.bin --upload-id "$upload_id"; then exit 1; fi
+  out=$(AWS_ACCESS_KEY_ID=rootkey AWS_SECRET_ACCESS_KEY=rootsecret \
+    aws s3api --endpoint-url "$EP" list-multipart-uploads --bucket users-bucket \
+    --query "Uploads[].UploadId" --output text)
+  [ "$out" = "$upload_id" ]
+  AWS_ACCESS_KEY_ID=rootkey AWS_SECRET_ACCESS_KEY=rootsecret \
+    aws s3api --endpoint-url "$EP" abort-multipart-upload \
+    --bucket users-bucket --key mp.bin --upload-id "$upload_id"
 '
 
 run_test "Users_RootStillHasFullAccess" sh -c '

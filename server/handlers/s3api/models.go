@@ -129,6 +129,56 @@ type CompleteMultipartUploadResult struct {
 	ETag     string   `xml:"ETag"`
 }
 
+// ListMultipartUploadsResult is the XML response for ListMultipartUploads.
+type ListMultipartUploadsResult struct {
+	XMLName            xml.Name          `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListMultipartUploadsResult"`
+	Bucket             string            `xml:"Bucket"`
+	KeyMarker          string            `xml:"KeyMarker"`
+	UploadIDMarker     string            `xml:"UploadIdMarker"`
+	NextKeyMarker      string            `xml:"NextKeyMarker"`
+	NextUploadIDMarker string            `xml:"NextUploadIdMarker"`
+	Prefix             string            `xml:"Prefix"`
+	Delimiter          string            `xml:"Delimiter,omitempty"`
+	MaxUploads         int               `xml:"MaxUploads"`
+	IsTruncated        bool              `xml:"IsTruncated"`
+	Uploads            []MultipartUpload `xml:"Upload"`
+	CommonPrefixes     []CommonPrefix    `xml:"CommonPrefixes,omitempty"`
+}
+
+// MultipartUpload is one upload in ListMultipartUploadsResult.
+type MultipartUpload struct {
+	Key          string    `xml:"Key"`
+	UploadID     string    `xml:"UploadId"`
+	Initiator    Owner     `xml:"Initiator"`
+	Owner        Owner     `xml:"Owner"`
+	StorageClass string    `xml:"StorageClass"`
+	Initiated    time.Time `xml:"Initiated"`
+}
+
+// ListPartsResult is the XML response for ListParts.
+type ListPartsResult struct {
+	XMLName              xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ ListPartsResult"`
+	Bucket               string   `xml:"Bucket"`
+	Key                  string   `xml:"Key"`
+	UploadID             string   `xml:"UploadId"`
+	PartNumberMarker     int      `xml:"PartNumberMarker"`
+	NextPartNumberMarker int      `xml:"NextPartNumberMarker"`
+	MaxParts             int      `xml:"MaxParts"`
+	IsTruncated          bool     `xml:"IsTruncated"`
+	Parts                []Part   `xml:"Part"`
+	Initiator            Owner    `xml:"Initiator"`
+	Owner                Owner    `xml:"Owner"`
+	StorageClass         string   `xml:"StorageClass"`
+}
+
+// Part is one part in ListPartsResult.
+type Part struct {
+	PartNumber   int       `xml:"PartNumber"`
+	LastModified time.Time `xml:"LastModified"`
+	ETag         string    `xml:"ETag"`
+	Size         uint64    `xml:"Size"`
+}
+
 // ErrorResponse represents the XML response for S3 errors. It's an alias
 // for server.S3ErrorResponse, which server/middleware also uses for SigV4
 // auth/authz errors, so the two error paths can't drift into subtly

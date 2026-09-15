@@ -488,6 +488,8 @@ s2-server -f config.json
 | PUT | `/{bucket}/{key...}?uploadId&partNumber` | UploadPart |
 | POST | `/{bucket}/{key...}?uploadId` | CompleteMultipartUpload |
 | DELETE | `/{bucket}/{key...}?uploadId` | AbortMultipartUpload |
+| GET | `/{bucket}?uploads` | ListMultipartUploads |
+| GET | `/{bucket}/{key...}?uploadId` | ListParts |
 | GET, HEAD | `/healthz` | Health check (configurable via `S2_SERVER_HEALTH_PATH`) |
 
 Custom metadata is supported via `x-amz-meta-*` headers on PutObject/CopyObject and returned on GetObject/HeadObject.
