@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -31,11 +32,10 @@ func filterMultipart(objs []s2.Object) []s2.Object {
 	return out
 }
 
-// newUploadID generates a 16-byte upload ID: 4 bytes of elapsed seconds
-// since the server started followed by 12 bytes of random data.
-func newUploadID(started time.Time) (string, error) {
+// newUploadID generates a 16-byte upload ID: 4 bytes of Unix seconds, so IDs sort by initiation, then 12 random bytes.
+func newUploadID() (string, error) {
 	b := make([]byte, 16)
-	binary.BigEndian.PutUint32(b[:4], uint32(time.Since(started).Seconds()))
+	binary.BigEndian.PutUint32(b[:4], uint32(time.Now().Unix())) //nolint:gosec // G115 -- fits until 2106
 	if _, err := rand.Read(b[4:]); err != nil {
 		return "", err
 	}
@@ -77,7 +77,7 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 		return
 	}
 
-	uploadID, err := newUploadID(s.StartedAt)
+	uploadID, err := newUploadID()
 	if err != nil {
 		writeError(w, r, "InternalError", "Failed to generate upload ID", http.StatusInternalServerError)
 		return
@@ -300,6 +300,186 @@ func handleAbortMultipartUpload(s *server.Server, w http.ResponseWriter, r *http
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// parseListLimit reads a max-uploads/max-parts value, capped at maxObjectKeys as S3 does.
+func parseListLimit(r *http.Request, name string) (int, bool) {
+	v := r.URL.Query().Get(name)
+	if v == "" {
+		return maxObjectKeys, true
+	}
+	n, err := strconv.ParseInt(v, 10, 32)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return min(int(n), maxObjectKeys), true
+}
+
+var s2Owner = Owner{ID: s2OwnerID, DisplayName: s2OwnerDisplayName}
+
+func handleListMultipartUploads(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	bucketName := r.PathValue("bucket")
+	q := r.URL.Query()
+	prefix, delimiter := q.Get("prefix"), q.Get("delimiter")
+	keyMarker, uploadIDMarker := q.Get("key-marker"), q.Get("upload-id-marker")
+	maxUploads, ok := parseListLimit(r, "max-uploads")
+	if !ok {
+		writeError(w, r, "InvalidArgument", "max-uploads must be an integer between 0 and 2147483647", http.StatusBadRequest)
+		return
+	}
+
+	if _, err := s.Buckets.Get(ctx, bucketName); err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+	gen, ok := bucketGeneration(s, w, r, bucketName)
+	if !ok {
+		return
+	}
+	all, err := s.Multipart.Uploads(ctx)
+	if err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+
+	var uploads []server.Upload
+	for _, u := range all {
+		if u.Bucket != bucketName || u.Generation != gen || !strings.HasPrefix(u.Key, prefix) {
+			continue
+		}
+		// S3 resumes after key-marker, or within it after upload-id-marker, by plain comparison.
+		if keyMarker != "" && (u.Key < keyMarker || u.Key == keyMarker && (uploadIDMarker == "" || u.ID <= uploadIDMarker)) {
+			continue
+		}
+		uploads = append(uploads, u)
+	}
+	// IDs lead with Unix seconds, so ID order within a key is initiation order.
+	slices.SortFunc(uploads, func(a, b server.Upload) int {
+		if c := strings.Compare(a.Key, b.Key); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+
+	result := ListMultipartUploadsResult{
+		Bucket:         bucketName,
+		KeyMarker:      keyMarker,
+		UploadIDMarker: uploadIDMarker,
+		Prefix:         prefix,
+		Delimiter:      delimiter,
+		MaxUploads:     maxUploads,
+	}
+	seen := map[string]bool{}
+	entries := 0
+	for _, u := range uploads {
+		common := ""
+		if delimiter != "" {
+			if i := strings.Index(u.Key[len(prefix):], delimiter); i >= 0 {
+				common = u.Key[:len(prefix)+i+len(delimiter)]
+			}
+		}
+		if common != "" && (seen[common] || common <= keyMarker) {
+			continue
+		}
+		if entries == maxUploads {
+			result.IsTruncated = maxUploads > 0
+			break
+		}
+		entries++
+		if common != "" {
+			seen[common] = true
+			result.CommonPrefixes = append(result.CommonPrefixes, CommonPrefix{Prefix: common})
+			result.NextKeyMarker, result.NextUploadIDMarker = common, ""
+			continue
+		}
+		result.Uploads = append(result.Uploads, MultipartUpload{
+			Key:          u.Key,
+			UploadID:     u.ID,
+			Initiator:    s2Owner,
+			Owner:        s2Owner,
+			StorageClass: "STANDARD",
+			Initiated:    u.Initiated.UTC(),
+		})
+		result.NextKeyMarker, result.NextUploadIDMarker = u.Key, u.ID
+	}
+	if !result.IsTruncated {
+		result.NextKeyMarker, result.NextUploadIDMarker = "", ""
+	}
+	writeXML(w, http.StatusOK, result)
+}
+
+func handleListParts(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	bucketName := r.PathValue("bucket")
+	key := r.PathValue("key")
+	uploadID := r.URL.Query().Get("uploadId")
+	if !validUploadID(uploadID) {
+		writeError(w, r, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
+		return
+	}
+	marker := 0
+	if v := r.URL.Query().Get("part-number-marker"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			writeError(w, r, "InvalidArgument", "part-number-marker must be a non-negative integer", http.StatusBadRequest)
+			return
+		}
+		marker = n
+	}
+	maxParts, ok := parseListLimit(r, "max-parts")
+	if !ok {
+		writeError(w, r, "InvalidArgument", "max-parts must be an integer between 0 and 2147483647", http.StatusBadRequest)
+		return
+	}
+
+	if _, err := s.Buckets.Get(ctx, bucketName); err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+	gen, ok := bucketGeneration(s, w, r, bucketName)
+	if !ok {
+		return
+	}
+	if _, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key, gen); err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+	parts, err := s.Multipart.Parts(ctx, uploadID)
+	if err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+
+	result := ListPartsResult{
+		Bucket:           bucketName,
+		Key:              key,
+		UploadID:         uploadID,
+		PartNumberMarker: marker,
+		MaxParts:         maxParts,
+		Initiator:        s2Owner,
+		Owner:            s2Owner,
+		StorageClass:     "STANDARD",
+	}
+	for _, p := range parts {
+		if p.Number <= marker {
+			continue
+		}
+		if len(result.Parts) == maxParts {
+			result.IsTruncated = maxParts > 0
+			break
+		}
+		result.Parts = append(result.Parts, Part{PartNumber: p.Number, LastModified: p.LastModified.UTC(), ETag: p.ETag, Size: p.Size})
+	}
+	if result.IsTruncated && len(result.Parts) > 0 {
+		result.NextPartNumberMarker = result.Parts[len(result.Parts)-1].PartNumber
+	}
+	writeXML(w, http.StatusOK, result)
 }
 
 // partsReader concatenates the bodies of parts, opening each one lazily.

@@ -169,7 +169,7 @@ type Server struct {
 	Template  *template.Template
 	Buckets   *Buckets
 	Multipart *MultipartStore
-	StartedAt time.Time // server start time, used as epoch for upload ID generation
+	StartedAt time.Time // server start time
 }
 
 // NewServer creates a new server with the specified configuration.

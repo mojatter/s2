@@ -93,6 +93,8 @@ Authentication is disabled by default.
 | PUT | `/{bucket}/{key}?uploadId&partNumber` | UploadPart |
 | POST | `/{bucket}/{key}?uploadId` | CompleteMultipartUpload |
 | DELETE | `/{bucket}/{key}?uploadId` | AbortMultipartUpload |
+| GET | `/{bucket}?uploads` | ListMultipartUploads |
+| GET | `/{bucket}/{key}?uploadId` | ListParts |
 | GET, HEAD | `/healthz` | Health check (configurable via `S2_SERVER_HEALTH_PATH`) |
 
 ## Links

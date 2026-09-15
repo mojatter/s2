@@ -802,3 +802,218 @@ func TestPartsReader_SmallBuffer(t *testing.T) {
 	}
 	assert.Equal(t, "abcde", string(got))
 }
+
+// listUploads runs ListMultipartUploads through the bucket GET dispatch.
+func (s *MultipartTestSuite) listUploads(bucket, query string) (*httptest.ResponseRecorder, ListMultipartUploadsResult) {
+	s.T().Helper()
+
+	req := httptest.NewRequest("GET", "/"+bucket+"?uploads&"+query, nil)
+	req.SetPathValue("bucket", bucket)
+	w := httptest.NewRecorder()
+	handleBucketGET(s.server, w, req)
+	var result ListMultipartUploadsResult
+	if w.Code == http.StatusOK {
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+	}
+	return w, result
+}
+
+func (s *MultipartTestSuite) TestListMultipartUploads() {
+	root := s.T().TempDir()
+	cfg := server.DefaultConfig()
+	cfg.Root = root
+	cfg.MultipartMaxAge = int64(time.Hour.Seconds())
+	srv, err := server.NewServer(context.Background(), cfg)
+	s.Require().NoError(err)
+	s.server = srv
+	s.createBucket("mp-list")
+	s.createBucket("mp-other")
+	backdate := func(id string, age time.Duration) {
+		at := time.Now().Add(-age)
+		s.Require().NoError(os.Chtimes(filepath.Join(root, ".multipart", id, "meta"), at, at))
+	}
+	// Same-key uploads list in ID order.
+	a1, a2 := s.initiateUpload("mp-list", "a", nil), s.initiateUpload("mp-list", "a", nil)
+	if a1 > a2 {
+		a1, a2 = a2, a1
+	}
+	ids := map[string]string{
+		"a1":  a1,
+		"a2":  a2,
+		"b":   s.initiateUpload("mp-list", "b", nil),
+		"dx":  s.initiateUpload("mp-list", "dir/x", nil),
+		"dy":  s.initiateUpload("mp-list", "dir/y", nil),
+		"old": s.initiateUpload("mp-list", "expired", nil),
+	}
+	s.initiateUpload("mp-other", "a", nil)
+	backdate(ids["old"], 2*time.Hour)
+
+	testCases := []struct {
+		caseName      string
+		query         string
+		wantUploads   []string
+		wantPrefixes  []string
+		wantTruncated bool
+		wantNext      string
+	}{
+		{caseName: "everything in key then upload ID order", wantUploads: []string{"a1", "a2", "b", "dx", "dy"}},
+		{caseName: "prefix", query: "prefix=dir/", wantUploads: []string{"dx", "dy"}},
+		{caseName: "delimiter rolls keys into common prefixes", query: "delimiter=/", wantUploads: []string{"a1", "a2", "b"}, wantPrefixes: []string{"dir/"}},
+		{caseName: "key-marker alone skips that key", query: "key-marker=a", wantUploads: []string{"b", "dx", "dy"}},
+		{caseName: "upload-id-marker resumes within the key", query: "key-marker=a&upload-id-marker=" + ids["a1"], wantUploads: []string{"a2", "b", "dx", "dy"}},
+		{caseName: "max-uploads truncates", query: "max-uploads=2", wantUploads: []string{"a1", "a2"}, wantTruncated: true, wantNext: "a2"},
+		{caseName: "the next page follows the markers", query: "key-marker=a&max-uploads=2&upload-id-marker=" + ids["a2"], wantUploads: []string{"b", "dx"}, wantTruncated: true, wantNext: "dx"},
+		{caseName: "a common prefix counts toward the page", query: "delimiter=/&max-uploads=4", wantUploads: []string{"a1", "a2", "b"}, wantPrefixes: []string{"dir/"}},
+		{caseName: "a common prefix not past key-marker is dropped", query: "delimiter=/&key-marker=dir/"},
+		{caseName: "max-uploads=0 is an empty untruncated page", query: "max-uploads=0"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			w, got := s.listUploads("mp-list", tc.query)
+			s.Require().Equal(http.StatusOK, w.Code, w.Body.String())
+
+			gotIDs := make([]string, 0, len(got.Uploads))
+			for _, u := range got.Uploads {
+				s.Equal(s2OwnerID, u.Owner.ID)
+				s.Equal("STANDARD", u.StorageClass)
+				s.False(u.Initiated.IsZero())
+				gotIDs = append(gotIDs, u.UploadID)
+			}
+			wantIDs := make([]string, 0, len(tc.wantUploads))
+			for _, name := range tc.wantUploads {
+				wantIDs = append(wantIDs, ids[name])
+			}
+			s.Equal(wantIDs, gotIDs)
+			gotPrefixes := make([]string, 0, len(got.CommonPrefixes))
+			for _, p := range got.CommonPrefixes {
+				gotPrefixes = append(gotPrefixes, p.Prefix)
+			}
+			s.Equal(append([]string{}, tc.wantPrefixes...), gotPrefixes)
+			s.Equal(tc.wantTruncated, got.IsTruncated)
+			s.Equal(ids[tc.wantNext], got.NextUploadIDMarker)
+		})
+	}
+
+	s.Run("the next page survives aborting the marker upload", func() {
+		_, first := s.listUploads("mp-list", "max-uploads=1")
+		s.Require().True(first.IsTruncated)
+		s.Require().Equal(ids["a1"], first.NextUploadIDMarker)
+		s.abortUpload("mp-list", "a", ids["a1"])
+
+		_, next := s.listUploads("mp-list", "key-marker="+first.NextKeyMarker+"&upload-id-marker="+first.NextUploadIDMarker)
+		got := make([]string, 0, len(next.Uploads))
+		for _, u := range next.Uploads {
+			got = append(got, u.UploadID)
+		}
+		s.Equal([]string{ids["a2"], ids["b"], ids["dx"], ids["dy"]}, got)
+	})
+	s.Run("invalid max-uploads", func() {
+		w, _ := s.listUploads("mp-list", "max-uploads=abc")
+		s.Equal(http.StatusBadRequest, w.Code)
+	})
+	s.Run("missing bucket", func() {
+		w, _ := s.listUploads("mp-nope", "")
+		s.Equal(http.StatusNotFound, w.Code)
+	})
+	s.Run("a recreated bucket does not list its predecessor's uploads", func() {
+		at := time.Now().Add(-time.Hour)
+		s.Require().NoError(os.Chtimes(filepath.Join(root, "mp-other", ".keep"), at, at))
+		s.Require().NoError(s.server.Buckets.Delete(context.Background(), "mp-other"))
+		s.createBucket("mp-other")
+		w, got := s.listUploads("mp-other", "")
+		s.Require().Equal(http.StatusOK, w.Code)
+		s.Empty(got.Uploads)
+	})
+}
+
+// listParts runs ListParts through the object GET dispatch.
+func (s *MultipartTestSuite) listParts(bucket, key, uploadID, query string) (*httptest.ResponseRecorder, ListPartsResult) {
+	s.T().Helper()
+
+	req := httptest.NewRequest("GET", "/"+bucket+"/"+key+"?uploadId="+url.QueryEscape(uploadID)+"&"+query, nil)
+	req.SetPathValue("bucket", bucket)
+	req.SetPathValue("key", key)
+	w := httptest.NewRecorder()
+	handleGetObject(s.server, w, req)
+	var result ListPartsResult
+	if w.Code == http.StatusOK {
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+	}
+	return w, result
+}
+
+func (s *MultipartTestSuite) TestListParts() {
+	s.createBucket("mp-parts")
+	uploadID := s.initiateUpload("mp-parts", "file.bin", nil)
+	etags := map[int]string{}
+	for n, body := range map[int]string{1: "one", 2: "two!", 3: "three"} {
+		etags[n] = s.uploadPart("mp-parts", "file.bin", uploadID, n, body).ETag
+	}
+	sizes := map[int]uint64{1: 3, 2: 4, 3: 5}
+
+	testCases := []struct {
+		caseName      string
+		query         string
+		wantParts     []int
+		wantTruncated bool
+		wantNext      int
+	}{
+		{caseName: "all parts in order", wantParts: []int{1, 2, 3}},
+		{caseName: "part-number-marker", query: "part-number-marker=1", wantParts: []int{2, 3}},
+		{caseName: "max-parts truncates", query: "max-parts=2", wantParts: []int{1, 2}, wantTruncated: true, wantNext: 2},
+		{caseName: "the next page follows the marker", query: "max-parts=2&part-number-marker=2", wantParts: []int{3}},
+		{caseName: "max-parts=0 is an empty untruncated page", query: "max-parts=0"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			w, got := s.listParts("mp-parts", "file.bin", uploadID, tc.query)
+			s.Require().Equal(http.StatusOK, w.Code, w.Body.String())
+
+			gotParts := make([]int, 0, len(got.Parts))
+			for _, p := range got.Parts {
+				s.Equal(etags[p.PartNumber], p.ETag)
+				s.Equal(sizes[p.PartNumber], p.Size)
+				s.False(p.LastModified.IsZero())
+				gotParts = append(gotParts, p.PartNumber)
+			}
+			s.Equal(append([]int{}, tc.wantParts...), gotParts)
+			s.Equal(tc.wantTruncated, got.IsTruncated)
+			s.Equal(tc.wantNext, got.NextPartNumberMarker)
+			s.Equal(uploadID, got.UploadID)
+		})
+	}
+
+	errorCases := []struct {
+		caseName   string
+		key        string
+		uploadID   string
+		query      string
+		wantStatus int
+		wantCode   string
+	}{
+		{caseName: "unknown upload", key: "file.bin", uploadID: strings.Repeat("0", 32), wantStatus: http.StatusNotFound, wantCode: "NoSuchUpload"},
+		{caseName: "another key", key: "other.bin", uploadID: uploadID, wantStatus: http.StatusNotFound, wantCode: "NoSuchUpload"},
+		{caseName: "malformed upload id", key: "file.bin", uploadID: "../evil", wantStatus: http.StatusNotFound, wantCode: "NoSuchUpload"},
+		{caseName: "invalid max-parts", key: "file.bin", uploadID: uploadID, query: "max-parts=abc", wantStatus: http.StatusBadRequest, wantCode: "InvalidArgument"},
+		{caseName: "invalid part-number-marker", key: "file.bin", uploadID: uploadID, query: "part-number-marker=-1", wantStatus: http.StatusBadRequest, wantCode: "InvalidArgument"},
+	}
+	for _, tc := range errorCases {
+		s.Run(tc.caseName, func() {
+			w, _ := s.listParts("mp-parts", tc.key, tc.uploadID, tc.query)
+			s.Equal(tc.wantStatus, w.Code, w.Body.String())
+			var errResp ErrorResponse
+			s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+			s.Equal(tc.wantCode, errResp.Code)
+		})
+	}
+
+	s.Run("head with an upload id still reads the object", func() {
+		s.putObject("mp-parts", "plain.txt", "hello")
+		req := httptest.NewRequest("HEAD", "/mp-parts/plain.txt?uploadId="+uploadID, nil)
+		req.SetPathValue("bucket", "mp-parts")
+		req.SetPathValue("key", "plain.txt")
+		w := httptest.NewRecorder()
+		handleGetObject(s.server, w, req)
+		s.Equal(http.StatusOK, w.Code)
+	})
+}

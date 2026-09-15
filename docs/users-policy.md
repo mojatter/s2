@@ -81,6 +81,8 @@ A principal with **no `policy` field** (or the legacy `user`/`password` pair) ha
 | `s3:GetObject` | `GET`/`HEAD /{bucket}/{key}`, and the copy-source side of CopyObject |
 | `s3:PutObject` | `PUT /{bucket}/{key}` (including CopyObject's destination, UploadPart, and the multipart upload lifecycle) |
 | `s3:DeleteObject` | `DELETE /{bucket}/{key}`, batch `DeleteObjects`, and recursive folder delete in the Web Console |
+| `s3:ListBucketMultipartUploads` | `GET /{bucket}?uploads` (ListMultipartUploads) |
+| `s3:ListMultipartUploadParts` | `GET /{bucket}/{key}?uploadId=…` (ListParts) |
 
 `Resource` ARNs follow the standard S3 shape: `arn:aws:s3:::bucket` for bucket-level actions, `arn:aws:s3:::bucket/key` for object-level ones.
 

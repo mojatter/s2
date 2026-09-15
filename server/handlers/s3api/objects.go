@@ -328,6 +328,11 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		handleBucketGET(s, w, r)
 		return
 	}
+	// ListParts shares the object route; HEAD has no such operation.
+	if r.Method == http.MethodGet && r.URL.Query().Get("uploadId") != "" {
+		handleListParts(s, w, r)
+		return
+	}
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
@@ -736,6 +741,10 @@ func handleBucketPOST(s *server.Server, w http.ResponseWriter, r *http.Request) 
 }
 
 func handleBucketGET(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	if _, ok := r.URL.Query()["uploads"]; ok {
+		handleListMultipartUploads(s, w, r)
+		return
+	}
 	if _, ok := r.URL.Query()["location"]; ok {
 		handleGetBucketLocation(s, w, r)
 		return
