@@ -109,10 +109,11 @@ $S2_SERVER_ROOT/
 ├── .multipart/             # in-progress multipart uploads (internal, not a bucket)
 ├── assets/                 # each top-level dir is a bucket
 │   ├── .keep               # bucket marker (tracks creation time)
+│   ├── .meta/
+│   │   └── css/
+│   │       └── style.css   # JSON metadata for css/style.css
 │   ├── logo.png
 │   └── css/
-│       ├── .meta/
-│       │   └── style.css   # JSON metadata for ../style.css
 │       ├── .keep
 │       └── style.css
 └── uploads/
