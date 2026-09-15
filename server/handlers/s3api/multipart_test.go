@@ -332,9 +332,9 @@ func (s *MultipartTestSuite) TestMalformedUploadID() {
 func (s *MultipartTestSuite) generation(bucket string) int64 {
 	s.T().Helper()
 
-	created, err := s.server.Buckets.CreatedAt(context.Background(), bucket)
+	gen, err := s.server.Buckets.Generation(context.Background(), bucket)
 	s.Require().NoError(err)
-	return created.UnixNano()
+	return gen
 }
 
 // An upload of a deleted bucket must not complete into its same-named successor.
@@ -346,11 +346,11 @@ func (s *MultipartTestSuite) TestUploadOfRecreatedBucket() {
 	s.Require().NoError(err)
 	s.server = srv
 	s.createBucket("mp-reborn")
+	// Backdated before the upload so the successor cannot share its generation.
+	at := time.Now().Add(-time.Hour)
+	s.Require().NoError(os.Chtimes(filepath.Join(root, ".meta", "mp-reborn"), at, at))
 	uploadID := s.initiateUpload("mp-reborn", "file.bin", nil)
 	p1 := s.uploadPart("mp-reborn", "file.bin", uploadID, 1, "hello")
-	// Backdated so the successor's marker cannot share its time.
-	at := time.Now().Add(-time.Hour)
-	s.Require().NoError(os.Chtimes(filepath.Join(root, "mp-reborn", ".keep"), at, at))
 	s.Require().NoError(s.server.Buckets.Delete(context.Background(), "mp-reborn"))
 	s.createBucket("mp-reborn")
 
@@ -416,6 +416,43 @@ func (s *MultipartTestSuite) TestUploadSurvivesBucketRePut() {
 
 			p1 := s.uploadPart("mp-reput", "file.bin", uploadID, 1, "hello")
 			s.completeUpload("mp-reput", "file.bin", uploadID, p1)
+		})
+	}
+}
+
+// A client writing or deleting .keep must not orphan the bucket's uploads (#236).
+func (s *MultipartTestSuite) TestUploadSurvivesKeepWrite() {
+	testCases := []struct {
+		caseName string
+		method   string
+		handler  func(*server.Server, http.ResponseWriter, *http.Request)
+	}{
+		{caseName: "put .keep", method: "PUT", handler: handlePutObject},
+		{caseName: "delete .keep", method: "DELETE", handler: handleDeleteObject},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			root := s.T().TempDir()
+			cfg := server.DefaultConfig()
+			cfg.Root = root
+			srv, err := server.NewServer(context.Background(), cfg)
+			s.Require().NoError(err)
+			s.server = srv
+			s.createBucket("mp-keep")
+			// Backdated so a rewritten .keep could not share the generation's time.
+			at := time.Now().Add(-time.Hour)
+			s.Require().NoError(os.Chtimes(filepath.Join(root, "mp-keep", ".keep"), at, at))
+			uploadID := s.initiateUpload("mp-keep", "file.bin", nil)
+
+			req := httptest.NewRequest(tc.method, "/mp-keep/.keep", strings.NewReader(""))
+			req.SetPathValue("bucket", "mp-keep")
+			req.SetPathValue("key", ".keep")
+			w := httptest.NewRecorder()
+			tc.handler(s.server, w, req)
+			s.Require().Less(w.Code, 300, w.Body.String())
+
+			p1 := s.uploadPart("mp-keep", "file.bin", uploadID, 1, "hello")
+			s.completeUpload("mp-keep", "file.bin", uploadID, p1)
 		})
 	}
 }
@@ -828,6 +865,9 @@ func (s *MultipartTestSuite) TestListMultipartUploads() {
 	s.server = srv
 	s.createBucket("mp-list")
 	s.createBucket("mp-other")
+	// Backdated before its upload so only the recreate below retires it.
+	otherAt := time.Now().Add(-time.Hour)
+	s.Require().NoError(os.Chtimes(filepath.Join(root, ".meta", "mp-other"), otherAt, otherAt))
 	backdate := func(id string, age time.Duration) {
 		at := time.Now().Add(-age)
 		s.Require().NoError(os.Chtimes(filepath.Join(root, ".multipart", id, "meta"), at, at))
@@ -916,8 +956,6 @@ func (s *MultipartTestSuite) TestListMultipartUploads() {
 		s.Equal(http.StatusNotFound, w.Code)
 	})
 	s.Run("a recreated bucket does not list its predecessor's uploads", func() {
-		at := time.Now().Add(-time.Hour)
-		s.Require().NoError(os.Chtimes(filepath.Join(root, "mp-other", ".keep"), at, at))
 		s.Require().NoError(s.server.Buckets.Delete(context.Background(), "mp-other"))
 		s.createBucket("mp-other")
 		w, got := s.listUploads("mp-other", "")

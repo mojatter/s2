@@ -240,16 +240,20 @@ func (s *BucketsTestSuite) TestCreatedAt() {
 		{
 			caseName: "a bucket s2 did not create is undated",
 			prepare: func(ctx context.Context, _ string, bs *Buckets) {
-				s.Require().NoError(bs.strg.Delete(ctx, "photos/"+keepFile))
-				s.Require().NoError(bs.strg.Put(ctx, s2.NewObjectBytes("photos/a.txt", []byte("x"))))
+				sub, err := bs.strg.Sub(ctx, "photos")
+				s.Require().NoError(err)
+				s.Require().NoError(sub.Delete(ctx, keepFile))
+				s.Require().NoError(sub.Put(ctx, s2.NewObjectBytes("a.txt", []byte("x"))))
 			},
 			want: func(got time.Time) { s.True(got.IsZero(), got) },
 		},
 		{
 			caseName: "creating over a directory s2 did not make leaves it undated",
 			prepare: func(ctx context.Context, _ string, bs *Buckets) {
-				s.Require().NoError(bs.strg.Delete(ctx, "photos/"+keepFile))
-				s.Require().NoError(bs.strg.Put(ctx, s2.NewObjectBytes("photos/a.txt", []byte("x"))))
+				sub, err := bs.strg.Sub(ctx, "photos")
+				s.Require().NoError(err)
+				s.Require().NoError(sub.Delete(ctx, keepFile))
+				s.Require().NoError(sub.Put(ctx, s2.NewObjectBytes("a.txt", []byte("x"))))
 				s.Require().NoError(bs.Create(ctx, "photos"))
 			},
 			want: func(got time.Time) { s.True(got.IsZero(), got) },
@@ -278,6 +282,96 @@ func (s *BucketsTestSuite) TestCreatedAt() {
 			tc.want(got)
 		})
 	}
+}
+
+func (s *BucketsTestSuite) TestGeneration() {
+	hourAgo := time.Now().Add(-time.Hour).Truncate(time.Second)
+	testCases := []struct {
+		caseName string
+		prepare  func(ctx context.Context, root string, bs *Buckets)
+		want     func(got int64)
+	}{
+		{
+			caseName: "a new bucket starts one now",
+			prepare:  func(context.Context, string, *Buckets) {},
+			want:     func(got int64) { s.WithinDuration(time.Now(), time.Unix(0, got), time.Minute) },
+		},
+		{
+			caseName: "re-creating keeps it",
+			prepare: func(ctx context.Context, root string, bs *Buckets) {
+				s.Require().NoError(os.Chtimes(filepath.Join(root, bucketMetaDir, "photos"), hourAgo, hourAgo))
+				s.Require().NoError(bs.Create(ctx, "photos"))
+			},
+			want: func(got int64) { s.Equal(hourAgo.UnixNano(), got) },
+		},
+		{
+			caseName: "writing .keep keeps it",
+			prepare: func(ctx context.Context, root string, bs *Buckets) {
+				s.Require().NoError(os.Chtimes(filepath.Join(root, bucketMetaDir, "photos"), hourAgo, hourAgo))
+				sub, err := bs.strg.Sub(ctx, "photos")
+				s.Require().NoError(err)
+				s.Require().NoError(sub.Put(ctx, s2.NewObjectBytes(keepFile, []byte("x"))))
+			},
+			want: func(got int64) { s.Equal(hourAgo.UnixNano(), got) },
+		},
+		{
+			caseName: "deleting and creating again moves it",
+			prepare: func(ctx context.Context, root string, bs *Buckets) {
+				s.Require().NoError(os.Chtimes(filepath.Join(root, bucketMetaDir, "photos"), hourAgo, hourAgo))
+				s.Require().NoError(bs.Delete(ctx, "photos"))
+				s.Require().NoError(bs.Create(ctx, "photos"))
+			},
+			want: func(got int64) { s.Greater(got, hourAgo.UnixNano()) },
+		},
+		{
+			caseName: "creating replaces one the bucket's directory outlived",
+			prepare: func(ctx context.Context, root string, bs *Buckets) {
+				s.Require().NoError(os.Chtimes(filepath.Join(root, bucketMetaDir, "photos"), hourAgo, hourAgo))
+				s.Require().NoError(os.RemoveAll(filepath.Join(root, "photos")))
+				s.Require().NoError(bs.Create(ctx, "photos"))
+			},
+			want: func(got int64) { s.Greater(got, hourAgo.UnixNano()) },
+		},
+		{
+			caseName: "a bucket s2 did not create gets one on first use",
+			prepare: func(ctx context.Context, root string, bs *Buckets) {
+				s.Require().NoError(bs.Delete(ctx, "photos"))
+				s.Require().NoError(os.MkdirAll(filepath.Join(root, "photos"), 0o750))
+			},
+			want: func(got int64) { s.WithinDuration(time.Now(), time.Unix(0, got), time.Minute) },
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			cfg := DefaultConfig()
+			cfg.Root = s.T().TempDir()
+			bs, err := newBuckets(ctx, cfg)
+			s.Require().NoError(err)
+			s.Require().NoError(bs.Create(ctx, "photos"))
+			tc.prepare(ctx, cfg.Root, bs)
+
+			got, err := bs.Generation(ctx, "photos")
+			s.Require().NoError(err)
+			tc.want(got)
+			again, err := bs.Generation(ctx, "photos")
+			s.Require().NoError(err)
+			s.Equal(got, again, "a generation must be stable across reads")
+		})
+	}
+}
+
+func (s *BucketsTestSuite) TestDeleteRemovesGeneration() {
+	ctx := context.Background()
+	s.Require().NoError(s.buckets.Create(ctx, "photos"))
+	s.Require().NoError(s.buckets.Delete(ctx, "photos"))
+
+	exists, err := s.buckets.strg.Exists(ctx, bucketMetaDir+"/photos")
+	s.Require().NoError(err)
+	s.False(exists)
+	names, err := s.buckets.Names(ctx)
+	s.Require().NoError(err)
+	s.Empty(names)
 }
 
 func (s *BucketsTestSuite) TestGetNotFound() {

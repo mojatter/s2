@@ -35,18 +35,15 @@ func validUploadID(id string) bool {
 	return err == nil && len(b) == 16
 }
 
-// bucketGeneration returns the bucket's CreatedAt in nanoseconds; false once an error is written.
+// bucketGeneration returns the bucket's generation; false once an error is written.
 func bucketGeneration(s *server.Server, w http.ResponseWriter, r *http.Request, bucket string) (int64, bool) {
-	created, err := s.Buckets.CreatedAt(r.Context(), bucket)
+	gen, err := s.Buckets.Generation(r.Context(), bucket)
 	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return 0, false
 	}
-	if created.IsZero() {
-		return 0, true
-	}
-	return created.UnixNano(), true
+	return gen, true
 }
 
 func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *http.Request) {
