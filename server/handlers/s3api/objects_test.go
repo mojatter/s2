@@ -502,7 +502,7 @@ func (s *ObjectsTestSuite) TestListObjectsPagesWithBackendTokens() {
 	s.Run("a window of only hidden entries ends the fetch loop", func() {
 		var entries []string
 		for i := range 20 {
-			entries = append(entries, fmt.Sprintf("%sx/%05d", multipartPrefix, i))
+			entries = append(entries, fmt.Sprintf("%05d/.keep", i))
 		}
 		entries = append(entries, "a.txt")
 		strg := &pagedStorage{entries: entries, cap: 1}
@@ -567,7 +567,7 @@ func (s *ObjectsTestSuite) walkHandler(bucket, query string) (keys, prefixes []s
 // The listing must reach every object on the real fs backend, whatever the
 // cursor lands on and however many hidden entries share the window (#215).
 func (s *ObjectsTestSuite) TestListObjectsWalksRealFS() {
-	hidden := []string{multipartPrefix + "u1/manifest", multipartPrefix + "u2/manifest"}
+	hidden := []string{"_u1/.keep", "_u2/.keep"}
 	testCases := []struct {
 		caseName     string
 		objects      []string
@@ -602,7 +602,7 @@ func (s *ObjectsTestSuite) TestListObjectsWalksRealFS() {
 			objects:      append([]string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"}, hidden...),
 			query:        "delimiter=/&max-keys=3",
 			wantKeys:     []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"},
-			wantPrefixes: []string{multipartPrefix},
+			wantPrefixes: []string{"_u1/", "_u2/"},
 		},
 		{
 			// The basename filter drops the whole first window; the listing

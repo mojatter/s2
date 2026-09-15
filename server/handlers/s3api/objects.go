@@ -184,7 +184,7 @@ func listObjects(ctx context.Context, strg s2.Storage, p listObjectsParams) (obj
 			lastPrefix = res.CommonPrefixes[n-1]
 		}
 
-		pageObjs := filterMultipart(server.FilterKeep(res.Objects))
+		pageObjs := server.FilterKeep(res.Objects)
 		pagePrefixes := res.CommonPrefixes
 		if baseFilter != "" {
 			pageObjs = filterObjectsByBasename(pageObjs, listDir, baseFilter)
