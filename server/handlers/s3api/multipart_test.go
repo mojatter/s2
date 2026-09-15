@@ -320,7 +320,7 @@ func (s *MultipartTestSuite) TestMalformedUploadID() {
 			tc.handler(s.server, w, req)
 
 			s.Equal(http.StatusNotFound, w.Code)
-			s.NotContains(w.Body.String(), multipartPrefix)
+			s.NotContains(w.Body.String(), ".multipart")
 			var errResp ErrorResponse
 			s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
 			s.Equal("NoSuchUpload", errResp.Code)

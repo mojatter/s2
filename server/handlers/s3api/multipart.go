@@ -19,19 +19,6 @@ import (
 	"github.com/mojatter/s2/server/middleware"
 )
 
-// multipartPrefix is the pre-v0.16 in-bucket layout, still hidden from listings.
-const multipartPrefix = "__s2mp__/"
-
-func filterMultipart(objs []s2.Object) []s2.Object {
-	out := make([]s2.Object, 0, len(objs))
-	for _, o := range objs {
-		if !strings.HasPrefix(o.Name(), multipartPrefix) {
-			out = append(out, o)
-		}
-	}
-	return out
-}
-
 // newUploadID generates a 16-byte upload ID: 4 bytes of Unix seconds, so IDs sort by initiation, then 12 random bytes.
 func newUploadID() (string, error) {
 	b := make([]byte, 16)
