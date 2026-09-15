@@ -577,6 +577,32 @@ func (s *MultipartStoreTestSuite) TestUploads() {
 	s.Equal("videos", byID["id2"].Bucket)
 }
 
+// A backend failure must not pass for a complete, shorter listing.
+func (s *MultipartStoreTestSuite) TestUploadsSurfacesReadFailure() {
+	want := errors.New("backend unavailable")
+	base := s.newStore(s2.TypeOSFS)
+	s.Require().NoError(base.Create(context.Background(), "id1", "photos", "a.jpg", 0, nil))
+	ms := &MultipartStore{strg: getFailingStorage{base.Storage(), want}}
+
+	got, err := ms.Uploads(context.Background())
+
+	s.ErrorIs(err, want)
+	s.Empty(got)
+}
+
+// getFailingStorage lists normally but fails every Get below it.
+type getFailingStorage struct {
+	s2.Storage
+	err error
+}
+
+func (g getFailingStorage) Sub(ctx context.Context, name string) (s2.Storage, error) {
+	sub, err := g.Storage.Sub(ctx, name)
+	return getFailingStorage{sub, g.err}, err
+}
+
+func (g getFailingStorage) Get(context.Context, string) (s2.Object, error) { return nil, g.err }
+
 func (s *MultipartStoreTestSuite) TestParts() {
 	ctx := context.Background()
 	ms := s.newStore(s2.TypeOSFS)

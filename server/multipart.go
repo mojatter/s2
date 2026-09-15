@@ -24,6 +24,9 @@ var ErrNoSuchUpload = errors.New("no such upload")
 // errNoRecord distinguishes a missing meta from one bound elsewhere.
 var errNoRecord = errors.New("no upload record")
 
+// errBadRecord is a meta that exists but does not decode.
+var errBadRecord = errors.New("corrupt upload record")
+
 // isHiddenBucketEntry reports whether name is s2's own state, not a bucket.
 func isHiddenBucketEntry(name string) bool {
 	return strings.HasPrefix(name, ".")
@@ -114,7 +117,7 @@ func (ms *MultipartStore) load(ctx context.Context, id string) (uploadMeta, s2.M
 
 	var rec uploadMeta
 	if err := json.NewDecoder(rc).Decode(&rec); err != nil {
-		return uploadMeta{}, nil, time.Time{}, fmt.Errorf("failed to read upload %s: %w", id, err)
+		return uploadMeta{}, nil, time.Time{}, fmt.Errorf("%w: upload %s: %w", errBadRecord, id, err)
 	}
 	md := obj.Metadata().Clone()
 	if md == nil {
@@ -223,17 +226,33 @@ type Upload struct {
 	Initiated  time.Time
 }
 
-// Uploads lists live uploads in storage order; missing, unreadable and expired ones are skipped.
+// Uploads lists live uploads in storage order; missing, corrupt and expired ones are skipped.
 func (ms *MultipartStore) Uploads(ctx context.Context) ([]Upload, error) {
-	var uploads []Upload
+	var (
+		uploads []Upload
+		loadErr error
+	)
 	err := ms.forEachUpload(ctx, func(ctx context.Context, id string) {
-		rec, _, initiated, err := ms.load(ctx, id)
-		if err != nil || ms.expired(initiated) {
+		if loadErr != nil {
 			return
 		}
-		uploads = append(uploads, Upload{ID: id, Bucket: rec.Bucket, Key: rec.Key, Generation: rec.Generation, Initiated: initiated})
+		rec, _, initiated, err := ms.load(ctx, id)
+		if errors.Is(err, errNoRecord) || errors.Is(err, errBadRecord) {
+			return
+		}
+		// Anything else is the backend failing; a partial list would pass as complete.
+		if err != nil {
+			loadErr = err
+			return
+		}
+		if !ms.expired(initiated) {
+			uploads = append(uploads, Upload{ID: id, Bucket: rec.Bucket, Key: rec.Key, Generation: rec.Generation, Initiated: initiated})
+		}
 	})
-	return uploads, err
+	if err != nil {
+		return nil, err
+	}
+	return uploads, loadErr
 }
 
 // Part is one uploaded part as listed.
