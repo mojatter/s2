@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -192,19 +194,90 @@ func (ms *MultipartStore) Sweep(ctx context.Context) error {
 	if ms.maxAge <= 0 {
 		return nil
 	}
+	return ms.forEachUpload(ctx, ms.sweepUpload)
+}
+
+// forEachUpload calls fn with every upload ID, paging through the store.
+func (ms *MultipartStore) forEachUpload(ctx context.Context, fn func(ctx context.Context, id string)) error {
 	for after := ""; ; {
 		res, err := ms.strg.List(ctx, s2.ListOptions{After: after})
 		if err != nil {
 			return fmt.Errorf("failed to list multipart uploads: %w", err)
 		}
 		for _, id := range res.CommonPrefixes {
-			ms.sweepUpload(ctx, id)
+			fn(ctx, id)
 		}
 		if res.NextAfter == "" {
 			return nil
 		}
 		after = res.NextAfter
 	}
+}
+
+// Upload is one in-progress upload as listed.
+type Upload struct {
+	ID         string
+	Bucket     string
+	Key        string
+	Generation int64
+	Initiated  time.Time
+}
+
+// Uploads lists live uploads in storage order; missing, unreadable and expired ones are skipped.
+func (ms *MultipartStore) Uploads(ctx context.Context) ([]Upload, error) {
+	var uploads []Upload
+	err := ms.forEachUpload(ctx, func(ctx context.Context, id string) {
+		rec, _, initiated, err := ms.load(ctx, id)
+		if err != nil || ms.expired(initiated) {
+			return
+		}
+		uploads = append(uploads, Upload{ID: id, Bucket: rec.Bucket, Key: rec.Key, Generation: rec.Generation, Initiated: initiated})
+	})
+	return uploads, err
+}
+
+// Part is one uploaded part as listed.
+type Part struct {
+	Number       int
+	ETag         string
+	Size         uint64
+	LastModified time.Time
+}
+
+// Parts lists id's parts in number order.
+func (ms *MultipartStore) Parts(ctx context.Context, id string) ([]Part, error) {
+	u, err := ms.upload(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	var parts []Part
+	for after := ""; ; {
+		res, err := u.List(ctx, s2.ListOptions{After: after})
+		if err != nil {
+			return nil, err
+		}
+		for _, obj := range res.Objects {
+			n, err := strconv.Atoi(obj.Name())
+			if err != nil || uploadPartName(n) != obj.Name() {
+				continue
+			}
+			// List leaves metadata unset on fs, so the ETag needs a Get.
+			full, err := u.Get(ctx, obj.Name())
+			if isNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, Part{Number: n, ETag: full.Metadata()[EtagMetadataKey], Size: full.Length(), LastModified: full.LastModified()})
+		}
+		if res.NextAfter == "" {
+			break
+		}
+		after = res.NextAfter
+	}
+	slices.SortFunc(parts, func(a, b Part) int { return a.Number - b.Number })
+	return parts, nil
 }
 
 // sweepUpload removes id if it has expired.
