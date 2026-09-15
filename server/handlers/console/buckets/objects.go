@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -143,7 +144,12 @@ func handleCreateFolder(s *server.Server, w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := s.Buckets.CreateFolder(ctx, name, key); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		var notFound *server.ErrBucketNotFound
+		if errors.As(err, &notFound) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 

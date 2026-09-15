@@ -190,6 +190,22 @@ func (s *BucketsTestSuite) TestCreateFolder() {
 	s.Contains(res.CommonPrefixes, "sub")
 }
 
+// A folder must not create the bucket it is written into (#224).
+func (s *BucketsTestSuite) TestCreateFolderMissingBucket() {
+	ctx := context.Background()
+
+	err := s.buckets.CreateFolder(ctx, "ghost", "docs")
+	var notFound *ErrBucketNotFound
+	s.ErrorAs(err, &notFound)
+
+	exists, err := s.buckets.Exists(ctx, "ghost")
+	s.Require().NoError(err)
+	s.False(exists)
+	names, err := s.buckets.Names(ctx)
+	s.Require().NoError(err)
+	s.NotContains(names, "ghost")
+}
+
 func (s *BucketsTestSuite) TestCreatedAt() {
 	hourAgo := time.Now().Add(-time.Hour).Truncate(time.Second)
 	testCases := []struct {
