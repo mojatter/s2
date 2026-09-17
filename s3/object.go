@@ -22,6 +22,8 @@ type object struct {
 	length       uint64
 	lastModified time.Time
 	metadata     s2.Metadata
+	contentType  string
+	etag         string
 }
 
 func (o *object) Name() string {
@@ -74,3 +76,10 @@ func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
 	return res.Body, nil
 }
 
+func (o *object) ContentType() string {
+	return o.contentType
+}
+
+func (o *object) ETag() string {
+	return o.etag
+}

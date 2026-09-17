@@ -2,10 +2,13 @@ package gcs
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
+	"cloud.google.com/go/storage"
 	"github.com/mojatter/s2"
 )
 
@@ -17,6 +20,8 @@ type object struct {
 	length       uint64
 	lastModified time.Time
 	metadata     s2.Metadata
+	contentType  string
+	etag         string
 }
 
 func (o *object) Name() string {
@@ -61,4 +66,27 @@ func (o *object) key() string {
 		return o.name
 	}
 	return fmt.Sprintf("%s/%s", o.prefix, o.name)
+}
+
+func (o *object) ContentType() string {
+	return o.contentType
+}
+
+func (o *object) ETag() string {
+	return o.etag
+}
+
+// objectETag returns the MD5 of attrs as a quoted hex string, else its opaque etag.
+func objectETag(attrs *storage.ObjectAttrs) string {
+	if len(attrs.MD5) > 0 {
+		return `"` + hex.EncodeToString(attrs.MD5) + `"`
+	}
+	return quoteETag(attrs.Etag)
+}
+
+func quoteETag(etag string) string {
+	if etag == "" || strings.HasPrefix(etag, `"`) {
+		return etag
+	}
+	return `"` + etag + `"`
 }

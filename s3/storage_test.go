@@ -3,6 +3,8 @@ package s3
 import (
 	"bytes"
 	"context"
+	"crypto/md5" // #nosec G501 -- mirrors S3's ETag
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -70,6 +72,12 @@ func (m *mockS3Client) get(bucket, key string) (*mockObject, bool) {
 	return obj, ok
 }
 
+// mockETag is the quoted MD5 S3 assigns to a single-part upload.
+func mockETag(body []byte) string {
+	sum := md5.Sum(body) // #nosec G401 -- mirrors S3's ETag
+	return `"` + hex.EncodeToString(sum[:]) + `"`
+}
+
 // clientAPI and presignClientAPI implementation
 
 // mockContinuationPrefix marks the mock's continuation tokens. Real ones are
@@ -135,6 +143,7 @@ func (m *mockS3Client) ListObjectsV2(ctx context.Context, params *s3.ListObjects
 			Key:          aws.String(obj.key),
 			Size:         aws.Int64(int64(len(obj.body))),
 			LastModified: aws.Time(obj.lastModified),
+			ETag:         aws.String(mockETag(obj.body)),
 		})
 	}
 
@@ -172,6 +181,7 @@ func (m *mockS3Client) HeadObject(ctx context.Context, params *s3.HeadObjectInpu
 		ContentLength: aws.Int64(int64(len(obj.body))),
 		LastModified:  aws.Time(obj.lastModified),
 		Metadata:      obj.metadata,
+		ETag:          aws.String(mockETag(obj.body)),
 	}, nil
 }
 

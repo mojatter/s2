@@ -27,6 +27,7 @@ type mockBlob struct {
 	body      []byte
 	modified  time.Time
 	metadata  map[string]*string
+	etag      string
 }
 
 type mockAzblobClient struct {
@@ -61,6 +62,7 @@ func (m *mockAzblobClient) put(container, key string, body []byte, metadata map[
 		body:      body,
 		modified:  time.Now(),
 		metadata:  metadata,
+		etag:      fmt.Sprintf("0x%X", time.Now().UnixNano()),
 	}
 }
 
@@ -92,6 +94,7 @@ func (m *mockAzblobClient) getProperties(_ context.Context, container, blobName 
 		contentLength: int64(len(b.body)),
 		lastModified:  b.modified,
 		metadata:      b.metadata,
+		etag:          b.etag,
 	}, nil
 }
 
@@ -135,6 +138,7 @@ func (m *mockAzblobClient) setMetadata(_ context.Context, container, blobName st
 		return newBlobNotFoundError()
 	}
 	b.metadata = metadata
+	b.etag = fmt.Sprintf("0x%X", time.Now().UnixNano())
 	return nil
 }
 
@@ -230,6 +234,7 @@ func (m *mockAzblobClient) doList(ctr, prefix, delimiter string, maxResults int3
 			contentLength: int64(len(b.body)),
 			lastModified:  b.modified,
 			metadata:      b.metadata,
+			etag:          b.etag,
 		})
 	}
 	return result, nil

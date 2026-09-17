@@ -24,12 +24,18 @@ type Object interface {
 	Length() uint64
 	// LastModified returns the last modified time of the object.
 	LastModified() time.Time
-	// Metadata returns the metadata of the object.
+	// Metadata returns the user metadata of the object.
 	//
 	// Note: Depending on the storage implementation (e.g., S3), objects
 	// returned by List operations may not contain metadata. Use Storage.Get
 	// to fetch the complete metadata.
 	Metadata() Metadata
+	// ContentType returns the object's MIME type, or "" when unknown.
+	// Objects returned by List may report "" (e.g., S3); use Storage.Get.
+	ContentType() string
+	// ETag returns the object's entity tag in quoted form, or "" when unknown.
+	// Objects returned by List carry it without extra network round trips.
+	ETag() string
 }
 
 // ObjectOption is a functional option for configuring objects created by
@@ -40,6 +46,13 @@ type ObjectOption func(*object)
 func WithMetadata(md Metadata) ObjectOption {
 	return func(o *object) {
 		o.metadata = md
+	}
+}
+
+// WithContentType sets the content type on the object.
+func WithContentType(contentType string) ObjectOption {
+	return func(o *object) {
+		o.contentType = contentType
 	}
 }
 
@@ -105,6 +118,7 @@ type object struct {
 	length       uint64
 	lastModified time.Time
 	metadata     Metadata
+	contentType  string
 }
 
 func (o *object) Name() string {
@@ -165,4 +179,13 @@ func (o *object) Metadata() Metadata {
 		o.metadata = make(Metadata)
 	}
 	return o.metadata
+}
+
+func (o *object) ContentType() string {
+	return o.contentType
+}
+
+// ETag returns "": the entity tag is assigned by the storage that stores the object.
+func (o *object) ETag() string {
+	return ""
 }

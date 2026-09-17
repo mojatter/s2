@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	azsdk "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
@@ -18,6 +19,9 @@ type blobProps struct {
 	contentLength int64
 	lastModified  time.Time
 	metadata      map[string]*string
+	contentType   string
+	contentMD5    []byte
+	etag          string
 }
 
 type listBlobsResult struct {
@@ -31,6 +35,9 @@ type blobItem struct {
 	contentLength int64
 	lastModified  time.Time
 	metadata      map[string]*string
+	contentType   string
+	contentMD5    []byte
+	etag          string
 }
 
 // azblobClient abstracts the Azure Blob SDK so that tests can swap in a mock.
@@ -75,6 +82,9 @@ func (c *sdkClient) getProperties(ctx context.Context, ctr, blobName string) (bl
 		contentLength: derefInt64(resp.ContentLength),
 		lastModified:  derefTime(resp.LastModified),
 		metadata:      resp.Metadata,
+		contentType:   derefString(resp.ContentType),
+		contentMD5:    resp.ContentMD5,
+		etag:          derefETag(resp.ETag),
 	}, nil
 }
 
@@ -187,6 +197,9 @@ func toBlobItem(item *container.BlobItem) blobItem {
 		contentLength: derefInt64(item.Properties.ContentLength),
 		lastModified:  derefTime(item.Properties.LastModified),
 		metadata:      item.Metadata,
+		contentType:   derefString(item.Properties.ContentType),
+		contentMD5:    item.Properties.ContentMD5,
+		etag:          derefETag(item.Properties.ETag),
 	}
 }
 
@@ -219,6 +232,13 @@ func (c *sdkClient) signedURL(ctr, blobName string, method string, expiry time.T
 }
 
 // --- helpers ---
+
+func derefETag(p *azcore.ETag) string {
+	if p == nil {
+		return ""
+	}
+	return string(*p)
+}
 
 func derefString(p *string) string {
 	if p == nil {

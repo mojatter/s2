@@ -288,6 +288,29 @@ func TestStorageGetPut(ctx context.Context, strg s2.Storage) error {
 		errorf("metadata %q = %q, want %q", "testkey", v, "test-val")
 	}
 
+	// Listed objects must report the same ETag as Get.
+	etag := got.ETag()
+	if etag == "" {
+		errorf("Get(%q).ETag() is empty", name)
+	}
+	res, err := strg.List(ctx, s2.ListOptions{Recursive: true})
+	if err != nil {
+		return fmt.Errorf("List(%q) failed: %w", name, err)
+	}
+	listed := false
+	for _, obj := range res.Objects {
+		if obj.Name() != name {
+			continue
+		}
+		listed = true
+		if obj.ETag() != etag {
+			errorf("List(%q).ETag() = %q, want %q", name, obj.ETag(), etag)
+		}
+	}
+	if !listed {
+		errorf("List(%q) did not return the object", name)
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("TestStorageGetPut found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
 	}

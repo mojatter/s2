@@ -4,6 +4,7 @@ import (
 	"io"
 	"io/fs"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/mojatter/s2"
@@ -140,28 +141,59 @@ func (f *fakeFileInfo) Sys() any         { return nil }
 func (f *fakeFileInfo) ModTime() time.Time { return time.Time{} }
 
 func (s *ObjectTestSuite) TestMetadata() {
+	modTime := time.Unix(0, 0x1234)
 	testCases := []struct {
-		caseName string
-		obj      s2.Object
-		want     s2.Metadata
+		caseName        string
+		sidecar         string
+		wantMetadata    s2.Metadata
+		wantContentType string
+		wantETag        string
 	}{
 		{
-			caseName: "typical",
-			obj: &object{
-				metadata: s2.Metadata{"contentType": "text/plain"},
-			},
-			want: s2.Metadata{"contentType": "text/plain"},
+			caseName:     "no sidecar",
+			wantMetadata: s2.Metadata{},
+			wantETag:     `"1234-5"`,
 		},
 		{
-			caseName: "no meta",
-			obj:      &object{},
-			want:     s2.Metadata{},
+			caseName:        "record",
+			sidecar:         `{"etag":"\"abc\"","content_type":"text/plain","metadata":{"s2-etag":"user"}}`,
+			wantMetadata:    s2.Metadata{"s2-etag": "user"},
+			wantContentType: "text/plain",
+			wantETag:        `"abc"`,
+		},
+		{
+			caseName:     "record without etag",
+			sidecar:      `{"metadata":{}}`,
+			wantMetadata: s2.Metadata{},
+			wantETag:     `"1234-5"`,
+		},
+		{
+			caseName:        "legacy flat map",
+			sidecar:         `{"s2-etag":"\"abc\"","s2-content-type":"text/plain","metadata":"user"}`,
+			wantMetadata:    s2.Metadata{"metadata": "user"},
+			wantContentType: "text/plain",
+			wantETag:        `"abc"`,
+		},
+		{
+			caseName:     "unreadable sidecar",
+			sidecar:      `{`,
+			wantMetadata: s2.Metadata{},
+			wantETag:     `"1234-5"`,
 		},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			got := tc.obj.Metadata()
-			s.Equal(tc.want, got)
+			fsys := fstest.MapFS{"a.txt": &fstest.MapFile{Data: []byte("hello"), ModTime: modTime}}
+			if tc.sidecar != "" {
+				fsys[metaPath("a.txt")] = &fstest.MapFile{Data: []byte(tc.sidecar)}
+			}
+			info, err := fs.Stat(fsys, "a.txt")
+			s.Require().NoError(err)
+
+			obj := newObjectFileInfo(fsys, "a.txt", info)
+			s.Equal(tc.wantMetadata, obj.Metadata())
+			s.Equal(tc.wantContentType, obj.ContentType())
+			s.Equal(tc.wantETag, obj.ETag())
 		})
 	}
 }

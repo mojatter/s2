@@ -30,6 +30,9 @@ func resolvedContentType(obj s2.Object, name string) string {
 	if ct, ok := obj.Metadata().Get(server.ContentTypeMetadataKey); ok {
 		return ct
 	}
+	if ct := obj.ContentType(); ct != "" {
+		return ct
+	}
 	if ct := server.ContentTypeByExt(path.Ext(name)); ct != "" {
 		return ct
 	}

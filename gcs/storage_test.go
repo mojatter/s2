@@ -3,6 +3,7 @@ package gcs
 import (
 	"bytes"
 	"context"
+	"crypto/md5" // #nosec G501 -- mirrors GCS's MD5 hash
 	"errors"
 	"fmt"
 	"io"
@@ -67,6 +68,11 @@ func (m *mockGCSClient) del(bucket, key string) {
 	defer m.mu.Unlock()
 
 	delete(m.objects, path.Join(bucket, key))
+}
+
+func mockMD5(body []byte) []byte {
+	sum := md5.Sum(body) // #nosec G401 -- mirrors GCS's MD5 hash
+	return sum[:]
 }
 
 // gcsClient implementation
@@ -141,6 +147,7 @@ func (b *mockBucket) objects(ctx context.Context, q *storage.Query) gcsObjectIte
 				Size:     int64(len(obj.body)),
 				Updated:  obj.updated,
 				Metadata: obj.metadata,
+				MD5:      mockMD5(obj.body),
 			},
 		})
 	}
@@ -168,6 +175,7 @@ func (o *mockGCSObject) attrs(_ context.Context) (*storage.ObjectAttrs, error) {
 		Size:     int64(len(obj.body)),
 		Updated:  obj.updated,
 		Metadata: obj.metadata,
+		MD5:      mockMD5(obj.body),
 	}, nil
 }
 
@@ -209,6 +217,7 @@ func (o *mockGCSObject) update(_ context.Context, uattrs storage.ObjectAttrsToUp
 		Size:     int64(len(obj.body)),
 		Updated:  obj.updated,
 		Metadata: obj.metadata,
+		MD5:      mockMD5(obj.body),
 	}, nil
 }
 

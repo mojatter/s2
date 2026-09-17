@@ -2,8 +2,10 @@ package fs
 
 import (
 	"context"
+	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"path"
@@ -215,6 +217,10 @@ func (s *storage) listRecursive(prefix, after string, limit int) (s2.ListResult,
 }
 
 func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
+	return s.get(name)
+}
+
+func (s *storage) get(name string) (*object, error) {
 	info, err := fs.Stat(s.fsys, name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -226,7 +232,7 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 		return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, name)
 	}
 	obj := newObjectFileInfo(s.fsys, name, info)
-	if err := obj.loadMetadata(); err != nil {
+	if err := obj.load(); err != nil {
 		return nil, err
 	}
 	return obj, nil
@@ -254,21 +260,30 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 	}
 	defer func() { _ = rc.Close() }()
 
-	if err := atomicWrite(s.fsys, obj.Name(), rc); err != nil {
+	h := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
+	if err := atomicWrite(s.fsys, obj.Name(), io.TeeReader(rc, h)); err != nil {
 		return err
 	}
-	return saveMetadata(s.fsys, obj.Name(), obj.Metadata())
+	return saveMeta(s.fsys, obj.Name(), meta{
+		ETag:        quotedMD5(h),
+		ContentType: obj.ContentType(),
+		Metadata:    obj.Metadata(),
+	})
 }
 
+// PutMetadata replaces the user metadata and keeps the ETag and content type.
 func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Metadata) error {
-	if _, err := s.Get(ctx, name); err != nil {
+	obj, err := s.get(name)
+	if err != nil {
 		return err
 	}
-	return saveMetadata(s.fsys, name, metadata)
+	m := obj.m
+	m.Metadata = metadata
+	return saveMeta(s.fsys, name, m)
 }
 
 func (s *storage) Copy(ctx context.Context, src, dst string) error {
-	srcObj, err := s.Get(ctx, src)
+	srcObj, err := s.get(src)
 	if err != nil {
 		return err
 	}
@@ -278,10 +293,13 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 	}
 	defer func() { _ = rc.Close() }()
 
-	if err := atomicWrite(s.fsys, dst, rc); err != nil {
+	h := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
+	if err := atomicWrite(s.fsys, dst, io.TeeReader(rc, h)); err != nil {
 		return err
 	}
-	return saveMetadata(s.fsys, dst, srcObj.Metadata())
+	m := srcObj.m
+	m.ETag = quotedMD5(h)
+	return saveMeta(s.fsys, dst, m)
 }
 
 func (s *storage) Move(ctx context.Context, src, dst string) error {
@@ -294,14 +312,16 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 		if err := wfs.Rename(s.fsys, src, dst); err != nil {
 			return fmt.Errorf("failed to rename %q to %q: %w", src, dst, err)
 		}
-		// Move metadata too. If the source has no metadata, ignore ErrNotExist.
-		srcMeta := metaPath(src)
+		// Move the sidecar too; a source without one must not inherit dst's.
+		srcMeta, dstMeta := metaPath(src), metaPath(dst)
 		if _, err := fs.Stat(s.fsys, srcMeta); err == nil {
-			if err := wfs.Rename(s.fsys, srcMeta, metaPath(dst)); err != nil {
+			if err := wfs.Rename(s.fsys, srcMeta, dstMeta); err != nil {
 				return fmt.Errorf("failed to rename metadata for %q: %w", src, err)
 			}
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("failed to stat metadata for %q: %w", src, err)
+		} else if err := wfs.RemoveFile(s.fsys, dstMeta); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("failed to remove metadata for %q: %w", dst, err)
 		}
 		return nil
 	}

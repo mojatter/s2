@@ -2,21 +2,25 @@ package azblob
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/mojatter/s2"
 )
 
 type object struct {
-	client    azblobClient
-	container string
-	prefix    string
-	name      string
-	length    uint64
-	modified  time.Time
-	metadata  s2.Metadata
+	client      azblobClient
+	container   string
+	prefix      string
+	name        string
+	length      uint64
+	modified    time.Time
+	metadata    s2.Metadata
+	contentType string
+	etag        string
 }
 
 func (o *object) Name() string {
@@ -59,4 +63,23 @@ func (o *object) key() string {
 		return o.name
 	}
 	return fmt.Sprintf("%s/%s", o.prefix, o.name)
+}
+
+func (o *object) ContentType() string {
+	return o.contentType
+}
+
+func (o *object) ETag() string {
+	return o.etag
+}
+
+// blobETag returns contentMD5 as a quoted hex string, else the quoted opaque etag.
+func blobETag(contentMD5 []byte, etag string) string {
+	if len(contentMD5) > 0 {
+		return `"` + hex.EncodeToString(contentMD5) + `"`
+	}
+	if etag == "" || strings.HasPrefix(etag, `"`) {
+		return etag
+	}
+	return `"` + etag + `"`
 }

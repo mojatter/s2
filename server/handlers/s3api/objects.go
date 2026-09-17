@@ -289,7 +289,7 @@ func isFSBackend(typ s2.Type) bool {
 // and "" unless the object is one placed into a filesystem backend's root
 // from outside s2 -- the only kind s2 guesses about (#188).
 func guessedContentType(strg s2.Storage, obj s2.Object, key string) string {
-	if len(obj.Metadata()) > 0 || !isFSBackend(strg.Type()) {
+	if len(obj.Metadata()) > 0 || obj.ContentType() != "" || !isFSBackend(strg.Type()) {
 		return ""
 	}
 	return server.ContentTypeByExt(path.Ext(key))
@@ -300,6 +300,9 @@ func guessedContentType(strg s2.Storage, obj s2.Object, key string) string {
 // extension guess, else defaultContentType, as real S3 does.
 func objectContentType(strg s2.Storage, obj s2.Object, key string) string {
 	if ct, ok := obj.Metadata().Get(contentTypeMetadataKey); ok {
+		return ct
+	}
+	if ct := obj.ContentType(); ct != "" {
 		return ct
 	}
 	if ct := guessedContentType(strg, obj, key); ct != "" {
@@ -515,15 +518,12 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// objectETag returns the ETag for an object. If the object has a stored ETag
-// in metadata, it is used. Otherwise, a fallback based on length is returned.
+// objectETag returns the ETag s2 stored in metadata, else the storage's own.
 func objectETag(obj s2.Object) string {
-	if md := obj.Metadata(); md != nil {
-		if etag, ok := md.Get(etagMetadataKey); ok {
-			return etag
-		}
+	if etag, ok := obj.Metadata().Get(etagMetadataKey); ok {
+		return etag
 	}
-	return `"` + hex.EncodeToString(md5.New().Sum(nil)) + `"` // #nosec G401 -- MD5 is required for S3-compatible ETag
+	return obj.ETag()
 }
 
 const metaHeaderPrefix = "X-Amz-Meta-"
@@ -608,6 +608,11 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 		md = srcObj.Metadata().Clone()
 		if md == nil {
 			md = make(s2.Metadata)
+		}
+		if ct := srcObj.ContentType(); ct != "" {
+			if _, ok := md[contentTypeMetadataKey]; !ok {
+				md[contentTypeMetadataKey] = ct
+			}
 		}
 		// The copy carries an ETag, so it can never qualify for the
 		// guess itself; keep the source's answer.
