@@ -191,7 +191,7 @@ func TestStart(t *testing.T) {
 
 				srv, err := NewServer(ctx, cfg)
 				require.NoError(t, err)
-				require.NoError(t, srv.Multipart.Create(ctx, "id1", "photos", "a.jpg", 0, nil))
+				require.NoError(t, srv.Multipart.Create(ctx, "id1", "photos", "a.jpg", 0, nil, ""))
 				at := time.Now().Add(-2 * time.Hour)
 				require.NoError(t, os.Chtimes(filepath.Join(cfg.Root, multipartDir, "id1", uploadMetaName), at, at))
 

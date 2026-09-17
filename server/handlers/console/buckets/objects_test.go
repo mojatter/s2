@@ -349,10 +349,7 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 		})
 	}
 
-	s.Run("upload records the ETag and Content-Type the S3 API would", func() {
-		// Without these, a console upload is indistinguishable from a
-		// file placed in the storage root from outside, which GetObject
-		// answers for by guessing from the extension (see #188).
+	s.Run("upload records the ETag and the browser's Content-Type", func() {
 		s.createBucket("upm")
 		content := []byte("<h1>hi</h1>")
 
@@ -380,51 +377,55 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 		obj, err := strg.Get(context.Background(), "page.html")
 		s.Require().NoError(err)
 
-		ct, ok := obj.Metadata().Get(server.ContentTypeMetadataKey)
-		s.True(ok)
-		s.Equal("text/html", ct)
-		etag, ok := obj.Metadata().Get(server.EtagMetadataKey)
-		s.True(ok)
-		s.Equal(fmt.Sprintf("%q", fmt.Sprintf("%x", md5.Sum(content))), etag)
+		s.Equal("text/html", obj.ContentType())
+		s.Equal(fmt.Sprintf("%q", fmt.Sprintf("%x", md5.Sum(content))), obj.ETag())
 	})
 
-	s.Run("generic part Content-Type falls back to the extension", func() {
-		// Browsers send application/octet-stream for any extension the
-		// OS does not know, which would otherwise be stored verbatim and
-		// make the object download instead of open.
+	s.Run("generic part Content-Type is replaced by the extension guess", func() {
+		// Browsers send application/octet-stream for any extension the OS does not know; S3 and Azure would store their default.
 		s.createBucket("upg")
+		testCases := []struct {
+			caseName string
+			filename string
+			partType string
+			want     string
+		}{
+			// The exact type depends on the host mime database, so compare with the guess itself.
+			{caseName: "known extension", filename: "app.log", partType: "application/octet-stream", want: server.ContentTypeByExt(".log")},
+			{caseName: "no part type", filename: "app.log", want: server.ContentTypeByExt(".log")},
+			{caseName: "no extension", filename: "README", partType: "application/octet-stream", want: ""},
+		}
+		for _, tc := range testCases {
+			s.Run(tc.caseName, func() {
+				body := &bytes.Buffer{}
+				mw := multipart.NewWriter(body)
+				s.Require().NoError(mw.WriteField("prefix", ""))
+				hdr := make(textproto.MIMEHeader)
+				hdr.Set("Content-Disposition", `form-data; name="file"; filename="`+tc.filename+`"`)
+				if tc.partType != "" {
+					hdr.Set("Content-Type", tc.partType)
+				}
+				fw, err := mw.CreatePart(hdr)
+				s.Require().NoError(err)
+				_, err = fw.Write([]byte("log line"))
+				s.Require().NoError(err)
+				s.Require().NoError(mw.Close())
 
-		body := &bytes.Buffer{}
-		mw := multipart.NewWriter(body)
-		s.Require().NoError(mw.WriteField("prefix", ""))
-		hdr := make(textproto.MIMEHeader)
-		hdr.Set("Content-Disposition", `form-data; name="file"; filename="app.log"`)
-		hdr.Set("Content-Type", "application/octet-stream")
-		fw, err := mw.CreatePart(hdr)
-		s.Require().NoError(err)
-		_, err = fw.Write([]byte("log line"))
-		s.Require().NoError(err)
-		s.Require().NoError(mw.Close())
+				req := httptest.NewRequest("POST", "/buckets/upg/upload", body)
+				req.Header.Set("Content-Type", mw.FormDataContentType())
+				req.SetPathValue("name", "upg")
+				w := httptest.NewRecorder()
+				handleUploadFile(s.server, w, req)
+				s.Equal(http.StatusOK, w.Code)
 
-		req := httptest.NewRequest("POST", "/buckets/upg/upload", body)
-		req.Header.Set("Content-Type", mw.FormDataContentType())
-		req.SetPathValue("name", "upg")
-		w := httptest.NewRecorder()
-		handleUploadFile(s.server, w, req)
-		s.Equal(http.StatusOK, w.Code)
+				strg, err := s.server.Buckets.Get(context.Background(), "upg")
+				s.Require().NoError(err)
+				obj, err := strg.Get(context.Background(), tc.filename)
+				s.Require().NoError(err)
 
-		strg, err := s.server.Buckets.Get(context.Background(), "upg")
-		s.Require().NoError(err)
-		obj, err := strg.Get(context.Background(), "app.log")
-		s.Require().NoError(err)
-
-		ct, ok := obj.Metadata().Get(server.ContentTypeMetadataKey)
-		s.True(ok)
-		// The exact type depends on the host mime database (text/plain on
-		// a machine with no .log entry, text/x-log on one with it), so
-		// assert only that the extension, not the part header, decided.
-		s.NotEqual("application/octet-stream", ct)
-		s.Equal(server.ContentTypeByExt(".log"), ct)
+				s.Equal(tc.want, obj.ContentType())
+			})
+		}
 	})
 
 	s.Run("explicit deny on the exact filename is not bypassed by a wildcard allow", func() {

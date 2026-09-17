@@ -43,10 +43,7 @@ func (s *s3apiSuite) createBucket(name string) {
 	s.Require().NoError(s.server.Buckets.Create(context.Background(), name))
 }
 
-// roundTrip drives target through a real server and returns the response,
-// body drained and closed. Unlike httptest.ResponseRecorder, this shows
-// what the client receives -- net/http's own Content-Type sniffing
-// included (#188).
+// roundTrip drives target through a real server and returns the response, body drained and closed, as the client receives it.
 func (s *s3apiSuite) roundTrip(srv *server.Server, method, target string) *http.Response {
 	s.T().Helper()
 	ts := httptest.NewServer(srv.S3Handler())

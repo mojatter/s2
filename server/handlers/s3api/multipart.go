@@ -68,16 +68,7 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 	}
 
 	// S3 takes the object's headers from the initiate request.
-	md := parseMetadataHeaders(r)
-	// The store below is conditional, so x-amz-meta-s2-content-type would
-	// otherwise reach the reserved key it shares a namespace with (#192).
-	dropInternalMetadata(md)
-	// An absent Content-Type stays unstored: GetObject answers with the
-	// default either way, and the console can still guess from the key.
-	if ct := requestContentType(r); ct != "" {
-		md[contentTypeMetadataKey] = ct
-	}
-	if err := s.Multipart.Create(ctx, uploadID, bucketName, key, gen, md); err != nil {
+	if err := s.Multipart.Create(ctx, uploadID, bucketName, key, gen, parseMetadataHeaders(r), requestContentType(r)); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
@@ -119,7 +110,7 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	if _, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key, gen); err != nil {
+	if _, _, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key, gen); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
@@ -134,9 +125,8 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	h := md5.Sum(data) // #nosec G401 -- MD5 is required for S3-compatible ETag
-	etag := `"` + hex.EncodeToString(h[:]) + `"`
-	if err := s.Multipart.PutPart(ctx, uploadID, partNumber, data, etag); err != nil {
+	etag, err := s.Multipart.PutPart(ctx, uploadID, partNumber, data)
+	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
@@ -197,16 +187,15 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 	if !ok {
 		return
 	}
-	md, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key, gen)
+	md, contentType, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key, gen)
 	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
 	}
 
-	// Stat parts up front for length and digest; bodies stream below.
+	// Stat parts up front for length and ETag; bodies stream below.
 	partObjs := make([]s2.Object, len(req.Parts))
-	digests := make([]byte, 0, len(req.Parts)*md5.Size)
 	var totalLen uint64
 	for i, p := range req.Parts {
 		obj, err := s.Multipart.Part(ctx, uploadID, p.PartNumber)
@@ -219,32 +208,34 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 			writeError(w, r, code, msg, status)
 			return
 		}
-		digest, err := hex.DecodeString(strings.Trim(obj.Metadata()[etagMetadataKey], `"`))
-		if err != nil || len(digest) != md5.Size {
+		partETag := strings.Trim(obj.ETag(), `"`)
+		if partETag == "" {
 			writeError(w, r, "InvalidPart", fmt.Sprintf("Part %d has no ETag", p.PartNumber), http.StatusBadRequest)
 			return
 		}
-		if !strings.EqualFold(strings.Trim(strings.TrimSpace(p.ETag), `"`), hex.EncodeToString(digest)) {
+		if !strings.EqualFold(strings.Trim(strings.TrimSpace(p.ETag), `"`), partETag) {
 			writeError(w, r, "InvalidPart", fmt.Sprintf("Part %d: the specified ETag did not match the uploaded part's ETag", p.PartNumber), http.StatusBadRequest)
 			return
 		}
-		digests = append(digests, digest...)
 		partObjs[i] = obj
 		totalLen += obj.Length()
 	}
 
-	combined := md5.Sum(digests) // #nosec G401 -- MD5 is required for S3-compatible multipart ETag
-	etag := `"` + hex.EncodeToString(combined[:]) + `-` + strconv.Itoa(len(req.Parts)) + `"`
-	md[etagMetadataKey] = etag
-
+	// The object's ETag is its body MD5, as for PutObject, not S3's md5-of-md5s-N form.
+	hash := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
 	pr := &partsReader{parts: partObjs}
-	if err := strg.Put(ctx, s2.NewObjectReader(key, pr, totalLen, s2.WithMetadata(md))); err != nil {
+	body := struct {
+		io.Reader
+		io.Closer
+	}{io.TeeReader(pr, hash), pr}
+	if err := strg.Put(ctx, s2.NewObjectReader(key, body, totalLen, s2.WithMetadata(md), s2.WithContentType(contentType))); err != nil {
 		_ = pr.Close()
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
 	}
 	_ = s.Multipart.Remove(ctx, uploadID)
+	etag := `"` + hex.EncodeToString(hash.Sum(nil)) + `"`
 
 	writeXML(w, http.StatusOK, CompleteMultipartUploadResult{
 		Location: "/" + bucketName + "/" + key,
@@ -428,7 +419,7 @@ func handleListParts(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key, gen); err != nil {
+	if _, _, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key, gen); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return

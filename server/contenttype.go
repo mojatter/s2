@@ -2,11 +2,13 @@ package server
 
 import (
 	"mime"
+	"path"
 	"strings"
+
+	"github.com/mojatter/s2"
 )
 
-// DefaultContentType is what s2 stores and answers with when no
-// Content-Type is known, matching S3's own default.
+// DefaultContentType is what s2 answers with when no Content-Type is known, matching S3's own default.
 const DefaultContentType = "binary/octet-stream"
 
 // ContentTypeByExt returns the MIME type for the given file extension,
@@ -34,4 +36,15 @@ func ContentTypeByExt(ext string) string {
 		return "application/wasm"
 	}
 	return ""
+}
+
+// ResolveContentType returns obj's stored Content-Type, else a guess from name's extension, else DefaultContentType.
+func ResolveContentType(obj s2.Object, name string) string {
+	if ct := obj.ContentType(); ct != "" {
+		return ct
+	}
+	if ct := ContentTypeByExt(path.Ext(name)); ct != "" {
+		return ct
+	}
+	return DefaultContentType
 }

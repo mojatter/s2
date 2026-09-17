@@ -79,11 +79,10 @@ func (s *ViewTestSuite) TestHandleView() {
 
 	s.Run("stored Content-Type takes precedence over the extension guess", func() {
 		s.createBucket("view-ct")
-		md := s2.Metadata{server.ContentTypeMetadataKey: "application/json"}
 		// Neither the extension table nor a sniff of "{}" would ever
 		// answer "application/json" on its own, so a match here can only
-		// come from the stored metadata this test sets.
-		s.putObject("view-ct", "report", []byte("{}"), s2.WithMetadata(md))
+		// come from the stored Content-Type this test sets.
+		s.putObject("view-ct", "report", []byte("{}"), s2.WithContentType("application/json"))
 
 		req := httptest.NewRequest("GET", "/buckets/view-ct/view/report", nil)
 		req.SetPathValue("name", "view-ct")
@@ -212,8 +211,7 @@ func (s *ViewTestSuite) TestHandleMeta() {
 
 	s.Run("stored Content-Type takes precedence over the extension guess", func() {
 		s.createBucket("meta-ct")
-		md := s2.Metadata{server.ContentTypeMetadataKey: "application/json"}
-		s.putObject("meta-ct", "report", []byte("{}"), s2.WithMetadata(md))
+		s.putObject("meta-ct", "report", []byte("{}"), s2.WithContentType("application/json"))
 
 		req := httptest.NewRequest("GET", "/buckets/meta-ct/meta/report", nil)
 		req.SetPathValue("name", "meta-ct")
@@ -242,14 +240,9 @@ func (s *ViewTestSuite) TestHandleMeta() {
 		s.False(hasMetadata)
 	})
 
-	s.Run("internal metadata keys are not exposed", func() {
+	s.Run("ETag and Content-Type are not listed as metadata", func() {
 		s.createBucket("meta-internal")
-		md := s2.Metadata{
-			"author":                      "test",
-			server.EtagMetadataKey:        "should-not-leak",
-			server.ContentTypeMetadataKey: "should-not-leak",
-		}
-		s.putObject("meta-internal", "doc.txt", []byte("x"), s2.WithMetadata(md))
+		s.putObject("meta-internal", "doc.txt", []byte("x"), s2.WithMetadata(s2.Metadata{"author": "test"}), s2.WithContentType("text/plain"))
 
 		req := httptest.NewRequest("GET", "/buckets/meta-internal/meta/doc.txt", nil)
 		req.SetPathValue("name", "meta-internal")
@@ -261,9 +254,7 @@ func (s *ViewTestSuite) TestHandleMeta() {
 		s.Require().NoError(json.Unmarshal(w.Body.Bytes(), &resp))
 		metadata, ok := resp["metadata"].(map[string]any)
 		s.Require().True(ok)
-		s.Equal("test", metadata["author"])
-		s.NotContains(metadata, server.EtagMetadataKey)
-		s.NotContains(metadata, server.ContentTypeMetadataKey)
+		s.Equal(map[string]any{"author": "test"}, metadata)
 	})
 
 	s.Run("nonexistent bucket", func() {
