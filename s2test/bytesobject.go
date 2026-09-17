@@ -12,9 +12,11 @@ import (
 // Unlike s2.NewObjectBytes, Open() can be called multiple times and metadata
 // can be set directly at construction.
 type BytesObject struct {
-	Name_     string
-	Data      []byte
-	Metadata_ s2.Metadata
+	Name_        string
+	Data         []byte
+	Metadata_    s2.Metadata
+	ContentType_ string
+	ETag_        string
 }
 
 var _ s2.Object = (*BytesObject)(nil)
@@ -26,6 +28,8 @@ func (o *BytesObject) Open() (io.ReadCloser, error) {
 func (o *BytesObject) Length() uint64          { return uint64(len(o.Data)) }
 func (o *BytesObject) LastModified() time.Time { return time.Now() }
 func (o *BytesObject) Metadata() s2.Metadata   { return o.Metadata_ }
+func (o *BytesObject) ContentType() string     { return o.ContentType_ }
+func (o *BytesObject) ETag() string            { return o.ETag_ }
 func (o *BytesObject) OpenRange(offset, length uint64) (io.ReadCloser, error) {
 	if offset+length > uint64(len(o.Data)) {
 		return nil, io.EOF

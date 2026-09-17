@@ -163,13 +163,15 @@ func (s *azblobStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListR
 				continue
 			}
 			out.Objects = append(out.Objects, &object{
-				client:    s.client,
-				container: s.container,
-				prefix:    s.prefix,
-				name:      s2.RelName(s.prefix, item.name),
-				length:    s2.MustUint64(item.contentLength),
-				modified:  item.lastModified,
-				metadata:  s2.Metadata(fromPtrMetadata(item.metadata)),
+				client:      s.client,
+				container:   s.container,
+				prefix:      s.prefix,
+				name:        s2.RelName(s.prefix, item.name),
+				length:      s2.MustUint64(item.contentLength),
+				modified:    item.lastModified,
+				metadata:    s2.Metadata(fromPtrMetadata(item.metadata)),
+				contentType: item.contentType,
+				etag:        blobETag(item.contentMD5, item.etag),
 			})
 		}
 
@@ -196,13 +198,15 @@ func (s *azblobStorage) Get(ctx context.Context, name string) (s2.Object, error)
 		return nil, mapNotExist(err, name)
 	}
 	return &object{
-		client:    s.client,
-		container: s.container,
-		prefix:    s.prefix,
-		name:      name,
-		length:    s2.MustUint64(props.contentLength),
-		modified:  props.lastModified,
-		metadata:  s2.Metadata(fromPtrMetadata(props.metadata)),
+		client:      s.client,
+		container:   s.container,
+		prefix:      s.prefix,
+		name:        name,
+		length:      s2.MustUint64(props.contentLength),
+		modified:    props.lastModified,
+		metadata:    s2.Metadata(fromPtrMetadata(props.metadata)),
+		contentType: props.contentType,
+		etag:        blobETag(props.contentMD5, props.etag),
 	}, nil
 }
 

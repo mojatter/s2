@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -641,6 +643,70 @@ func (s *ObjectsTestSuite) TestListObjectsWalksRealFS() {
 
 			s.Equal(tc.wantKeys, keys)
 			s.Equal(tc.wantPrefixes, prefixes)
+		})
+	}
+}
+
+// ListObjects must report the ETag HeadObject does, sidecar or not (#201, #209).
+func (s *ObjectsTestSuite) TestListObjectsETag() {
+	const emptyMD5 = `"d41d8cd98f00b204e9800998ecf8427e"`
+	testCases := []struct {
+		caseName string
+		sidecar  string
+		viaS2    bool
+		wantETag string
+	}{
+		{
+			caseName: "written through s2",
+			viaS2:    true,
+			wantETag: `"5d41402abc4b2a76b9719d911017c592"`,
+		},
+		{
+			caseName: "legacy flat sidecar",
+			sidecar:  `{"s2-etag":"\"legacy\"","s2-content-type":"text/plain"}`,
+			wantETag: `"legacy"`,
+		},
+		{
+			caseName: "placed from outside",
+		},
+	}
+	for i, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			bucket := fmt.Sprintf("etag%d", i)
+			s.createBucket(bucket)
+			if tc.viaS2 {
+				s.putObject(bucket, "a.txt", "hello")
+			} else {
+				dir := filepath.Join(s.server.Config.Root, bucket)
+				s.Require().NoError(os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello"), 0o600))
+				if tc.sidecar != "" {
+					s.Require().NoError(os.MkdirAll(filepath.Join(dir, ".meta"), 0o700))
+					s.Require().NoError(os.WriteFile(filepath.Join(dir, ".meta", "a.txt"), []byte(tc.sidecar), 0o600))
+				}
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/"+bucket, nil)
+			req.SetPathValue("bucket", bucket)
+			w := httptest.NewRecorder()
+			handleListObjects(s.server, w, req)
+			s.Require().Equal(http.StatusOK, w.Code, w.Body.String())
+			var page ListBucketResult
+			s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &page))
+			s.Require().Len(page.Contents, 1)
+			listed := page.Contents[0].ETag
+
+			req = httptest.NewRequest(http.MethodHead, "/"+bucket+"/a.txt", nil)
+			req.SetPathValue("bucket", bucket)
+			req.SetPathValue("key", "a.txt")
+			w = httptest.NewRecorder()
+			handleGetObject(s.server, w, req)
+			s.Require().Equal(http.StatusOK, w.Code)
+
+			s.Equal(w.Header().Get("ETag"), listed)
+			s.NotEqual(emptyMD5, listed)
+			if tc.wantETag != "" {
+				s.Equal(tc.wantETag, listed)
+			}
 		})
 	}
 }
@@ -1403,6 +1469,31 @@ func (s *ObjectsTestSuite) TestContentType() {
 
 		s.Equal(http.StatusOK, resp.StatusCode)
 		s.Contains(resp.Header.Get("Content-Type"), "text/html")
+	})
+
+	s.Run("CopyObject keeps a legacy sidecar's Content-Type over the guess", func() {
+		s.createBucket("ctls")
+		s.createBucket("ctld")
+		dir := filepath.Join(s.server.Config.Root, "ctls")
+		s.Require().NoError(os.WriteFile(filepath.Join(dir, "note.html"), []byte("hi"), 0o600))
+		s.Require().NoError(os.MkdirAll(filepath.Join(dir, ".meta"), 0o700))
+		sidecar := `{"s2-etag":"\"x\"","s2-content-type":"text/plain"}`
+		s.Require().NoError(os.WriteFile(filepath.Join(dir, ".meta", "note.html"), []byte(sidecar), 0o600))
+
+		copyReq := httptest.NewRequest("PUT", "/ctld/note.html", nil)
+		copyReq.SetPathValue("bucket", "ctld")
+		copyReq.SetPathValue("key", "note.html")
+		copyReq.Header.Set("x-amz-copy-source", "/ctls/note.html")
+		copyW := httptest.NewRecorder()
+		handlePutObject(s.server, copyW, copyReq)
+		s.Equal(http.StatusOK, copyW.Code)
+
+		for _, target := range []string{"/ctls/note.html", "/ctld/note.html"} {
+			resp := s.roundTrip(s.server, http.MethodGet, target)
+
+			s.Equal(http.StatusOK, resp.StatusCode, target)
+			s.Equal("text/plain", resp.Header.Get("Content-Type"), target)
+		}
 	})
 
 	s.Run("CopyObject records only the guess, never the default", func() {

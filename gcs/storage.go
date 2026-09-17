@@ -121,6 +121,8 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 				length:       s2.MustUint64(attrs.Size),
 				lastModified: attrs.Updated,
 				metadata:     s2.Metadata(attrs.Metadata),
+				contentType:  attrs.ContentType,
+				etag:         objectETag(attrs),
 			})
 		}
 
@@ -148,6 +150,8 @@ func (s *gcsStorage) Get(ctx context.Context, name string) (s2.Object, error) {
 		length:       s2.MustUint64(attrs.Size),
 		lastModified: attrs.Updated,
 		metadata:     s2.Metadata(attrs.Metadata),
+		contentType:  attrs.ContentType,
+		etag:         objectETag(attrs),
 	}, nil
 }
 

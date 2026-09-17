@@ -835,6 +835,25 @@ func (s *StorageTestSuite) TestMove() {
 	s.Equal("a", string(body))
 }
 
+// A moved file without a sidecar must not keep the destination's old one.
+func (s *StorageTestSuite) TestMoveDropsStaleSidecar() {
+	fsys := memfs.New()
+	strg := &storage{fsys: fsys}
+	ctx := context.Background()
+	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("dst.txt", []byte("old"), s2.WithContentType("text/plain"))))
+	_, err := fsys.WriteFile("src.txt", []byte("new"), fs.ModePerm)
+	s.Require().NoError(err)
+
+	s.Require().NoError(strg.Move(ctx, "src.txt", "dst.txt"))
+
+	got, err := strg.Get(ctx, "dst.txt")
+	s.Require().NoError(err)
+	s.Empty(got.ContentType())
+	s.Contains(got.ETag(), "-")
+	_, err = fs.Stat(fsys, metaPath("dst.txt"))
+	s.ErrorIs(err, fs.ErrNotExist)
+}
+
 func (s *StorageTestSuite) TestSignedURL() {
 	testCases := []struct {
 		caseName string
@@ -962,6 +981,36 @@ func benchGetObject(b *testing.B, typ s2.Type) {
 		_ = rc.Close()
 	}
 }
+
+func benchList(b *testing.B, typ s2.Type, readETag bool) {
+	ctx := context.Background()
+	strg := newBenchStorage(b, typ)
+	for i := range 1000 {
+		if err := strg.Put(ctx, s2.NewObjectBytes(fmt.Sprintf("obj-%04d.txt", i), []byte("a"))); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		res, err := strg.List(ctx, s2.ListOptions{Limit: 1000})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if readETag {
+			for _, obj := range res.Objects {
+				_ = obj.ETag()
+			}
+		}
+	}
+}
+
+// BenchmarkList lists a 1000-object page; the ETag variants add the lazy sidecar reads.
+func BenchmarkList(b *testing.B)          { benchList(b, s2.TypeOSFS, false) }
+func BenchmarkListETag(b *testing.B)      { benchList(b, s2.TypeOSFS, true) }
+func BenchmarkListMemFS(b *testing.B)     { benchList(b, s2.TypeMemFS, false) }
+func BenchmarkListETagMemFS(b *testing.B) { benchList(b, s2.TypeMemFS, true) }
 
 // BenchmarkPutObject covers the osfs backend with a 1 KiB payload and
 // rotating-key writes. s2's atomicWrite always fsyncs before rename;

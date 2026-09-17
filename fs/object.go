@@ -2,16 +2,18 @@ package fs
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"path"
+	"sync"
 	"time"
 
 	"github.com/mojatter/s2"
-	"github.com/mojatter/wfs"
 )
 
 type object struct {
@@ -19,7 +21,10 @@ type object struct {
 	name         string
 	length       uint64
 	lastModified time.Time
-	metadata     s2.Metadata
+
+	once    sync.Once
+	m       meta
+	loadErr error
 }
 
 func newObjectFileInfo(fsys fs.FS, name string, info fs.FileInfo) *object {
@@ -39,13 +44,12 @@ func (o *object) Open() (io.ReadCloser, error) {
 	return o.fsys.Open(o.name)
 }
 
-func (o *object) loadMetadata() error {
-	md, err := loadMetadata(o.fsys, o.name)
-	if err != nil {
-		return err
-	}
-	o.metadata = md
-	return nil
+// load reads the sidecar once; List results call it lazily, Get eagerly.
+func (o *object) load() error {
+	o.once.Do(func() {
+		o.m, o.loadErr = loadMeta(o.fsys, o.name)
+	})
+	return o.loadErr
 }
 
 func (o *object) Length() uint64 {
@@ -57,10 +61,25 @@ func (o *object) LastModified() time.Time {
 }
 
 func (o *object) Metadata() s2.Metadata {
-	if o.metadata == nil {
-		o.metadata = make(s2.Metadata)
+	_ = o.load()
+	if o.m.Metadata == nil {
+		o.m.Metadata = make(s2.Metadata)
 	}
-	return o.metadata
+	return o.m.Metadata
+}
+
+func (o *object) ContentType() string {
+	_ = o.load()
+	return o.m.ContentType
+}
+
+// ETag returns the stored MD5, or one derived from mtime and size when no sidecar holds it.
+func (o *object) ETag() string {
+	_ = o.load()
+	if o.m.ETag != "" {
+		return o.m.ETag
+	}
+	return fmt.Sprintf(`"%x-%x"`, o.lastModified.UnixNano(), o.length)
 }
 
 func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
@@ -101,49 +120,74 @@ func (l *limitReadCloser) Read(p []byte) (n int, err error) {
 	return l.Reader.Read(p)
 }
 
+// Keys s2-server stored in the flat sidecar format before v0.18.
+const (
+	legacyETagKey        = "s2-etag"
+	legacyContentTypeKey = "s2-content-type"
+)
+
+// meta is the JSON sidecar of an object.
+type meta struct {
+	ETag        string      `json:"etag,omitempty"`
+	ContentType string      `json:"content_type,omitempty"`
+	Metadata    s2.Metadata `json:"metadata"`
+}
 
 func metaPath(name string) string {
 	return path.Join(".meta", name)
 }
 
-func loadMetadata(fsys fs.FS, name string) (s2.Metadata, error) {
-	metaFile, err := fsys.Open(metaPath(name))
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("failed to open meta file: %w", err)
-	}
-	defer func() { _ = metaFile.Close() }()
-
-	var md s2.Metadata
-	if err := json.NewDecoder(metaFile).Decode(&md); err != nil {
-		return nil, fmt.Errorf("failed to decode meta file: %w", err)
-	}
-	return md, nil
+func quotedMD5(h hash.Hash) string {
+	return `"` + hex.EncodeToString(h.Sum(nil)) + `"`
 }
 
-func saveMetadata(fsys fs.FS, name string, md s2.Metadata) error {
-	metaName := metaPath(name)
-	if len(md) == 0 {
-		metaInfo, err := fs.Stat(fsys, metaName)
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil
-			}
-			return fmt.Errorf("failed to stat meta file: %w", err)
+func loadMeta(fsys fs.FS, name string) (meta, error) {
+	f, err := fsys.Open(metaPath(name))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return meta{}, nil
 		}
-		if metaInfo.IsDir() {
-			return fmt.Errorf("%w: %s", s2.ErrNotExist, metaName)
+		return meta{}, fmt.Errorf("failed to open meta file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return meta{}, fmt.Errorf("failed to read meta file: %w", err)
+	}
+	return parseMeta(data)
+}
+
+// parseMeta decodes a sidecar; one without a "metadata" object is the legacy flat map.
+func parseMeta(data []byte) (meta, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return meta{}, fmt.Errorf("failed to decode meta file: %w", err)
+	}
+	var m meta
+	if md, ok := raw["metadata"]; ok && bytes.HasPrefix(bytes.TrimSpace(md), []byte("{")) {
+		if err := json.Unmarshal(data, &m); err != nil {
+			return meta{}, fmt.Errorf("failed to decode meta file: %w", err)
 		}
-		if err := wfs.RemoveFile(fsys, metaName); err != nil {
-			return fmt.Errorf("failed to remove meta file: %w", err)
-		}
-		return nil
+		return m, nil
+	}
+	if err := json.Unmarshal(data, &m.Metadata); err != nil {
+		return meta{}, fmt.Errorf("failed to decode meta file: %w", err)
+	}
+	m.ETag = m.Metadata[legacyETagKey]
+	m.ContentType = m.Metadata[legacyContentTypeKey]
+	delete(m.Metadata, legacyETagKey)
+	delete(m.Metadata, legacyContentTypeKey)
+	return m, nil
+}
+
+func saveMeta(fsys fs.FS, name string, m meta) error {
+	if m.Metadata == nil {
+		m.Metadata = s2.Metadata{}
 	}
 	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(md); err != nil {
+	if err := json.NewEncoder(&buf).Encode(m); err != nil {
 		return fmt.Errorf("failed to encode meta file: %w", err)
 	}
-	return atomicWrite(fsys, metaName, &buf)
+	return atomicWrite(fsys, metaPath(name), &buf)
 }

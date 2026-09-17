@@ -211,6 +211,7 @@ func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult,
 			name:         key,
 			length:       s2.MustUint64(aws.ToInt64(c.Size)),
 			lastModified: aws.ToTime(c.LastModified),
+			etag:         aws.ToString(c.ETag),
 		})
 	}
 	if aws.ToBool(res.IsTruncated) {
@@ -251,6 +252,8 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 		length:       s2.MustUint64(aws.ToInt64(params.ContentLength)),
 		lastModified: aws.ToTime(params.LastModified),
 		metadata:     s2.Metadata(params.Metadata),
+		contentType:  aws.ToString(params.ContentType),
+		etag:         aws.ToString(params.ETag),
 	}, nil
 }
 
