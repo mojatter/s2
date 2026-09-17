@@ -30,7 +30,11 @@ type mockObject struct {
 	body         []byte
 	lastModified time.Time
 	metadata     map[string]string
+	contentType  string
 }
+
+// mockDefaultContentType is what S3 stores when a write sends no Content-Type.
+const mockDefaultContentType = "binary/octet-stream"
 
 type mockS3Client struct {
 	mu            sync.RWMutex
@@ -45,15 +49,23 @@ func newMockS3Client() *mockS3Client {
 }
 
 func (m *mockS3Client) put(bucket, key string, body []byte, metadata map[string]string) {
+	m.putWithContentType(bucket, key, body, metadata, "")
+}
+
+func (m *mockS3Client) putWithContentType(bucket, key string, body []byte, metadata map[string]string, contentType string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if contentType == "" {
+		contentType = mockDefaultContentType
+	}
 	m.objects[path.Join(bucket, key)] = &mockObject{
 		bucket:       bucket,
 		key:          key,
 		body:         body,
 		lastModified: time.Now(),
 		metadata:     metadata,
+		contentType:  contentType,
 	}
 }
 
@@ -182,6 +194,7 @@ func (m *mockS3Client) HeadObject(ctx context.Context, params *s3.HeadObjectInpu
 		LastModified:  aws.Time(obj.lastModified),
 		Metadata:      obj.metadata,
 		ETag:          aws.String(mockETag(obj.body)),
+		ContentType:   aws.String(obj.contentType),
 	}, nil
 }
 
@@ -190,7 +203,7 @@ func (m *mockS3Client) PutObject(ctx context.Context, params *s3.PutObjectInput,
 	if err != nil {
 		return nil, err
 	}
-	m.put(aws.ToString(params.Bucket), aws.ToString(params.Key), b, params.Metadata)
+	m.putWithContentType(aws.ToString(params.Bucket), aws.ToString(params.Key), b, params.Metadata, aws.ToString(params.ContentType))
 	return &s3.PutObjectOutput{}, nil
 }
 
@@ -255,12 +268,13 @@ func (m *mockS3Client) CopyObject(ctx context.Context, params *s3.CopyObjectInpu
 		return nil, &s3types.NoSuchKey{}
 	}
 
-	metadata := srcObj.metadata
+	// COPY keeps the source's metadata and Content-Type; REPLACE takes both from the request.
+	metadata, contentType := srcObj.metadata, srcObj.contentType
 	if params.MetadataDirective == s3types.MetadataDirectiveReplace {
-		metadata = params.Metadata
+		metadata, contentType = params.Metadata, aws.ToString(params.ContentType)
 	}
 
-	m.put(aws.ToString(params.Bucket), aws.ToString(params.Key), srcObj.body, metadata)
+	m.putWithContentType(aws.ToString(params.Bucket), aws.ToString(params.Key), srcObj.body, metadata, contentType)
 	return &s3.CopyObjectOutput{}, nil
 }
 
@@ -289,6 +303,27 @@ func (s *StorageTestSuite) testMockClient() (*mockS3Client, s2.Storage) {
 		bucket:        "mybucket",
 		prefix:        "",
 	}
+}
+
+// s2-server before v0.18 kept the Content-Type under a legacy metadata key.
+func (s *StorageTestSuite) TestLegacyMetadata() {
+	m, strg := s.testMockClient()
+	ctx := context.Background()
+	m.put("mybucket", "page.html", []byte("<p>"), map[string]string{"s2-etag": `"x"`, "s2-content-type": "text/html", "author": "uz"})
+
+	got, err := strg.Get(ctx, "page.html")
+	s.Require().NoError(err)
+	s.Equal("text/html", got.ContentType())
+	s.Equal(s2.Metadata{"author": "uz"}, got.Metadata())
+
+	s.Require().NoError(strg.PutMetadata(ctx, "page.html", s2.Metadata{"author": "s2"}))
+
+	got, err = strg.Get(ctx, "page.html")
+	s.Require().NoError(err)
+	s.Equal("text/html", got.ContentType())
+	s.Equal(s2.Metadata{"author": "s2"}, got.Metadata())
+	raw, _ := m.get("mybucket", "page.html")
+	s.Equal("text/html", raw.contentType, "moved to the object's own Content-Type")
 }
 
 func (s *StorageTestSuite) TestS2TestList() {

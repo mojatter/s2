@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -82,4 +83,29 @@ func (o *object) ContentType() string {
 
 func (o *object) ETag() string {
 	return o.etag
+}
+
+// Keys s2-server stored in provider user metadata before v0.18.
+const (
+	legacyETagKey        = "s2-etag"
+	legacyContentTypeKey = "s2-content-type"
+)
+
+// liftLegacy returns md without s2-server's legacy keys, and the Content-Type they held.
+func liftLegacy(md map[string]string) (s2.Metadata, string) {
+	if md == nil {
+		return nil, ""
+	}
+	out := make(s2.Metadata, len(md))
+	var contentType string
+	for k, v := range md {
+		switch strings.ToLower(k) {
+		case legacyContentTypeKey:
+			contentType = v
+		case legacyETagKey:
+		default:
+			out[k] = v
+		}
+	}
+	return out, contentType
 }

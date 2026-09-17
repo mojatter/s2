@@ -2,7 +2,10 @@ package azblob
 
 import (
 	"context"
+	"crypto/md5" // #nosec G501 -- Content-MD5 is MD5 by definition
+	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"strings"
 	"time"
@@ -44,7 +47,7 @@ type blobItem struct {
 type azblobClient interface {
 	getProperties(ctx context.Context, container, blob string) (blobProps, error)
 	downloadStream(ctx context.Context, container, blobName string, offset, count int64) (io.ReadCloser, error)
-	upload(ctx context.Context, container, blobName string, body io.Reader, metadata map[string]*string) error
+	upload(ctx context.Context, container, blobName string, body io.Reader, metadata map[string]*string, contentType string) error
 	deleteBlob(ctx context.Context, container, blobName string) error
 	setMetadata(ctx context.Context, container, blobName string, metadata map[string]*string) error
 	copyBlob(ctx context.Context, container, src, dst string) error
@@ -103,11 +106,33 @@ func (c *sdkClient) downloadStream(ctx context.Context, ctr, blobName string, of
 	return resp.Body, nil
 }
 
-func (c *sdkClient) upload(ctx context.Context, ctr, blobName string, body io.Reader, metadata map[string]*string) error {
-	_, err := c.client.UploadStream(ctx, ctr, blobName, body, &azsdk.UploadStreamOptions{
-		Metadata: metadata,
+func (c *sdkClient) upload(ctx context.Context, ctr, blobName string, body io.Reader, metadata map[string]*string, contentType string) error {
+	headers := &blob.HTTPHeaders{}
+	if contentType != "" {
+		headers.BlobContentType = &contentType
+	}
+	r := &md5Reader{r: body, h: md5.New(), headers: headers} // #nosec G401 -- Content-MD5 is MD5 by definition
+	_, err := c.client.UploadStream(ctx, ctr, blobName, r, &azsdk.UploadStreamOptions{
+		Metadata:    metadata,
+		HTTPHeaders: headers,
 	})
 	return err
+}
+
+// md5Reader records the body's MD5 in headers at EOF; UploadStream reads headers only when it commits, after EOF.
+type md5Reader struct {
+	r       io.Reader
+	h       hash.Hash
+	headers *blob.HTTPHeaders
+}
+
+func (m *md5Reader) Read(p []byte) (int, error) {
+	n, err := m.r.Read(p)
+	m.h.Write(p[:n])
+	if errors.Is(err, io.EOF) {
+		m.headers.BlobContentMD5 = m.h.Sum(nil)
+	}
+	return n, err
 }
 
 func (c *sdkClient) deleteBlob(ctx context.Context, ctr, blobName string) error {
