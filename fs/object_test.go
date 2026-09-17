@@ -175,6 +175,12 @@ func (s *ObjectTestSuite) TestMetadata() {
 			wantETag:        `"abc"`,
 		},
 		{
+			caseName:     "legacy flat map with the stored default Content-Type",
+			sidecar:      `{"s2-etag":"\"abc\"","s2-content-type":"binary/octet-stream"}`,
+			wantMetadata: s2.Metadata{},
+			wantETag:     `"abc"`,
+		},
+		{
 			caseName:     "unreadable sidecar",
 			sidecar:      `{`,
 			wantMetadata: s2.Metadata{},
