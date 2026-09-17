@@ -208,8 +208,9 @@ func (s *gcsStorage) PutMetadata(ctx context.Context, name string, metadata s2.M
 		return mapNotExist(err, name)
 	}
 	uattrs := storage.ObjectAttrsToUpdate{Metadata: metadata}
-	if _, legacy := liftLegacy(attrs.Metadata); legacy != "" {
-		uattrs.ContentType = legacy
+	if _, contentType, legacy := liftLegacy(attrs.Metadata); legacy {
+		// An empty type clears the sniffed one the SDK stored before v0.18.
+		uattrs.ContentType = contentType
 	}
 	_, err = obj.update(ctx, uattrs)
 	return mapNotExist(err, name)

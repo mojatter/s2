@@ -305,25 +305,52 @@ func (s *StorageTestSuite) testMockClient() (*mockS3Client, s2.Storage) {
 	}
 }
 
-// s2-server before v0.18 kept the Content-Type under a legacy metadata key.
+// Keys a pre-v0.18 s2-server wrote are lifted; a client's own s2-* keys stay user metadata.
 func (s *StorageTestSuite) TestLegacyMetadata() {
-	m, strg := s.testMockClient()
-	ctx := context.Background()
-	m.put("mybucket", "page.html", []byte("<p>"), map[string]string{"s2-etag": `"x"`, "s2-content-type": "text/html", "author": "uz"})
+	testCases := []struct {
+		caseName        string
+		metadata        map[string]string
+		wantContentType string
+		wantMetadata    s2.Metadata
+	}{
+		{
+			caseName:        "pre-v0.18 write",
+			metadata:        map[string]string{"s2-etag": `"x"`, "s2-content-type": "text/html", "author": "uz"},
+			wantContentType: "text/html",
+			wantMetadata:    s2.Metadata{"author": "uz"},
+		},
+		{
+			caseName:        "pre-v0.18 write without a client Content-Type",
+			metadata:        map[string]string{"s2-etag": `"x"`, "s2-content-type": "binary/octet-stream"},
+			wantContentType: mockDefaultContentType,
+			wantMetadata:    s2.Metadata{},
+		},
+		{
+			caseName:        "client metadata without s2-etag",
+			metadata:        map[string]string{"s2-content-type": "text/html"},
+			wantContentType: mockDefaultContentType,
+			wantMetadata:    s2.Metadata{"s2-content-type": "text/html"},
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m, strg := s.testMockClient()
+			ctx := context.Background()
+			m.put("mybucket", "page.html", []byte("<p>"), tc.metadata)
 
-	got, err := strg.Get(ctx, "page.html")
-	s.Require().NoError(err)
-	s.Equal("text/html", got.ContentType())
-	s.Equal(s2.Metadata{"author": "uz"}, got.Metadata())
+			got, err := strg.Get(ctx, "page.html")
+			s.Require().NoError(err)
+			s.Equal(tc.wantContentType, got.ContentType())
+			s.Equal(tc.wantMetadata, got.Metadata())
 
-	s.Require().NoError(strg.PutMetadata(ctx, "page.html", s2.Metadata{"author": "s2"}))
+			s.Require().NoError(strg.PutMetadata(ctx, "page.html", got.Metadata()))
 
-	got, err = strg.Get(ctx, "page.html")
-	s.Require().NoError(err)
-	s.Equal("text/html", got.ContentType())
-	s.Equal(s2.Metadata{"author": "s2"}, got.Metadata())
-	raw, _ := m.get("mybucket", "page.html")
-	s.Equal("text/html", raw.contentType, "moved to the object's own Content-Type")
+			got, err = strg.Get(ctx, "page.html")
+			s.Require().NoError(err)
+			s.Equal(tc.wantContentType, got.ContentType())
+			s.Equal(tc.wantMetadata, got.Metadata())
+		})
+	}
 }
 
 func (s *StorageTestSuite) TestS2TestList() {
