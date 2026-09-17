@@ -22,7 +22,7 @@ type gcsObject interface {
 	attrs(ctx context.Context) (*storage.ObjectAttrs, error)
 	newReader(ctx context.Context) (io.ReadCloser, error)
 	newRangeReader(ctx context.Context, offset, length int64) (io.ReadCloser, error)
-	newWriter(ctx context.Context, metadata map[string]string) io.WriteCloser
+	newWriter(ctx context.Context, metadata map[string]string, contentType string) io.WriteCloser
 	update(ctx context.Context, uattrs storage.ObjectAttrsToUpdate) (*storage.ObjectAttrs, error)
 	copyTo(ctx context.Context, dst gcsObject) error
 	delete(ctx context.Context) error
@@ -83,11 +83,12 @@ func (o *sdkObject) newRangeReader(ctx context.Context, offset, length int64) (i
 	return o.obj.NewRangeReader(ctx, offset, length)
 }
 
-func (o *sdkObject) newWriter(ctx context.Context, metadata map[string]string) io.WriteCloser {
+func (o *sdkObject) newWriter(ctx context.Context, metadata map[string]string, contentType string) io.WriteCloser {
 	w := o.obj.NewWriter(ctx)
 	if len(metadata) > 0 {
 		w.Metadata = metadata
 	}
+	w.ContentType = contentType
 	return w
 }
 

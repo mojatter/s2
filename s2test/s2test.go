@@ -1,7 +1,10 @@
 package s2test
 
 import (
+	"bytes"
 	"context"
+	"crypto/md5" // #nosec G501 -- S3-compatible ETag
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -250,7 +253,7 @@ func TestStorageGetPut(ctx context.Context, strg s2.Storage) error {
 
 	name := "s2test-getput.txt"
 	body := []byte("s2test content")
-	obj := s2.NewObjectBytes(name, body)
+	obj := s2.NewObjectBytes(name, body, s2.WithContentType("text/plain"))
 	obj.Metadata().Set("testkey", "test-val")
 
 	if err := strg.Put(ctx, obj); err != nil {
@@ -288,10 +291,14 @@ func TestStorageGetPut(ctx context.Context, strg s2.Storage) error {
 		errorf("metadata %q = %q, want %q", "testkey", v, "test-val")
 	}
 
-	// Listed objects must report the same ETag as Get.
+	if ct := got.ContentType(); ct != "text/plain" {
+		errorf("Get(%q).ContentType() = %q, want %q", name, ct, "text/plain")
+	}
+
+	// The ETag is the body's MD5, and listed objects report the same one.
 	etag := got.ETag()
-	if etag == "" {
-		errorf("Get(%q).ETag() is empty", name)
+	if want := quotedMD5(body); etag != want {
+		errorf("Get(%q).ETag() = %q, want %q", name, etag, want)
 	}
 	res, err := strg.List(ctx, s2.ListOptions{Recursive: true})
 	if err != nil {
@@ -309,6 +316,23 @@ func TestStorageGetPut(ctx context.Context, strg s2.Storage) error {
 	}
 	if !listed {
 		errorf("List(%q) did not return the object", name)
+	}
+
+	// A body larger than one upload block must still get its MD5 as the ETag.
+	large := "s2test-getput-large.bin"
+	largeBody := bytes.Repeat([]byte("s2test"), (2<<20)/6+1)
+	if err := strg.Put(ctx, s2.NewObjectBytes(large, largeBody)); err != nil {
+		return fmt.Errorf("Put(%q) failed: %w", large, err)
+	}
+	gotLarge, err := strg.Get(ctx, large)
+	if err != nil {
+		return fmt.Errorf("Get(%q) failed: %w", large, err)
+	}
+	if etag, want := gotLarge.ETag(), quotedMD5(largeBody); etag != want {
+		errorf("Get(%q).ETag() = %q, want %q", large, etag, want)
+	}
+	if err := strg.Delete(ctx, large); err != nil {
+		return fmt.Errorf("Delete(%q) failed: %w", large, err)
 	}
 
 	if len(errs) > 0 {
@@ -519,7 +543,7 @@ func TestStorageDelete(ctx context.Context, strg s2.Storage) error {
 func TestStoragePutMetadata(ctx context.Context, strg s2.Storage) error {
 	name := "s2test-putmeta.txt"
 	body := []byte("metadata test")
-	if err := strg.Put(ctx, s2.NewObjectBytes(name, body)); err != nil {
+	if err := strg.Put(ctx, s2.NewObjectBytes(name, body, s2.WithContentType("text/csv"))); err != nil {
 		return fmt.Errorf("Put(%q) failed: %w", name, err)
 	}
 
@@ -554,5 +578,18 @@ func TestStoragePutMetadata(ctx context.Context, strg s2.Storage) error {
 		return fmt.Errorf("metadata 'version' = %q (ok=%v), want '1'", v, ok)
 	}
 
+	// Only the user metadata is replaced.
+	if ct := got.ContentType(); ct != "text/csv" {
+		return fmt.Errorf("ContentType() after PutMetadata = %q, want %q", ct, "text/csv")
+	}
+	if etag, want := got.ETag(), quotedMD5(body); etag != want {
+		return fmt.Errorf("ETag() after PutMetadata = %q, want %q", etag, want)
+	}
+
 	return nil
+}
+
+func quotedMD5(body []byte) string {
+	sum := md5.Sum(body) // #nosec G401 -- S3-compatible ETag
+	return `"` + hex.EncodeToString(sum[:]) + `"`
 }

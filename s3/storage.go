@@ -244,6 +244,10 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 		}
 		return nil, fmt.Errorf("failed to get object: %w", err)
 	}
+	md, contentType := liftLegacy(params.Metadata)
+	if contentType == "" {
+		contentType = aws.ToString(params.ContentType)
+	}
 	return &object{
 		client:       s.client,
 		bucket:       s.bucket,
@@ -251,8 +255,8 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 		name:         name,
 		length:       s2.MustUint64(aws.ToInt64(params.ContentLength)),
 		lastModified: aws.ToTime(params.LastModified),
-		metadata:     s2.Metadata(params.Metadata),
-		contentType:  aws.ToString(params.ContentType),
+		metadata:     md,
+		contentType:  contentType,
 		etag:         aws.ToString(params.ETag),
 	}, nil
 }
@@ -355,26 +359,45 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 		body = bytes.NewReader(b)
 	}
 
-	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+	input := &s3.PutObjectInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(path.Join(s.prefix, obj.Name())),
 		Body:          body,
 		ContentLength: aws.Int64(s2.MustInt64(obj.Length())),
 		Metadata:      obj.Metadata(),
-	})
+	}
+	if ct := obj.ContentType(); ct != "" {
+		input.ContentType = aws.String(ct)
+	}
+	_, err = s.client.PutObject(ctx, input)
 	return err
 }
 
+// PutMetadata copies the object onto itself, resending its Content-Type, which a REPLACE copy would otherwise reset.
+// A Content-Type kept under the legacy s2-content-type key moves to the object's own.
+// The HeadObject and CopyObject calls are not atomic: a Put between them loses its Content-Type.
 func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Metadata) error {
 	key := path.Join(s.prefix, name)
-	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
+	head, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return mapNotExist(err, name)
+	}
+	contentType := head.ContentType
+	if _, legacy := liftLegacy(head.Metadata); legacy != "" {
+		contentType = aws.String(legacy)
+	}
+	_, err = s.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:            aws.String(s.bucket),
 		Key:               aws.String(key),
 		CopySource:        aws.String(path.Join(s.bucket, key)),
 		Metadata:          metadata,
 		MetadataDirective: s3types.MetadataDirectiveReplace,
+		ContentType:       contentType,
 	})
-	return err
+	return mapNotExist(err, name)
 }
 
 func (s *storage) Copy(ctx context.Context, src, dst string) error {

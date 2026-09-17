@@ -90,3 +90,37 @@ func quoteETag(etag string) string {
 	}
 	return `"` + etag + `"`
 }
+
+// Keys s2-server stored in provider user metadata before v0.18.
+const (
+	legacyETagKey        = "s2-etag"
+	legacyContentTypeKey = "s2-content-type"
+)
+
+// liftLegacy returns md without s2-server's legacy keys, and the Content-Type they held.
+func liftLegacy(md map[string]string) (s2.Metadata, string) {
+	if md == nil {
+		return nil, ""
+	}
+	out := make(s2.Metadata, len(md))
+	var contentType string
+	for k, v := range md {
+		switch strings.ToLower(k) {
+		case legacyContentTypeKey:
+			contentType = v
+		case legacyETagKey:
+		default:
+			out[k] = v
+		}
+	}
+	return out, contentType
+}
+
+// objectMetadata returns attrs' user metadata and Content-Type, preferring a legacy s2-content-type.
+func objectMetadata(attrs *storage.ObjectAttrs) (s2.Metadata, string) {
+	md, contentType := liftLegacy(attrs.Metadata)
+	if contentType == "" {
+		contentType = attrs.ContentType
+	}
+	return md, contentType
+}

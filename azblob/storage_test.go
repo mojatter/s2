@@ -3,6 +3,7 @@ package azblob
 import (
 	"bytes"
 	"context"
+	"crypto/md5" // #nosec G501 -- mirrors sdkClient's Content-MD5
 	"errors"
 	"fmt"
 	"io"
@@ -22,12 +23,14 @@ import (
 // --- mock ---
 
 type mockBlob struct {
-	container string
-	key       string
-	body      []byte
-	modified  time.Time
-	metadata  map[string]*string
-	etag      string
+	container   string
+	key         string
+	body        []byte
+	modified    time.Time
+	metadata    map[string]*string
+	etag        string
+	contentType string
+	contentMD5  []byte
 }
 
 type mockAzblobClient struct {
@@ -95,6 +98,8 @@ func (m *mockAzblobClient) getProperties(_ context.Context, container, blobName 
 		lastModified:  b.modified,
 		metadata:      b.metadata,
 		etag:          b.etag,
+		contentType:   b.contentType,
+		contentMD5:    b.contentMD5,
 	}, nil
 }
 
@@ -114,12 +119,15 @@ func (m *mockAzblobClient) downloadStream(_ context.Context, container, blobName
 	return io.NopCloser(bytes.NewReader(body)), nil
 }
 
-func (m *mockAzblobClient) upload(_ context.Context, container, blobName string, body io.Reader, metadata map[string]*string) error {
+func (m *mockAzblobClient) upload(_ context.Context, container, blobName string, body io.Reader, metadata map[string]*string, contentType string) error {
 	data, err := io.ReadAll(body)
 	if err != nil {
 		return err
 	}
 	m.put(container, blobName, data, metadata)
+	b, _ := m.get(container, blobName)
+	sum := md5.Sum(data) // #nosec G401 -- mirrors sdkClient's Content-MD5
+	b.contentType, b.contentMD5 = contentType, sum[:]
 	return nil
 }
 
@@ -161,6 +169,8 @@ func (m *mockAzblobClient) copyBlob(_ context.Context, container, src, dst strin
 		}
 	}
 	m.put(container, dst, body, meta)
+	d, _ := m.get(container, dst)
+	d.contentType, d.contentMD5 = b.contentType, b.contentMD5
 	return nil
 }
 
@@ -235,6 +245,8 @@ func (m *mockAzblobClient) doList(ctr, prefix, delimiter string, maxResults int3
 			lastModified:  b.modified,
 			metadata:      b.metadata,
 			etag:          b.etag,
+			contentType:   b.contentType,
+			contentMD5:    b.contentMD5,
 		})
 	}
 	return result, nil

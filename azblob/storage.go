@@ -238,7 +238,7 @@ func (s *azblobStorage) Put(ctx context.Context, obj s2.Object) error {
 	}
 	defer func() { _ = rc.Close() }()
 
-	return s.client.upload(ctx, s.container, s.key(obj.Name()), rc, toPtrMetadata(obj.Metadata()))
+	return s.client.upload(ctx, s.container, s.key(obj.Name()), rc, toPtrMetadata(obj.Metadata()), obj.ContentType())
 }
 
 func (s *azblobStorage) PutMetadata(ctx context.Context, name string, metadata s2.Metadata) error {

@@ -26,11 +26,12 @@ import (
 // --- mock implementations ---
 
 type mockObject struct {
-	bucket   string
-	key      string
-	body     []byte
-	updated  time.Time
-	metadata map[string]string
+	bucket      string
+	key         string
+	body        []byte
+	updated     time.Time
+	metadata    map[string]string
+	contentType string
 }
 
 type mockGCSClient struct {
@@ -143,11 +144,12 @@ func (b *mockBucket) objects(ctx context.Context, q *storage.Query) gcsObjectIte
 			attrs *storage.ObjectAttrs
 		}{
 			attrs: &storage.ObjectAttrs{
-				Name:     obj.key,
-				Size:     int64(len(obj.body)),
-				Updated:  obj.updated,
-				Metadata: obj.metadata,
-				MD5:      mockMD5(obj.body),
+				Name:        obj.key,
+				Size:        int64(len(obj.body)),
+				Updated:     obj.updated,
+				Metadata:    obj.metadata,
+				MD5:         mockMD5(obj.body),
+				ContentType: obj.contentType,
 			},
 		})
 	}
@@ -171,11 +173,12 @@ func (o *mockGCSObject) attrs(_ context.Context) (*storage.ObjectAttrs, error) {
 		return nil, storage.ErrObjectNotExist
 	}
 	return &storage.ObjectAttrs{
-		Name:     obj.key,
-		Size:     int64(len(obj.body)),
-		Updated:  obj.updated,
-		Metadata: obj.metadata,
-		MD5:      mockMD5(obj.body),
+		Name:        obj.key,
+		Size:        int64(len(obj.body)),
+		Updated:     obj.updated,
+		Metadata:    obj.metadata,
+		MD5:         mockMD5(obj.body),
+		ContentType: obj.contentType,
 	}, nil
 }
 
@@ -200,8 +203,8 @@ func (o *mockGCSObject) newRangeReader(_ context.Context, offset, length int64) 
 	return io.NopCloser(bytes.NewReader(body[offset:end])), nil
 }
 
-func (o *mockGCSObject) newWriter(_ context.Context, metadata map[string]string) io.WriteCloser {
-	return &mockWriter{client: o.client, bucket: o.bucket, key: o.key, metadata: metadata}
+func (o *mockGCSObject) newWriter(_ context.Context, metadata map[string]string, contentType string) io.WriteCloser {
+	return &mockWriter{client: o.client, bucket: o.bucket, key: o.key, metadata: metadata, contentType: contentType}
 }
 
 func (o *mockGCSObject) update(_ context.Context, uattrs storage.ObjectAttrsToUpdate) (*storage.ObjectAttrs, error) {
@@ -212,12 +215,16 @@ func (o *mockGCSObject) update(_ context.Context, uattrs storage.ObjectAttrsToUp
 	if uattrs.Metadata != nil {
 		obj.metadata = uattrs.Metadata
 	}
+	if ct, ok := uattrs.ContentType.(string); ok {
+		obj.contentType = ct
+	}
 	return &storage.ObjectAttrs{
-		Name:     obj.key,
-		Size:     int64(len(obj.body)),
-		Updated:  obj.updated,
-		Metadata: obj.metadata,
-		MD5:      mockMD5(obj.body),
+		Name:        obj.key,
+		Size:        int64(len(obj.body)),
+		Updated:     obj.updated,
+		Metadata:    obj.metadata,
+		MD5:         mockMD5(obj.body),
+		ContentType: obj.contentType,
 	}, nil
 }
 
@@ -240,6 +247,9 @@ func (o *mockGCSObject) copyTo(_ context.Context, dst gcsObject) error {
 		}
 	}
 	o.client.put(dstObj.bucket, dstObj.key, body, meta)
+	if obj, ok := o.client.get(dstObj.bucket, dstObj.key); ok {
+		obj.contentType = src.contentType
+	}
 	return nil
 }
 
@@ -253,11 +263,12 @@ func (o *mockGCSObject) delete(_ context.Context) error {
 }
 
 type mockWriter struct {
-	client   *mockGCSClient
-	bucket   string
-	key      string
-	buf      bytes.Buffer
-	metadata map[string]string
+	client      *mockGCSClient
+	bucket      string
+	key         string
+	buf         bytes.Buffer
+	metadata    map[string]string
+	contentType string
 }
 
 func (w *mockWriter) Write(p []byte) (int, error) {
@@ -266,6 +277,9 @@ func (w *mockWriter) Write(p []byte) (int, error) {
 
 func (w *mockWriter) Close() error {
 	w.client.put(w.bucket, w.key, w.buf.Bytes(), w.metadata)
+	if obj, ok := w.client.get(w.bucket, w.key); ok {
+		obj.contentType = w.contentType
+	}
 	return nil
 }
 
@@ -339,6 +353,36 @@ type StorageTestSuite struct {
 
 func TestStorageTestSuite(t *testing.T) {
 	suite.Run(t, &StorageTestSuite{})
+}
+
+// s2-server before v0.18 kept the Content-Type under a legacy metadata key.
+func (s *StorageTestSuite) TestLegacyMetadata() {
+	m, strg := s.testMockStorage()
+	ctx := context.Background()
+	m.put("mybucket", "page.html", []byte("<p>"), map[string]string{"s2-etag": `"x"`, "s2-content-type": "text/html", "author": "uz"})
+
+	got, err := strg.Get(ctx, "page.html")
+	s.Require().NoError(err)
+	s.Equal("text/html", got.ContentType())
+	s.Equal(s2.Metadata{"author": "uz"}, got.Metadata())
+
+	res, err := strg.List(ctx, s2.ListOptions{})
+	s.Require().NoError(err)
+	for _, obj := range res.Objects {
+		if obj.Name() == "page.html" {
+			s.Equal("text/html", obj.ContentType())
+			s.Equal(s2.Metadata{"author": "uz"}, obj.Metadata())
+		}
+	}
+
+	s.Require().NoError(strg.PutMetadata(ctx, "page.html", s2.Metadata{"author": "s2"}))
+
+	got, err = strg.Get(ctx, "page.html")
+	s.Require().NoError(err)
+	s.Equal("text/html", got.ContentType())
+	s.Equal(s2.Metadata{"author": "s2"}, got.Metadata())
+	raw, _ := m.get("mybucket", "page.html")
+	s.Equal("text/html", raw.contentType, "moved to the object's own Content-Type")
 }
 
 func (s *StorageTestSuite) testMockStorage() (*mockGCSClient, s2.Storage) {

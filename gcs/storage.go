@@ -113,6 +113,7 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 		if attrs.Prefix != "" {
 			out.CommonPrefixes = append(out.CommonPrefixes, s2.RelName(s.prefix, attrs.Prefix))
 		} else if name := s2.RelName(s.prefix, attrs.Name); q.StartOffset == "" || name != opts.StartAfter {
+			md, contentType := objectMetadata(attrs)
 			out.Objects = append(out.Objects, &object{
 				client:       s.client,
 				bucket:       s.bucket,
@@ -120,8 +121,8 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 				name:         name,
 				length:       s2.MustUint64(attrs.Size),
 				lastModified: attrs.Updated,
-				metadata:     s2.Metadata(attrs.Metadata),
-				contentType:  attrs.ContentType,
+				metadata:     md,
+				contentType:  contentType,
 				etag:         objectETag(attrs),
 			})
 		}
@@ -142,6 +143,7 @@ func (s *gcsStorage) Get(ctx context.Context, name string) (s2.Object, error) {
 	if err != nil {
 		return nil, mapNotExist(err, name)
 	}
+	md, contentType := objectMetadata(attrs)
 	return &object{
 		client:       s.client,
 		bucket:       s.bucket,
@@ -149,8 +151,8 @@ func (s *gcsStorage) Get(ctx context.Context, name string) (s2.Object, error) {
 		name:         name,
 		length:       s2.MustUint64(attrs.Size),
 		lastModified: attrs.Updated,
-		metadata:     s2.Metadata(attrs.Metadata),
-		contentType:  attrs.ContentType,
+		metadata:     md,
+		contentType:  contentType,
 		etag:         objectETag(attrs),
 	}, nil
 }
@@ -189,7 +191,7 @@ func (s *gcsStorage) Put(ctx context.Context, obj s2.Object) error {
 	}
 	defer func() { _ = rc.Close() }()
 
-	w := s.client.bucket(s.bucket).object(s.key(obj.Name())).newWriter(ctx, obj.Metadata())
+	w := s.client.bucket(s.bucket).object(s.key(obj.Name())).newWriter(ctx, obj.Metadata(), obj.ContentType())
 
 	if _, err := io.Copy(w, rc); err != nil {
 		_ = w.Close()
@@ -198,12 +200,19 @@ func (s *gcsStorage) Put(ctx context.Context, obj s2.Object) error {
 	return w.Close()
 }
 
+// PutMetadata replaces the user metadata; a Content-Type under the legacy s2-content-type key moves to the object's own.
 func (s *gcsStorage) PutMetadata(ctx context.Context, name string, metadata s2.Metadata) error {
 	obj := s.client.bucket(s.bucket).object(s.key(name))
-	_, err := obj.update(ctx, storage.ObjectAttrsToUpdate{
-		Metadata: metadata,
-	})
-	return err
+	attrs, err := obj.attrs(ctx)
+	if err != nil {
+		return mapNotExist(err, name)
+	}
+	uattrs := storage.ObjectAttrsToUpdate{Metadata: metadata}
+	if _, legacy := liftLegacy(attrs.Metadata); legacy != "" {
+		uattrs.ContentType = legacy
+	}
+	_, err = obj.update(ctx, uattrs)
+	return mapNotExist(err, name)
 }
 
 func (s *gcsStorage) Copy(ctx context.Context, src, dst string) error {
