@@ -5,7 +5,18 @@ import (
 	"io"
 
 	"cloud.google.com/go/storage"
+	storagev1 "google.golang.org/api/storage/v1"
 )
+
+// objectPatch is one Objects.Patch: metadata keys to set, keys to delete, the Content-Type to set or clear, and what the object must still be.
+type objectPatch struct {
+	metadata         map[string]string
+	deleteKeys       []string
+	contentType      string
+	clearContentType bool
+	generation       int64
+	metageneration   int64
+}
 
 // gcsClient abstracts the GCS SDK so that tests can swap in a mock.
 type gcsClient interface {
@@ -23,7 +34,7 @@ type gcsObject interface {
 	newReader(ctx context.Context) (io.ReadCloser, error)
 	newRangeReader(ctx context.Context, offset, length int64) (io.ReadCloser, error)
 	newWriter(ctx context.Context, metadata map[string]string, contentType string) io.WriteCloser
-	update(ctx context.Context, uattrs storage.ObjectAttrsToUpdate) (*storage.ObjectAttrs, error)
+	patch(ctx context.Context, p objectPatch) error
 	copyTo(ctx context.Context, dst gcsObject) error
 	delete(ctx context.Context) error
 }
@@ -45,18 +56,22 @@ type gcsObjectIterator interface {
 
 type sdkClient struct {
 	c *storage.Client
+	// svc is the JSON API client; only it can delete a single metadata key.
+	svc *storagev1.Service
 }
 
 func (c *sdkClient) bucket(name string) gcsBucket {
-	return &sdkBucket{b: c.c.Bucket(name)}
+	return &sdkBucket{b: c.c.Bucket(name), svc: c.svc, name: name}
 }
 
 type sdkBucket struct {
-	b *storage.BucketHandle
+	b    *storage.BucketHandle
+	svc  *storagev1.Service
+	name string
 }
 
 func (b *sdkBucket) object(name string) gcsObject {
-	return &sdkObject{obj: b.b.Object(name)}
+	return &sdkObject{obj: b.b.Object(name), svc: b.svc, bucket: b.name, key: name}
 }
 
 func (b *sdkBucket) objects(ctx context.Context, q *storage.Query) gcsObjectIterator {
@@ -68,7 +83,10 @@ func (b *sdkBucket) signedURL(name string, opts *storage.SignedURLOptions) (stri
 }
 
 type sdkObject struct {
-	obj *storage.ObjectHandle
+	obj    *storage.ObjectHandle
+	svc    *storagev1.Service
+	bucket string
+	key    string
 }
 
 func (o *sdkObject) attrs(ctx context.Context) (*storage.ObjectAttrs, error) {
@@ -94,8 +112,34 @@ func (o *sdkObject) newWriter(ctx context.Context, metadata map[string]string, c
 	return w
 }
 
-func (o *sdkObject) update(ctx context.Context, uattrs storage.ObjectAttrsToUpdate) (*storage.ObjectAttrs, error) {
-	return o.obj.Update(ctx, uattrs)
+// patchObject renders p as a request body. NullFields carries the per-key deletes that ObjectAttrsToUpdate cannot express.
+func patchObject(p objectPatch) *storagev1.Object {
+	obj := &storagev1.Object{Metadata: p.metadata, ContentType: p.contentType}
+	for _, k := range p.deleteKeys {
+		obj.NullFields = append(obj.NullFields, "Metadata."+k)
+	}
+	if len(p.metadata) == 0 {
+		// An empty map is dropped from the request body unless it is forced.
+		obj.ForceSendFields = append(obj.ForceSendFields, "Metadata")
+	}
+	if p.clearContentType {
+		obj.NullFields = append(obj.NullFields, "ContentType")
+	}
+	return obj
+}
+
+// patch applies p in one request, under whichever preconditions the caller could read.
+func (o *sdkObject) patch(ctx context.Context, p objectPatch) error {
+	call := o.svc.Objects.Patch(o.bucket, o.key, patchObject(p)).Context(ctx)
+	// A zero generation would read as "the object must not exist"; an endpoint that omits it gets no precondition.
+	if p.generation != 0 {
+		call = call.IfGenerationMatch(p.generation)
+	}
+	if p.metageneration != 0 {
+		call = call.IfMetagenerationMatch(p.metageneration)
+	}
+	_, err := call.Do()
+	return err
 }
 
 func (o *sdkObject) copyTo(ctx context.Context, dst gcsObject) error {

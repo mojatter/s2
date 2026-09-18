@@ -5,13 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
+	"os"
 	"path"
 	"strings"
 	"time"
 
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
+	storagev1 "google.golang.org/api/storage/v1"
 
 	"github.com/mojatter/s2"
 )
@@ -49,11 +54,22 @@ func NewStorage(ctx context.Context, cfg s2.Config) (s2.Storage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gcs: failed to create client: %w", err)
 	}
+	// The JSON API client shares the credentials; PutMetadata needs its per-key metadata deletes.
+	jsonOpts, err := jsonAPIOptions(opts)
+	if err != nil {
+		_ = client.Close()
+		return nil, err
+	}
+	svc, err := storagev1.NewService(ctx, jsonOpts...)
+	if err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("gcs: failed to create JSON API client: %w", err)
+	}
 
 	bucket, prefix := s2.ParseRoot(cfg.Root)
 
 	return &gcsStorage{
-		client: &sdkClient{c: client},
+		client: &sdkClient{c: client, svc: svc},
 		bucket: bucket,
 		prefix: prefix,
 	}, nil
@@ -201,19 +217,36 @@ func (s *gcsStorage) Put(ctx context.Context, obj s2.Object) error {
 }
 
 // PutMetadata replaces the user metadata; a Content-Type under the legacy s2-content-type key moves to the object's own.
+// The patch answers the provider's 412 when the object changed between the read and the write, leaving it untouched.
 func (s *gcsStorage) PutMetadata(ctx context.Context, name string, metadata s2.Metadata) error {
 	obj := s.client.bucket(s.bucket).object(s.key(name))
 	attrs, err := obj.attrs(ctx)
 	if err != nil {
 		return mapNotExist(err, name)
 	}
-	uattrs := storage.ObjectAttrsToUpdate{Metadata: metadata}
+	// The generation guards against an overwrite, which resets the metageneration to 1.
+	p := objectPatch{
+		metadata:       metadata,
+		deleteKeys:     droppedKeys(attrs.Metadata, metadata),
+		generation:     attrs.Generation,
+		metageneration: attrs.Metageneration,
+	}
 	if _, contentType, legacy := liftLegacy(attrs.Metadata); legacy {
 		// An empty type clears the sniffed one the SDK stored before v0.18.
-		uattrs.ContentType = contentType
+		p.contentType, p.clearContentType = contentType, contentType == ""
 	}
-	_, err = obj.update(ctx, uattrs)
-	return mapNotExist(err, name)
+	return mapJSONNotExist(obj.patch(ctx, p), name)
+}
+
+// droppedKeys returns the keys of md that next does not carry; a merging patch can only delete them by name.
+func droppedKeys(md map[string]string, next s2.Metadata) []string {
+	var keys []string
+	for k := range md {
+		if _, ok := next[k]; !ok {
+			keys = append(keys, k)
+		}
+	}
+	return keys
 }
 
 func (s *gcsStorage) Copy(ctx context.Context, src, dst string) error {
@@ -290,6 +323,43 @@ func mapNotExist(err error, name string) error {
 		return fmt.Errorf("%w: %s", s2.ErrNotExist, name)
 	}
 	return err
+}
+
+// mapJSONNotExist is mapNotExist for the JSON API client, whose 404 is a googleapi error of its own.
+func mapJSONNotExist(err error, name string) error {
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
+		return fmt.Errorf("%w: %s", s2.ErrNotExist, name)
+	}
+	return mapNotExist(err, name)
+}
+
+// jsonAPIOptions points the JSON API client at STORAGE_EMULATOR_HOST, which only the SDK client honours on its own.
+// An emulator takes no credentials, so the caller's options are dropped along with them.
+func jsonAPIOptions(opts []option.ClientOption) ([]option.ClientOption, error) {
+	host := os.Getenv("STORAGE_EMULATOR_HOST")
+	if host == "" {
+		return opts, nil
+	}
+	endpoint, err := emulatorEndpoint(host)
+	if err != nil {
+		return nil, err
+	}
+	return []option.ClientOption{option.WithoutAuthentication(), option.WithEndpoint(endpoint)}, nil
+}
+
+// emulatorEndpoint returns the JSON API endpoint for host, which may carry a scheme.
+func emulatorEndpoint(host string) (string, error) {
+	u := &url.URL{Scheme: "http", Host: host}
+	if strings.Contains(host, "://") {
+		parsed, err := url.Parse(host)
+		if err != nil {
+			return "", fmt.Errorf("gcs: failed to parse STORAGE_EMULATOR_HOST %q: %w", host, err)
+		}
+		u = parsed
+	}
+	u.Path = "storage/v1/"
+	return u.String(), nil
 }
 
 // joinKeepSlash is path.Join that keeps prefix's trailing slash, which confines a listing to that directory.

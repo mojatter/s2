@@ -543,7 +543,7 @@ func TestStorageDelete(ctx context.Context, strg s2.Storage) error {
 func TestStoragePutMetadata(ctx context.Context, strg s2.Storage) error {
 	name := "s2test-putmeta.txt"
 	body := []byte("metadata test")
-	if err := strg.Put(ctx, s2.NewObjectBytes(name, body, s2.WithContentType("text/csv"))); err != nil {
+	if err := strg.Put(ctx, s2.NewObjectBytes(name, body, s2.WithContentType("text/csv"), s2.WithMetadata(s2.Metadata{"stale": "x"}))); err != nil {
 		return fmt.Errorf("Put(%q) failed: %w", name, err)
 	}
 
@@ -576,6 +576,10 @@ func TestStoragePutMetadata(ctx context.Context, strg s2.Storage) error {
 	v, ok = got.Metadata().Get("version")
 	if !ok || v != "1" {
 		return fmt.Errorf("metadata 'version' = %q (ok=%v), want '1'", v, ok)
+	}
+
+	if v, ok := got.Metadata().Get("stale"); ok {
+		return fmt.Errorf("metadata 'stale' = %q after PutMetadata; it must replace, not merge", v)
 	}
 
 	// Only the user metadata is replaced.

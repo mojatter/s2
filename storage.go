@@ -102,7 +102,8 @@ type Storage interface {
 	// that can only be computed after the body is written. Note: PutMetadata
 	// is NOT atomic with Put; a crash between the two leaves the object on
 	// disk with whatever metadata Put itself wrote. Replaces (does not merge)
-	// any existing metadata.
+	// any existing metadata. A backend may fail the call when the object
+	// changes concurrently; that error is the provider's own.
 	PutMetadata(ctx context.Context, name string, metadata Metadata) error
 	// Copy duplicates src to dst. The semantics are backend-defined: the s3
 	// backend uses server-side copy, while file-backed backends stream the

@@ -80,6 +80,22 @@ func (s *GCSIntegrationSuite) TestPutMetadata() {
 	s.Require().NoError(s2test.TestStoragePutMetadata(context.Background(), s.strg))
 }
 
+// A pre-v0.18 object keeps the type the SDK sniffed for it; PutMetadata clears it, which only a real bucket can confirm.
+func (s *GCSIntegrationSuite) TestPutMetadataClearsASniffedContentType() {
+	ctx := context.Background()
+	obj := s2.NewObjectBytes("legacy.txt", []byte("<!DOCTYPE html><html></html>"),
+		s2.WithContentType("text/html"), s2.WithMetadata(s2.Metadata{"s2-etag": `"x"`, "author": "uz"}))
+	s.Require().NoError(s.strg.Put(ctx, obj))
+
+	s.Require().NoError(s.strg.PutMetadata(ctx, "legacy.txt", s2.Metadata{"author": "s2"}))
+
+	got, err := s.strg.Get(ctx, "legacy.txt")
+	s.Require().NoError(err)
+	// s2-etag is gone, so the object is no longer read as a legacy write and its own type shows.
+	s.Empty(got.ContentType())
+	s.Equal(s2.Metadata{"author": "s2"}, got.Metadata())
+}
+
 // A body that looks like HTML under a .txt name must not be stored as text/html.
 func (s *GCSIntegrationSuite) TestPutWithoutContentType() {
 	ctx := context.Background()
