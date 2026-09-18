@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"path"
 	"sort"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 
 	"github.com/mojatter/s2"
@@ -26,17 +28,21 @@ import (
 // --- mock implementations ---
 
 type mockObject struct {
-	bucket      string
-	key         string
-	body        []byte
-	updated     time.Time
-	metadata    map[string]string
-	contentType string
+	bucket         string
+	key            string
+	body           []byte
+	updated        time.Time
+	metadata       map[string]string
+	contentType    string
+	generation     int64
+	metageneration int64
 }
 
 type mockGCSClient struct {
 	mu      sync.RWMutex
 	objects map[string]*mockObject // keyed by "bucket/key"
+	patches int                    // patch calls, so a test can pin how many requests PutMetadata takes
+	onAttrs func()                 // runs after reading attrs, to simulate a racing writer
 }
 
 func newMockGCSClient() *mockGCSClient {
@@ -47,12 +53,27 @@ func (m *mockGCSClient) put(bucket, key string, body []byte, metadata map[string
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// A copy, so a later update cannot reach back into the caller's map.
+	var stored map[string]string
+	if metadata != nil {
+		stored = make(map[string]string, len(metadata))
+		for k, v := range metadata {
+			stored[k] = v
+		}
+	}
+	// A new generation resets the metageneration, as the service does.
+	generation := int64(1)
+	if old, ok := m.objects[path.Join(bucket, key)]; ok {
+		generation = old.generation + 1
+	}
 	m.objects[path.Join(bucket, key)] = &mockObject{
-		bucket:   bucket,
-		key:      key,
-		body:     body,
-		updated:  time.Now(),
-		metadata: metadata,
+		bucket:         bucket,
+		key:            key,
+		body:           body,
+		updated:        time.Now(),
+		metadata:       stored,
+		generation:     generation,
+		metageneration: 1,
 	}
 }
 
@@ -172,14 +193,20 @@ func (o *mockGCSObject) attrs(_ context.Context) (*storage.ObjectAttrs, error) {
 	if !ok {
 		return nil, storage.ErrObjectNotExist
 	}
-	return &storage.ObjectAttrs{
-		Name:        obj.key,
-		Size:        int64(len(obj.body)),
-		Updated:     obj.updated,
-		Metadata:    obj.metadata,
-		MD5:         mockMD5(obj.body),
-		ContentType: obj.contentType,
-	}, nil
+	attrs := &storage.ObjectAttrs{
+		Name:           obj.key,
+		Size:           int64(len(obj.body)),
+		Updated:        obj.updated,
+		Metadata:       obj.metadata,
+		MD5:            mockMD5(obj.body),
+		ContentType:    obj.contentType,
+		Generation:     obj.generation,
+		Metageneration: obj.metageneration,
+	}
+	if o.client.onAttrs != nil {
+		o.client.onAttrs()
+	}
+	return attrs, nil
 }
 
 func (o *mockGCSObject) newReader(_ context.Context) (io.ReadCloser, error) {
@@ -207,26 +234,39 @@ func (o *mockGCSObject) newWriter(_ context.Context, metadata map[string]string,
 	return &mockWriter{client: o.client, bucket: o.bucket, key: o.key, metadata: metadata, contentType: contentType}
 }
 
-func (o *mockGCSObject) update(_ context.Context, uattrs storage.ObjectAttrsToUpdate) (*storage.ObjectAttrs, error) {
+func (o *mockGCSObject) patch(_ context.Context, p objectPatch) error {
 	obj, ok := o.client.get(o.bucket, o.key)
 	if !ok {
-		return nil, storage.ErrObjectNotExist
+		// A missing object answers 404 before the preconditions are weighed, and the JSON API client has its own error type.
+		return &googleapi.Error{Code: http.StatusNotFound, Message: "No such object"}
 	}
-	if uattrs.Metadata != nil {
-		obj.metadata = uattrs.Metadata
+	if (p.metageneration != 0 && p.metageneration != obj.metageneration) || (p.generation != 0 && p.generation != obj.generation) {
+		return errPreconditionFailed
 	}
-	if ct, ok := uattrs.ContentType.(string); ok {
-		obj.contentType = ct
+	o.client.mu.Lock()
+	o.client.patches++
+	o.client.mu.Unlock()
+	// Objects.Patch merges what it is given and deletes only the keys sent as null.
+	if len(p.metadata) > 0 && obj.metadata == nil {
+		obj.metadata = make(map[string]string, len(p.metadata))
 	}
-	return &storage.ObjectAttrs{
-		Name:        obj.key,
-		Size:        int64(len(obj.body)),
-		Updated:     obj.updated,
-		Metadata:    obj.metadata,
-		MD5:         mockMD5(obj.body),
-		ContentType: obj.contentType,
-	}, nil
+	for k, v := range p.metadata {
+		obj.metadata[k] = v
+	}
+	for _, k := range p.deleteKeys {
+		delete(obj.metadata, k)
+	}
+	if p.clearContentType {
+		obj.contentType = ""
+	} else if p.contentType != "" {
+		obj.contentType = p.contentType
+	}
+	obj.metageneration++
+	return nil
 }
+
+// errPreconditionFailed is the 412 a precondition mismatch returns, in the JSON API client's own type.
+var errPreconditionFailed = &googleapi.Error{Code: http.StatusPreconditionFailed, Message: "Precondition Failed"}
 
 func (o *mockGCSObject) copyTo(_ context.Context, dst gcsObject) error {
 	src, ok := o.client.get(o.bucket, o.key)
@@ -777,6 +817,238 @@ func (s *StorageTestSuite) TestPutMetadata() {
 
 	err = strg.PutMetadata(ctx, "missing.txt", s2.Metadata{"k": "v"})
 	s.ErrorIs(err, s2.ErrNotExist)
+}
+
+// One patch replaces the metadata, whatever the replacement drops.
+func (s *StorageTestSuite) TestPutMetadataPatchesOnce() {
+	testCases := []struct {
+		caseName   string
+		metadata   map[string]string
+		next       s2.Metadata
+		wantStored map[string]string
+	}{
+		{
+			caseName:   "every key is replaced",
+			metadata:   map[string]string{"author": "uz"},
+			next:       s2.Metadata{"author": "s2", "version": "1"},
+			wantStored: map[string]string{"author": "s2", "version": "1"},
+		},
+		{
+			caseName:   "a key is dropped",
+			metadata:   map[string]string{"author": "uz", "stale": "x"},
+			next:       s2.Metadata{"author": "s2"},
+			wantStored: map[string]string{"author": "s2"},
+		},
+		{
+			caseName:   "all keys are dropped",
+			metadata:   map[string]string{"author": "uz"},
+			next:       s2.Metadata{},
+			wantStored: map[string]string{},
+		},
+		{
+			caseName:   "no metadata to drop",
+			next:       s2.Metadata{"author": "s2"},
+			wantStored: map[string]string{"author": "s2"},
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m, strg := s.testMockStorage()
+			ctx := context.Background()
+			m.put("mybucket", "page.html", []byte("<p>"), tc.metadata)
+			m.patches = 0
+
+			s.Require().NoError(strg.PutMetadata(ctx, "page.html", tc.next))
+
+			s.Equal(1, m.patches, "PutMetadata must take one request")
+			raw, _ := m.get("mybucket", "page.html")
+			s.Equal(tc.wantStored, raw.metadata)
+		})
+	}
+}
+
+// A 412 is the caller's to resolve: it must not read as a missing object.
+func (s *StorageTestSuite) TestPutMetadataKeepsThePreconditionError() {
+	m, strg := s.testMockStorage()
+	ctx := context.Background()
+	m.put("mybucket", "page.html", []byte("<p>"), map[string]string{"author": "uz", "stale": "x"})
+	m.onAttrs = func() {
+		m.onAttrs = nil
+		raw, _ := m.get("mybucket", "page.html")
+		raw.metageneration++
+	}
+
+	err := strg.PutMetadata(ctx, "page.html", s2.Metadata{"author": "s2"})
+
+	s.ErrorIs(err, errPreconditionFailed)
+	s.NotErrorIs(err, s2.ErrNotExist)
+	raw, _ := m.get("mybucket", "page.html")
+	s.Equal(map[string]string{"author": "uz", "stale": "x"}, raw.metadata, "a rejected patch changes nothing")
+}
+
+// A legacy object's lifted Content-Type moves to its own in the same patch.
+func (s *StorageTestSuite) TestPutMetadataCarriesTheLiftedContentType() {
+	testCases := []struct {
+		caseName        string
+		metadata        map[string]string
+		nativeType      string
+		wantContentType string
+	}{
+		{
+			caseName:        "a stored type moves to the object's own",
+			metadata:        map[string]string{"s2-etag": `"x"`, "s2-content-type": "text/html", "author": "uz"},
+			nativeType:      "text/plain",
+			wantContentType: "text/html",
+		},
+		{
+			caseName:        "a sniffed type is cleared",
+			metadata:        map[string]string{"s2-etag": `"x"`, "author": "uz"},
+			nativeType:      "text/html",
+			wantContentType: "",
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m, strg := s.testMockStorage()
+			ctx := context.Background()
+			m.put("mybucket", "page.html", []byte("<p>"), tc.metadata)
+			raw, _ := m.get("mybucket", "page.html")
+			raw.contentType = tc.nativeType
+
+			s.Require().NoError(strg.PutMetadata(ctx, "page.html", s2.Metadata{"author": "s2"}))
+
+			s.Equal(tc.wantContentType, raw.contentType)
+			s.Equal(map[string]string{"author": "s2"}, raw.metadata)
+		})
+	}
+}
+
+// The request body is what the fix rests on: a per-key null for a delete, and a forced empty map when every key goes.
+func (s *StorageTestSuite) TestPatchObjectJSON() {
+	testCases := []struct {
+		caseName string
+		patch    objectPatch
+		want     string
+	}{
+		{
+			caseName: "replace and drop",
+			patch:    objectPatch{metadata: map[string]string{"author": "s2"}, deleteKeys: []string{"stale"}},
+			want:     `{"metadata":{"author":"s2","stale":null}}`,
+		},
+		{
+			caseName: "drop every key",
+			patch:    objectPatch{deleteKeys: []string{"author", "stale"}},
+			want:     `{"metadata":{"author":null,"stale":null}}`,
+		},
+		{
+			caseName: "nothing to drop",
+			patch:    objectPatch{metadata: map[string]string{"author": "s2"}},
+			want:     `{"metadata":{"author":"s2"}}`,
+		},
+		{
+			caseName: "lift a legacy Content-Type",
+			patch:    objectPatch{metadata: map[string]string{"author": "s2"}, deleteKeys: []string{"s2-etag"}, contentType: "text/html"},
+			want:     `{"contentType":"text/html","metadata":{"author":"s2","s2-etag":null}}`,
+		},
+		{
+			caseName: "clear a sniffed Content-Type",
+			patch:    objectPatch{metadata: map[string]string{"author": "s2"}, deleteKeys: []string{"s2-etag"}, clearContentType: true},
+			want:     `{"contentType":null,"metadata":{"author":"s2","s2-etag":null}}`,
+		},
+		{
+			caseName: "a key holding a dot",
+			patch:    objectPatch{metadata: map[string]string{"a": "1"}, deleteKeys: []string{"my.key"}},
+			want:     `{"metadata":{"a":"1","my.key":null}}`,
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			body, err := patchObject(tc.patch).MarshalJSON()
+			s.Require().NoError(err)
+			s.JSONEq(tc.want, string(body))
+		})
+	}
+}
+
+// An object deleted between the read and the patch reads as missing, whichever client reports it.
+func (s *StorageTestSuite) TestPutMetadataOfDeletedObject() {
+	m, strg := s.testMockStorage()
+	ctx := context.Background()
+	m.put("mybucket", "page.html", []byte("<p>"), map[string]string{"author": "uz"})
+	m.onAttrs = func() {
+		m.onAttrs = nil
+		m.del("mybucket", "page.html")
+	}
+
+	err := strg.PutMetadata(ctx, "page.html", s2.Metadata{"author": "s2"})
+
+	s.ErrorIs(err, s2.ErrNotExist)
+}
+
+// The JSON API client needs the emulator endpoint spelled out; the SDK client finds it itself.
+func (s *StorageTestSuite) TestEmulatorEndpoint() {
+	testCases := []struct {
+		caseName string
+		host     string
+		want     string
+		wantErr  bool
+	}{
+		{caseName: "host and port", host: "localhost:9000", want: "http://localhost:9000/storage/v1/"},
+		{caseName: "with a scheme", host: "https://localhost:9000", want: "https://localhost:9000/storage/v1/"},
+		{caseName: "unparsable", host: "http://[::1", wantErr: true},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			got, err := emulatorEndpoint(tc.host)
+			if tc.wantErr {
+				s.Require().Error(err, "an unparsable host must not fall back to production")
+				return
+			}
+			s.Require().NoError(err)
+			s.Equal(tc.want, got)
+		})
+	}
+}
+
+// A write landing between the read and the patch fails the call instead of being overwritten.
+func (s *StorageTestSuite) TestPutMetadataDetectsConcurrentWrite() {
+	testCases := []struct {
+		caseName string
+		race     func(m *mockGCSClient)
+	}{
+		{
+			caseName: "metadata changed before the patch",
+			race: func(m *mockGCSClient) {
+				m.onAttrs = func() {
+					m.onAttrs = nil
+					raw, _ := m.get("mybucket", "page.html")
+					raw.metageneration++
+				}
+			},
+		},
+		{
+			// A new generation resets the metageneration, so only the generation catches this.
+			caseName: "object overwritten before the patch",
+			race: func(m *mockGCSClient) {
+				m.onAttrs = func() {
+					m.onAttrs = nil
+					m.put("mybucket", "page.html", []byte("<h1>"), map[string]string{"owner": "bob"})
+				}
+			},
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m, strg := s.testMockStorage()
+			ctx := context.Background()
+			m.put("mybucket", "page.html", []byte("<p>"), map[string]string{"author": "uz", "stale": "x"})
+			tc.race(m)
+
+			err := strg.PutMetadata(ctx, "page.html", s2.Metadata{"author": "s2"})
+
+			s.ErrorIs(err, errPreconditionFailed)
+		})
+	}
 }
 
 func (s *StorageTestSuite) TestCopy() {

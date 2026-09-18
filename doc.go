@@ -31,15 +31,20 @@
 // # Concurrency
 //
 // All Storage implementations shipped with s2 are safe for concurrent use
-// by multiple goroutines. Methods that mutate state (Put, Delete,
-// PutMetadata, ...) are independently atomic per object: a single Put is
-// either fully visible to subsequent reads or not visible at all. Multiple
+// by multiple goroutines. Methods that mutate state (Put, Delete, Copy,
+// ...) are independently atomic per object: a single Put is either fully
+// visible to subsequent reads or not visible at all. Multiple
 // concurrent Puts to the same object resolve to one of the writes — there
 // is no defined ordering — but no torn writes are exposed.
 //
 // PutMetadata is NOT atomic with Put. Calling Put followed by PutMetadata
 // leaves a window during which the object exists with whatever metadata
 // Put itself wrote.
+//
+// PutMetadata takes two requests on the s3 backend, so a Put between them
+// loses its Content-Type; on gcs the write is one request, which fails
+// when the object changed since it was read. See each backend's
+// PutMetadata.
 //
 // # Atomicity per backend
 //
