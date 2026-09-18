@@ -112,7 +112,7 @@ $S2_SERVER_ROOT/
 │   ├── .keep               # bucket marker (tracks creation time)
 │   ├── .meta/
 │   │   └── css/
-│   │       └── style.css   # JSON metadata for css/style.css
+│   │       └── style.css   # JSON sidecar for css/style.css (etag, content_type, metadata)
 │   ├── logo.png
 │   └── css/
 │       ├── .keep
@@ -369,6 +369,23 @@ type SignedURLOptions struct {
 }
 ```
 
+An object carries its content type and entity tag as attributes rather than as metadata keys, so a backend can answer them from whatever it stores natively:
+
+```go
+type Object interface {
+	Name() string
+	Open() (io.ReadCloser, error)
+	OpenRange(offset, length uint64) (io.ReadCloser, error)
+	Length() uint64
+	LastModified() time.Time
+	Metadata() Metadata     // user metadata only
+	ContentType() string    // "" when unknown
+	ETag() string           // quoted, "" when unknown
+}
+```
+
+`Metadata` holds only what the caller put there; s2 reserves no keys in it. What each backend stores and reports is in [docs/backends.md](docs/backends.md#content-type-and-etag).
+
 Move is a free function rather than a method so backends do not have to implement two near-identical operations. Backends that can do better than `Copy + Delete` (e.g. `osfs` via filesystem rename) satisfy the optional `s2.Mover` interface, which `s2.Move` discovers via type assertion:
 
 ```go
@@ -495,7 +512,7 @@ s2-server -f config.json
 | GET | `/{bucket}/{key...}?uploadId` | ListParts |
 | GET, HEAD | `/healthz` | Health check (configurable via `S2_SERVER_HEALTH_PATH`) |
 
-Custom metadata is supported via `x-amz-meta-*` headers on PutObject/CopyObject and returned on GetObject/HeadObject.
+Custom metadata is supported via `x-amz-meta-*` headers on PutObject/CopyObject and returned on GetObject/HeadObject. `Content-Type` and `ETag` are not metadata: they are attributes the backend owns, described in [docs/backends.md](docs/backends.md#content-type-and-etag).
 
 ## Benchmarks
 

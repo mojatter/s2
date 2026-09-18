@@ -174,6 +174,27 @@ As JSON:
 
 Authentication priority: `connection_string` > `account_name`+`account_key` > DefaultAzureCredential.
 
+## Content-Type and ETag
+
+Both are attributes of `s2.Object`, not entries in `Metadata()`. Each backend answers them from what it stores natively, so reading them off a `List` result costs no extra request.
+
+| Backend | Content-Type when the caller supplies one | Content-Type when the caller supplies none | ETag |
+|-------|-------------|-------------|-------------|
+| `osfs`, `memfs` | Stored in the JSON sidecar | Nothing is stored; `ContentType()` is `""` | MD5 of the body, computed on `Put`; `"<mtime hex>-<size hex>"` when no sidecar holds one |
+| `s3` | Stored as the object's `Content-Type` | The provider's own default, `binary/octet-stream` | The provider's `ETag` |
+| `gcs` | Stored as the object's `contentType` | Nothing is stored; `ContentType()` is `""` | The MD5 attribute as quoted hex, else the provider's opaque `Etag` |
+| `azblob` | Stored as the blob's `Content-Type` | The provider's own default, `application/octet-stream` | The `Content-MD5` s2 sets on upload, else the provider's opaque `ETag` |
+
+An empty `ContentType()` means "nothing is stored", not "unknown to the caller": s2-server then guesses from the key's extension and falls back to `binary/octet-stream`. Only `osfs`, `memfs` and `gcs` can produce it, so the same object served from an `s3` or `azblob` root answers that root's default instead of the guess. s2-server's console guesses at upload time, because a browser cannot set the type on a form upload, and stores the guess.
+
+`ETag` values are quoted, as S3 returns them. s2 never assembles the composite `md5-of-md5s-N` form for multipart uploads; the ETag is the MD5 of the whole assembled body. On an `s3` root with SSE-KMS or SSE-C the provider's ETag is not the body's MD5, and s2 passes it through unchanged.
+
+A pre-v0.18.0 s2-server kept both values as `s2-etag` and `s2-content-type` metadata keys. Those objects are still read: `osfs` and `memfs` recognise the older flat sidecar, and `s3` and `gcs` lift the two keys into the attributes and hide them from `Metadata()` — but only for an object that still carries `s2-etag`, so a key a client sends today stays ordinary metadata. All of that compatibility is scheduled for removal in v1.0.0 ([#247](https://github.com/mojatter/s2/issues/247)).
+
+### Metadata names on azblob
+
+Azure accepts only metadata names that are valid C# identifiers — letters, digits and `_`, not starting with a digit. A name containing `-` or `.` is rejected with `400 InvalidMetadata`, so `x-amz-meta-my-key` fails on an `azblob` root where it succeeds elsewhere ([#246](https://github.com/mojatter/s2/issues/246)). s2 passes names through unchanged rather than encoding them.
+
 ## Combining backends with s2env
 
 To manage several named storages from a single JSON file, use [`s2env`](https://pkg.go.dev/github.com/mojatter/s2/s2env). Its top-level object is a map of storage name → `s2.Config`, so each entry takes the same shape as the per-backend examples above:
