@@ -79,3 +79,13 @@ func (s *GCSIntegrationSuite) TestDelete() {
 func (s *GCSIntegrationSuite) TestPutMetadata() {
 	s.Require().NoError(s2test.TestStoragePutMetadata(context.Background(), s.strg))
 }
+
+// A body that looks like HTML under a .txt name must not be stored as text/html.
+func (s *GCSIntegrationSuite) TestPutWithoutContentType() {
+	ctx := context.Background()
+	s.Require().NoError(s.strg.Put(ctx, s2.NewObjectBytes("notes.txt", []byte("<!DOCTYPE html><html><body>hi</body></html>"))))
+
+	got, err := s.strg.Get(ctx, "notes.txt")
+	s.Require().NoError(err)
+	s.Empty(got.ContentType())
+}

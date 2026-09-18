@@ -89,6 +89,8 @@ func (o *sdkObject) newWriter(ctx context.Context, metadata map[string]string, c
 		w.Metadata = metadata
 	}
 	w.ContentType = contentType
+	// Without this the SDK sniffs the body; an unset type is guessed from the name on read instead.
+	w.ForceEmptyContentType = contentType == ""
 	return w
 }
 

@@ -3,8 +3,6 @@ package buckets
 import (
 	"bytes"
 	"context"
-	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -156,22 +154,13 @@ func handleCreateFolder(s *server.Server, w http.ResponseWriter, r *http.Request
 	writeObjectsFragment(ctx, w, s, name, prefix, "")
 }
 
-// uploadContentType returns the Content-Type to store for an uploaded
-// part. Browsers fill the part header from File.type, which is empty for
-// any extension the OS does not know (.log, .go, .conf) and reaches us as
-// a generic octet-stream; the key's extension is the better answer there.
+// uploadContentType returns the part's Content-Type, or a guess from key when the browser sent none or a generic octet-stream.
 func uploadContentType(header *multipart.FileHeader, key string) string {
 	ct := strings.TrimSpace(header.Header.Get("Content-Type"))
 	if ct != "" && ct != "application/octet-stream" && ct != server.DefaultContentType {
 		return ct
 	}
-	if byExt := server.ContentTypeByExt(path.Ext(key)); byExt != "" {
-		return byExt
-	}
-	if ct != "" {
-		return ct
-	}
-	return server.DefaultContentType
+	return server.ContentTypeByExt(path.Ext(key))
 }
 
 func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) {
@@ -203,20 +192,8 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	if !server.DenyUnlessAllowedS3Action(w, server.UserFromContext(ctx), server.ActionPutObject, name, key) {
 		return
 	}
-	// Record what PutObject records: no metadata at all means "placed in
-	// the storage root from outside" to GetObject (#188).
-	hash := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
-	body := io.NopCloser(io.TeeReader(file, hash))
-	if err := strg.Put(ctx, s2.NewObjectReader(key, body, s2.MustUint64(header.Size))); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	contentType := uploadContentType(header, key)
-	md := s2.Metadata{
-		server.EtagMetadataKey:        `"` + hex.EncodeToString(hash.Sum(nil)) + `"`,
-		server.ContentTypeMetadataKey: contentType,
-	}
-	if err := strg.PutMetadata(ctx, key, md); err != nil {
+	obj := s2.NewObjectReader(key, io.NopCloser(file), s2.MustUint64(header.Size), s2.WithContentType(uploadContentType(header, key)))
+	if err := strg.Put(ctx, obj); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

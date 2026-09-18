@@ -3,6 +3,7 @@ package server
 import (
 	"testing"
 
+	"github.com/mojatter/s2"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -38,6 +39,24 @@ func TestContentTypeByExt(t *testing.T) {
 				return
 			}
 			assert.Contains(t, got, tc.wantContains)
+		})
+	}
+}
+
+func TestResolveContentType(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		obj      s2.Object
+		name     string
+		want     string
+	}{
+		{caseName: "stored wins over the extension", obj: s2.NewObjectBytes("a.png", nil, s2.WithContentType("text/plain")), name: "a.png", want: "text/plain"},
+		{caseName: "extension guess", obj: s2.NewObjectBytes("a.png", nil), name: "a.png", want: "image/png"},
+		{caseName: "default", obj: s2.NewObjectBytes("blob", nil), name: "blob", want: DefaultContentType},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			assert.Equal(t, tc.want, ResolveContentType(tc.obj, tc.name))
 		})
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -19,10 +18,8 @@ import (
 )
 
 const (
-	// Aliases for readability; the server package owns these values.
-	etagMetadataKey        = server.EtagMetadataKey
-	contentTypeMetadataKey = server.ContentTypeMetadataKey
-	defaultContentType     = server.DefaultContentType
+	// defaultContentType aliases the server package's value for readability.
+	defaultContentType = server.DefaultContentType
 
 	// maxObjectKeys is S3's per-request key ceiling: ListObjects' default
 	// (and maximum) max-keys, and DeleteObjects' <Object> limit.
@@ -37,15 +34,6 @@ const (
 // only whitespace, which some HTTP clients emit for "no MIME type resolved".
 func requestContentType(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("Content-Type"))
-}
-
-// resolveContentType returns r's Content-Type, or defaultContentType if the
-// request didn't send a usable one.
-func resolveContentType(r *http.Request) string {
-	if ct := requestContentType(r); ct != "" {
-		return ct
-	}
-	return defaultContentType
 }
 
 // splitS3Prefix splits an S3 prefix at the last "/" so the directory portion
@@ -231,7 +219,7 @@ func buildListBucketResult(p listObjectsParams, objs []s2.Object, prefixes []str
 		contents = append(contents, Content{
 			Key:          obj.Name(),
 			LastModified: obj.LastModified().UTC(),
-			ETag:         objectETag(obj),
+			ETag:         obj.ETag(),
 			Size:         obj.Length(),
 			StorageClass: "STANDARD",
 		})
@@ -279,38 +267,6 @@ func handleListObjects(s *server.Server, w http.ResponseWriter, r *http.Request)
 	writeXML(w, http.StatusOK, buildListBucketResult(p, objs, prefixes, nextToken, nextToken != ""))
 }
 
-// isFSBackend reports whether storage type typ is one of the filesystem
-// backends, whose root can hold files that never went through s2.
-func isFSBackend(typ s2.Type) bool {
-	return typ == s2.TypeOSFS || typ == s2.TypeMemFS
-}
-
-// guessedContentType returns a Content-Type derived from key's extension,
-// and "" unless the object is one placed into a filesystem backend's root
-// from outside s2 -- the only kind s2 guesses about (#188).
-func guessedContentType(strg s2.Storage, obj s2.Object, key string) string {
-	if len(obj.Metadata()) > 0 || obj.ContentType() != "" || !isFSBackend(strg.Type()) {
-		return ""
-	}
-	return server.ContentTypeByExt(path.Ext(key))
-}
-
-// objectContentType returns the Content-Type GetObject/HeadObject answers
-// with for obj: its stored value if s2 recorded one (#186), else the
-// extension guess, else defaultContentType, as real S3 does.
-func objectContentType(strg s2.Storage, obj s2.Object, key string) string {
-	if ct, ok := obj.Metadata().Get(contentTypeMetadataKey); ok {
-		return ct
-	}
-	if ct := obj.ContentType(); ct != "" {
-		return ct
-	}
-	if ct := guessedContentType(strg, obj, key); ct != "" {
-		return ct
-	}
-	return defaultContentType
-}
-
 func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
@@ -352,12 +308,12 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write user metadata as x-amz-meta-* headers
-	for k, v := range server.FilterInternalMetadata(obj.Metadata()) {
+	for k, v := range obj.Metadata() {
 		w.Header().Set("x-amz-meta-"+k, v)
 	}
 	w.Header().Set("Last-Modified", obj.LastModified().Format(http.TimeFormat))
-	w.Header().Set("ETag", objectETag(obj))
-	w.Header().Set("Content-Type", objectContentType(strg, obj, key))
+	w.Header().Set("ETag", obj.ETag())
+	w.Header().Set("Content-Type", server.ResolveContentType(obj, key))
 
 	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" && r.Method != http.MethodHead {
 		handleRangeRequest(w, r, obj, rangeHeader)
@@ -494,57 +450,35 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 			contentLength = n
 		}
 	}
-	obj := s2.NewObjectReader(key, io.NopCloser(body), s2.MustUint64(contentLength))
-
+	// An absent Content-Type stays unstored; readers resolve it (#210).
+	obj := s2.NewObjectReader(key, io.NopCloser(body), s2.MustUint64(contentLength),
+		s2.WithContentType(requestContentType(r)), s2.WithMetadata(parseMetadataHeaders(r)))
 	if err := strg.Put(ctx, obj); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
 	}
 
-	etag := `"` + hex.EncodeToString(hash.Sum(nil)) + `"`
-
-	// Store ETag, Content-Type, and user metadata
-	md := parseMetadataHeaders(r)
-	md[etagMetadataKey] = etag
-	md[contentTypeMetadataKey] = resolveContentType(r)
-	if err := strg.PutMetadata(ctx, key, md); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
-		return
-	}
-
-	w.Header().Set("ETag", etag)
+	w.Header().Set("ETag", `"`+hex.EncodeToString(hash.Sum(nil))+`"`)
 	w.WriteHeader(http.StatusOK)
 }
 
-// objectETag returns the ETag s2 stored in metadata, else the storage's own.
-func objectETag(obj s2.Object) string {
-	if etag, ok := obj.Metadata().Get(etagMetadataKey); ok {
-		return etag
-	}
-	return obj.ETag()
-}
-
 const metaHeaderPrefix = "X-Amz-Meta-"
+
+// reservedETagKey marks an object a pre-v0.18 s2-server wrote on s3/gcs roots, so clients cannot set it until v1.0 (#247).
+const reservedETagKey = "s2-etag"
 
 func parseMetadataHeaders(r *http.Request) s2.Metadata {
 	md := make(s2.Metadata)
 	for key, values := range r.Header {
 		if strings.HasPrefix(key, metaHeaderPrefix) && len(values) > 0 {
 			metaKey := strings.ToLower(key[len(metaHeaderPrefix):])
-			md[metaKey] = values[0]
+			if metaKey != reservedETagKey {
+				md[metaKey] = values[0]
+			}
 		}
 	}
 	return md
-}
-
-// dropInternalMetadata removes s2's own bookkeeping keys from metadata a
-// client supplied, so x-amz-meta-* cannot reach them (#192).
-func dropInternalMetadata(md s2.Metadata) {
-	for k := range server.InternalMetadataKeys {
-		delete(md, k)
-	}
 }
 
 func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, copySource string) {
@@ -595,33 +529,13 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 	}
 	defer func() { _ = rc.Close() }()
 
-	// Determine metadata for the destination object. REPLACE re-derives
-	// Content-Type from this request the same way PutObject does (defaulting
-	// if absent); the non-REPLACE branch carries the source's stored
-	// Content-Type over via Clone(), matching AWS's own CopyObject default of
-	// preserving metadata unless MetadataDirective=REPLACE is specified.
-	var md s2.Metadata
+	// AWS keeps the source's metadata and Content-Type unless MetadataDirective=REPLACE.
+	md, contentType := srcObj.Metadata().Clone(), srcObj.ContentType()
+	delete(md, reservedETagKey)
 	if strings.EqualFold(r.Header.Get("x-amz-metadata-directive"), "REPLACE") {
-		md = parseMetadataHeaders(r)
-		md[contentTypeMetadataKey] = resolveContentType(r)
-	} else {
-		md = srcObj.Metadata().Clone()
-		if md == nil {
-			md = make(s2.Metadata)
-		}
-		if ct := srcObj.ContentType(); ct != "" {
-			if _, ok := md[contentTypeMetadataKey]; !ok {
-				md[contentTypeMetadataKey] = ct
-			}
-		}
-		// The copy carries an ETag, so it can never qualify for the
-		// guess itself; keep the source's answer.
-		if ct := guessedContentType(srcStrg, srcObj, srcKey); ct != "" {
-			md[contentTypeMetadataKey] = ct
-		}
+		md, contentType = parseMetadataHeaders(r), requestContentType(r)
 	}
 
-	// Write to destination
 	dstStrg, err := s.Buckets.Get(ctx, dstBucket)
 	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
@@ -629,16 +543,10 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	dstObj := s2.NewObjectReader(dstKey, rc, srcObj.Length(), s2.WithMetadata(md))
+	hash := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
+	dstObj := s2.NewObjectReader(dstKey, io.NopCloser(io.TeeReader(rc, hash)), srcObj.Length(),
+		s2.WithMetadata(md), s2.WithContentType(contentType))
 	if err := dstStrg.Put(ctx, dstObj); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
-		return
-	}
-
-	// Persist ETag (carried from source or recomputed) alongside user metadata.
-	md[etagMetadataKey] = objectETag(srcObj)
-	if err := dstStrg.PutMetadata(ctx, dstKey, md); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
@@ -646,7 +554,7 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 
 	result := CopyObjectResult{
 		LastModified: time.Now().UTC(),
-		ETag:         objectETag(srcObj),
+		ETag:         `"` + hex.EncodeToString(hash.Sum(nil)) + `"`,
 	}
 	writeXML(w, http.StatusOK, result)
 }

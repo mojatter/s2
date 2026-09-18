@@ -249,39 +249,26 @@ func (s *MultipartTestSuite) storage(bucket string) s2.Storage {
 	return strg
 }
 
-// multipartETag is S3's ETag for parts: the MD5 of their MD5s, then "-N".
-func multipartETag(parts ...string) string {
-	var digests []byte
-	for _, p := range parts {
-		h := md5.Sum([]byte(p)) // #nosec G401
-		digests = append(digests, h[:]...)
-	}
-	sum := md5.Sum(digests) // #nosec G401
-	return fmt.Sprintf(`"%x-%d"`, sum, len(parts))
+// bodyETag is the quoted MD5 of the concatenated parts, the ETag of the completed object.
+func bodyETag(parts ...string) string {
+	sum := md5.Sum([]byte(strings.Join(parts, ""))) // #nosec G401
+	return fmt.Sprintf(`"%x"`, sum)
 }
 
-// smuggledInternalKeys sends every reserved key as an x-amz-meta-* header.
-func smuggledInternalKeys() http.Header {
-	h := http.Header{}
-	for k := range server.InternalMetadataKeys {
-		h.Set(metaHeaderPrefix+k, "smuggled")
-	}
-	return h
-}
-
-// An absent Content-Type stays unstored so the console can still guess.
+// An absent Content-Type stays unstored so readers can guess from the key.
 func (s *MultipartTestSuite) TestCreateMultipartUploadLeavesAbsentContentTypeUnstored() {
 	testCases := []struct {
 		caseName string
 		headers  http.Header
+		wantMeta s2.Metadata
 	}{
-		{caseName: "no header"},
-		{caseName: "whitespace-only header", headers: http.Header{"Content-Type": {"   "}}},
+		{caseName: "no header", wantMeta: s2.Metadata{}},
+		{caseName: "whitespace-only header", headers: http.Header{"Content-Type": {"   "}}, wantMeta: s2.Metadata{}},
 		{
-			// Derived from the reserved set, so a key added to it is
-			// covered here rather than silently going untested.
-			caseName: "reserved keys smuggled through x-amz-meta-*",
-			headers:  smuggledInternalKeys(),
+			// s2-content-type is ordinary user metadata now (#192); s2-etag stays reserved (#247).
+			caseName: "former reserved keys as x-amz-meta-*",
+			headers:  http.Header{"X-Amz-Meta-S2-Etag": {"user"}, "X-Amz-Meta-S2-Content-Type": {"user"}},
+			wantMeta: s2.Metadata{"s2-content-type": "user"},
 		},
 	}
 	for _, tc := range testCases {
@@ -289,11 +276,10 @@ func (s *MultipartTestSuite) TestCreateMultipartUploadLeavesAbsentContentTypeUns
 			s.createBucket("mp-noct")
 			uploadID := s.initiateUpload("mp-noct", "movie.mp4", tc.headers)
 
-			md, err := s.server.Multipart.Metadata(context.Background(), uploadID, "mp-noct", "movie.mp4", s.generation("mp-noct"))
+			md, contentType, err := s.server.Multipart.Metadata(context.Background(), uploadID, "mp-noct", "movie.mp4", s.generation("mp-noct"))
 			s.Require().NoError(err)
-			for k := range server.InternalMetadataKeys {
-				s.NotContains(md, k)
-			}
+			s.Empty(contentType)
+			s.Equal(tc.wantMeta, md)
 		})
 	}
 }
@@ -506,9 +492,9 @@ func (s *MultipartTestSuite) TestCreateMultipartUploadRecordsMetadata() {
 		"X-Amz-Meta-Author": {"uz"},
 	})
 
-	md, err := s.server.Multipart.Metadata(context.Background(), uploadID, "mp-manifest", "file.bin", s.generation("mp-manifest"))
+	md, contentType, err := s.server.Multipart.Metadata(context.Background(), uploadID, "mp-manifest", "file.bin", s.generation("mp-manifest"))
 	s.Require().NoError(err)
-	s.Equal("video/mp4", md[contentTypeMetadataKey])
+	s.Equal("video/mp4", contentType)
 	s.Equal("uz", md["author"])
 }
 
@@ -548,7 +534,7 @@ func (s *MultipartTestSuite) TestCompleteMultipartUploadCarriesInitiateMetadata(
 	for i, tc := range testCases {
 		s.Run(tc.caseName, func() {
 			// A key per row: rows must not read each other's object.
-			bucket, key := "mp-meta", fmt.Sprintf("movie-%d.bin", i)
+			bucket, key := "mp-meta", fmt.Sprintf("movie-%d", i) // no extension, so nothing is guessed
 			s.createBucket(bucket)
 
 			uploadID := s.initiateUpload(bucket, key, tc.headers)
@@ -562,11 +548,14 @@ func (s *MultipartTestSuite) TestCompleteMultipartUploadCarriesInitiateMetadata(
 			for name, want := range tc.wantMeta {
 				s.Equal(want, w.Header().Get("x-amz-meta-"+name))
 			}
-			// The ETag survives alongside the recorded metadata.
-			s.Equal(multipartETag("hello ", "world"), w.Header().Get("ETag"))
-			// s2's own bookkeeping keys must not leak as user metadata.
-			s.Empty(w.Header().Get("x-amz-meta-" + contentTypeMetadataKey))
-			s.Empty(w.Header().Get("x-amz-meta-" + etagMetadataKey))
+			// The ETag is the body MD5, alongside the recorded metadata.
+			s.Equal(bodyETag("hello ", "world"), w.Header().Get("ETag"))
+			// Nothing but the client's metadata appears as x-amz-meta-*.
+			for name := range w.Header() {
+				if meta, ok := strings.CutPrefix(strings.ToLower(name), "x-amz-meta-"); ok {
+					s.Contains(tc.wantMeta, meta)
+				}
+			}
 		})
 	}
 }
@@ -756,11 +745,12 @@ func (s *MultipartTestSuite) TestMultipartStateLifecycle() {
 	}
 }
 
-// A part without a recorded ETag cannot contribute to the multipart ETag.
+// An empty ETag in the request matches no part.
 func (s *MultipartTestSuite) TestCompleteMultipartUploadRejectsPartWithoutETag() {
 	s.createBucket("mp-noetag")
 	uploadID := s.initiateUpload("mp-noetag", "file.bin", nil)
-	s.Require().NoError(s.server.Multipart.PutPart(context.Background(), uploadID, 1, []byte("hello"), ""))
+	_, err := s.server.Multipart.PutPart(context.Background(), uploadID, 1, []byte("hello"))
+	s.Require().NoError(err)
 
 	w := s.complete("mp-noetag", "file.bin", uploadID, CompletePart{PartNumber: 1, ETag: ""})
 

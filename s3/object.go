@@ -85,27 +85,41 @@ func (o *object) ETag() string {
 	return o.etag
 }
 
-// Keys s2-server stored in provider user metadata before v0.18.
+// Keys s2-server stored in provider user metadata before v0.18; read until v1.0.
 const (
 	legacyETagKey        = "s2-etag"
 	legacyContentTypeKey = "s2-content-type"
+	// legacyDefaultContentType is what s2-server stored when a client sent no Content-Type.
+	legacyDefaultContentType = "binary/octet-stream"
 )
 
-// liftLegacy returns md without s2-server's legacy keys, and the Content-Type they held.
+// liftLegacy returns md without the keys a pre-v0.18 s2-server wrote, and the Content-Type it kept there.
+// Every such write carried s2-etag, so without it the s2-* keys are the client's own and stay.
 func liftLegacy(md map[string]string) (s2.Metadata, string) {
-	if md == nil {
-		return nil, ""
+	if !hasLegacyETag(md) {
+		return s2.Metadata(md), ""
 	}
 	out := make(s2.Metadata, len(md))
 	var contentType string
 	for k, v := range md {
 		switch strings.ToLower(k) {
 		case legacyContentTypeKey:
-			contentType = v
+			if v != legacyDefaultContentType {
+				contentType = v
+			}
 		case legacyETagKey:
 		default:
 			out[k] = v
 		}
 	}
 	return out, contentType
+}
+
+func hasLegacyETag(md map[string]string) bool {
+	for k := range md {
+		if strings.EqualFold(k, legacyETagKey) {
+			return true
+		}
+	}
+	return false
 }

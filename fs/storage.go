@@ -264,11 +264,16 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 	if err := atomicWrite(s.fsys, obj.Name(), io.TeeReader(rc, h)); err != nil {
 		return err
 	}
-	return saveMeta(s.fsys, obj.Name(), meta{
+	err = saveMeta(s.fsys, obj.Name(), meta{
 		ETag:        quotedMD5(h),
 		ContentType: obj.ContentType(),
 		Metadata:    obj.Metadata(),
 	})
+	if err != nil {
+		// A stale sidecar would describe the previous body; without one the ETag falls back to the synthetic form.
+		_ = wfs.RemoveFile(s.fsys, metaPath(obj.Name()))
+	}
+	return err
 }
 
 // PutMetadata replaces the user metadata and keeps the ETag and content type.

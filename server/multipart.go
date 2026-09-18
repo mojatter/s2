@@ -37,7 +37,13 @@ type uploadMeta struct {
 	Bucket     string `json:"bucket"`
 	Key        string `json:"key"`
 	Generation int64  `json:"generation,omitempty"`
+	// ContentType lives in the record body: a backend may assign the record object a type of its own.
+	// Nil marks a v0.17 record, which kept the type under legacyContentTypeKey.
+	ContentType *string `json:"content_type"`
 }
+
+// legacyContentTypeKey is where a v0.17 record kept the initiate Content-Type.
+const legacyContentTypeKey = "s2-content-type"
 
 // MultipartStore stores in-progress uploads under <Root>/.multipart/<uploadId>/.
 type MultipartStore struct {
@@ -79,9 +85,9 @@ func isNotExist(err error) bool {
 	return errors.Is(err, s2.ErrNotExist) || errors.Is(err, fs.ErrNotExist)
 }
 
-// Create records an upload of bucket/key in generation gen; md is applied at completion.
-func (ms *MultipartStore) Create(ctx context.Context, id, bucket, key string, gen int64, md s2.Metadata) error {
-	body, err := json.Marshal(uploadMeta{Bucket: bucket, Key: key, Generation: gen})
+// Create records an upload of bucket/key in generation gen; md and contentType are applied at completion.
+func (ms *MultipartStore) Create(ctx context.Context, id, bucket, key string, gen int64, md s2.Metadata, contentType string) error {
+	body, err := json.Marshal(uploadMeta{Bucket: bucket, Key: key, Generation: gen, ContentType: &contentType})
 	if err != nil {
 		return err
 	}
@@ -123,39 +129,57 @@ func (ms *MultipartStore) load(ctx context.Context, id string) (uploadMeta, s2.M
 	if md == nil {
 		md = make(s2.Metadata)
 	}
+	if rec.ContentType == nil {
+		rec.ContentType = ms.legacyContentType(obj, md)
+	}
 	return rec, md, obj.LastModified(), nil
 }
 
-// record is load plus the bucket/key/generation binding check; age is left to the caller.
-func (ms *MultipartStore) record(ctx context.Context, id, bucket, key string, gen int64) (s2.Metadata, time.Time, error) {
-	rec, md, initiated, err := ms.load(ctx, id)
-	if err != nil {
-		return nil, time.Time{}, err
+// legacyContentType takes a v0.17 record's Content-Type out of md, or from the attribute fs lifted it into.
+func (ms *MultipartStore) legacyContentType(obj s2.Object, md s2.Metadata) *string {
+	ct, ok := md[legacyContentTypeKey]
+	delete(md, legacyContentTypeKey)
+	if !ok && isFSType(ms.strg.Type()) {
+		// Only fs lifts the key; a cloud record object has a type of its own.
+		ct = obj.ContentType()
 	}
-	if rec.Bucket != bucket || rec.Key != key || rec.Generation != gen {
-		return nil, time.Time{}, ErrNoSuchUpload
-	}
-	return md, initiated, nil
+	return &ct
 }
 
-// Metadata returns id's headers; ErrNoSuchUpload unless it targets bucket/key in gen and is unexpired.
-func (ms *MultipartStore) Metadata(ctx context.Context, id, bucket, key string, gen int64) (s2.Metadata, error) {
-	md, initiated, err := ms.record(ctx, id, bucket, key, gen)
+func isFSType(typ s2.Type) bool {
+	return typ == s2.TypeOSFS || typ == s2.TypeMemFS
+}
+
+// record is load plus the bucket/key/generation binding check; age is left to the caller.
+func (ms *MultipartStore) record(ctx context.Context, id, bucket, key string, gen int64) (uploadMeta, s2.Metadata, time.Time, error) {
+	rec, md, initiated, err := ms.load(ctx, id)
+	if err != nil {
+		return uploadMeta{}, nil, time.Time{}, err
+	}
+	if rec.Bucket != bucket || rec.Key != key || rec.Generation != gen {
+		return uploadMeta{}, nil, time.Time{}, ErrNoSuchUpload
+	}
+	return rec, md, initiated, nil
+}
+
+// Metadata returns id's metadata and Content-Type; ErrNoSuchUpload unless it targets bucket/key in gen and is unexpired.
+func (ms *MultipartStore) Metadata(ctx context.Context, id, bucket, key string, gen int64) (s2.Metadata, string, error) {
+	rec, md, initiated, err := ms.record(ctx, id, bucket, key, gen)
 	if errors.Is(err, errNoRecord) {
-		return nil, ErrNoSuchUpload
+		return nil, "", ErrNoSuchUpload
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if ms.expired(initiated) {
-		return nil, ErrNoSuchUpload
+		return nil, "", ErrNoSuchUpload
 	}
-	return md, nil
+	return md, *rec.ContentType, nil
 }
 
 // Abort removes id, expired or not; only a missing record skips the binding check.
 func (ms *MultipartStore) Abort(ctx context.Context, id, bucket, key string, gen int64) error {
-	if _, _, err := ms.record(ctx, id, bucket, key, gen); err != nil && !errors.Is(err, errNoRecord) {
+	if _, _, _, err := ms.record(ctx, id, bucket, key, gen); err != nil && !errors.Is(err, errNoRecord) {
 		return err
 	}
 	exists, err := ms.strg.Exists(ctx, id)
@@ -168,19 +192,31 @@ func (ms *MultipartStore) Abort(ctx context.Context, id, bucket, key string, gen
 	return ms.Remove(ctx, id)
 }
 
-// PutPart stores part n of id with its ETag, dropping it if an Abort took the record.
-func (ms *MultipartStore) PutPart(ctx context.Context, id string, n int, data []byte, etag string) error {
+// PutPart stores part n of id and returns the ETag the storage assigned, dropping it if an Abort took the record.
+func (ms *MultipartStore) PutPart(ctx context.Context, id string, n int, data []byte) (string, error) {
 	u, err := ms.upload(ctx, id)
 	if err != nil {
-		return err
+		return "", err
 	}
-	putErr := u.Put(ctx, s2.NewObjectBytes(uploadPartName(n), data, s2.WithMetadata(s2.Metadata{EtagMetadataKey: etag})))
+	putErr := u.Put(ctx, s2.NewObjectBytes(uploadPartName(n), data))
 	// Only a record known to be gone drops the part; a failed probe leaves it.
 	if exists, err := u.Exists(ctx, uploadMetaName); err == nil && !exists {
 		_ = ms.Remove(ctx, id)
-		return ErrNoSuchUpload
+		return "", ErrNoSuchUpload
 	}
-	return putErr
+	if putErr != nil {
+		return "", putErr
+	}
+	// The storage's ETag, not the part's MD5, is what Complete checks against.
+	obj, err := u.Get(ctx, uploadPartName(n))
+	if isNotExist(err) {
+		// Only an Abort or Sweep since the probe removes a part just written.
+		return "", ErrNoSuchUpload
+	}
+	if err != nil {
+		return "", err
+	}
+	return obj.ETag(), nil
 }
 
 // Part returns part n of id.
@@ -280,15 +316,7 @@ func (ms *MultipartStore) Parts(ctx context.Context, id string) ([]Part, error) 
 			if err != nil || uploadPartName(n) != obj.Name() {
 				continue
 			}
-			// List leaves metadata unset on fs, so the ETag needs a Get.
-			full, err := u.Get(ctx, obj.Name())
-			if isNotExist(err) {
-				continue
-			}
-			if err != nil {
-				return nil, err
-			}
-			parts = append(parts, Part{Number: n, ETag: full.Metadata()[EtagMetadataKey], Size: full.Length(), LastModified: full.LastModified()})
+			parts = append(parts, Part{Number: n, ETag: obj.ETag(), Size: obj.Length(), LastModified: obj.LastModified()})
 		}
 		if res.NextAfter == "" {
 			break

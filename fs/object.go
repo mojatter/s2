@@ -124,6 +124,8 @@ func (l *limitReadCloser) Read(p []byte) (n int, err error) {
 const (
 	legacyETagKey        = "s2-etag"
 	legacyContentTypeKey = "s2-content-type"
+	// legacyDefaultContentType is what s2-server stored when a client sent no Content-Type.
+	legacyDefaultContentType = "binary/octet-stream"
 )
 
 // meta is the JSON sidecar of an object.
@@ -175,7 +177,9 @@ func parseMeta(data []byte) (meta, error) {
 		return meta{}, fmt.Errorf("failed to decode meta file: %w", err)
 	}
 	m.ETag = m.Metadata[legacyETagKey]
-	m.ContentType = m.Metadata[legacyContentTypeKey]
+	if ct := m.Metadata[legacyContentTypeKey]; ct != legacyDefaultContentType {
+		m.ContentType = ct
+	}
 	delete(m.Metadata, legacyETagKey)
 	delete(m.Metadata, legacyContentTypeKey)
 	return m, nil
