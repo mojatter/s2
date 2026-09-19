@@ -784,19 +784,41 @@ func (e *errMetaRenameMemFS) Rename(oldpath, newpath string) error {
 }
 
 // A failed sidecar write must not leave the previous body's sidecar behind.
-func (s *StorageTestSuite) TestPutSidecarWriteFails() {
-	ctx := context.Background()
-	mem := memfs.New()
-	s.Require().NoError(NewStorageFS(s2.Config{}, mem).Put(ctx, s2.NewObjectBytes("a.txt", []byte("old"), s2.WithContentType("text/plain"))))
-	strg := &storage{fsys: &errMetaRenameMemFS{mem}}
+func (s *StorageTestSuite) TestSidecarWriteFails() {
+	testCases := []struct {
+		caseName string
+		write    func(ctx context.Context, strg *storage) error
+	}{
+		{
+			caseName: "put over an object",
+			write: func(ctx context.Context, strg *storage) error {
+				return strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("new body")))
+			},
+		},
+		{
+			caseName: "copy over an object",
+			write: func(ctx context.Context, strg *storage) error {
+				return strg.Copy(ctx, "src.txt", "a.txt")
+			},
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			mem := memfs.New()
+			seed := NewStorageFS(s2.Config{}, mem)
+			s.Require().NoError(seed.Put(ctx, s2.NewObjectBytes("a.txt", []byte("old"), s2.WithContentType("text/plain"))))
+			s.Require().NoError(seed.Put(ctx, s2.NewObjectBytes("src.txt", []byte("new body"), s2.WithContentType("text/csv"))))
+			strg := &storage{fsys: &errMetaRenameMemFS{mem}}
 
-	err := strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("new body")))
-	s.ErrorIs(err, fs.ErrPermission)
+			s.ErrorIs(tc.write(ctx, strg), fs.ErrPermission)
 
-	got, err := strg.Get(ctx, "a.txt")
-	s.Require().NoError(err)
-	s.Empty(got.ContentType())
-	s.Contains(got.ETag(), "-", "synthetic ETag, not the old body's MD5")
+			got, err := strg.Get(ctx, "a.txt")
+			s.Require().NoError(err)
+			s.Empty(got.ContentType())
+			s.Contains(got.ETag(), "-", "synthetic ETag, not the old body's MD5")
+		})
+	}
 }
 
 func (s *StorageTestSuite) TestPutMetadata() {

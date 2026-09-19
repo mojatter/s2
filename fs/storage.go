@@ -264,14 +264,19 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 	if err := atomicWrite(s.fsys, obj.Name(), io.TeeReader(rc, h)); err != nil {
 		return err
 	}
-	err = saveMeta(s.fsys, obj.Name(), meta{
+	return s.saveMetaForNewBody(obj.Name(), meta{
 		ETag:        quotedMD5(h),
 		ContentType: obj.ContentType(),
 		Metadata:    obj.Metadata(),
 	})
+}
+
+// saveMetaForNewBody writes the sidecar of a body just written, dropping a stale one when the write fails.
+func (s *storage) saveMetaForNewBody(name string, m meta) error {
+	err := saveMeta(s.fsys, name, m)
 	if err != nil {
 		// A stale sidecar would describe the previous body; without one the ETag falls back to the synthetic form.
-		_ = wfs.RemoveFile(s.fsys, metaPath(obj.Name()))
+		_ = wfs.RemoveFile(s.fsys, metaPath(name))
 	}
 	return err
 }
@@ -304,7 +309,7 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 	}
 	m := srcObj.m
 	m.ETag = quotedMD5(h)
-	return saveMeta(s.fsys, dst, m)
+	return s.saveMetaForNewBody(dst, m)
 }
 
 func (s *storage) Move(ctx context.Context, src, dst string) error {
