@@ -1,3 +1,8 @@
+// Package s2test is a conformance suite for s2.Storage implementations.
+//
+// The suite assumes a backend whose ETag is the MD5 of the body. A configuration
+// that answers something else, such as an s3 root using SSE-KMS or SSE-C, fails
+// TestStorageGetPut even though the implementation is correct.
 package s2test
 
 import (
@@ -244,7 +249,7 @@ func TestStorageListPaging(ctx context.Context, strg s2.Storage) error {
 	return TestStorageListRecursive(ctx, sub, "a.txt", "b.txt", "c.txt", "d.txt", "sub/e.txt")
 }
 
-// TestStorageGetPut validates that Put writes an object and Get reads it back correctly.
+// TestStorageGetPut validates that Put writes an object and Get reads it back with its metadata, Content-Type and ETag.
 func TestStorageGetPut(ctx context.Context, strg s2.Storage) error {
 	var errs []string
 	errorf := func(format string, args ...any) {
@@ -539,7 +544,7 @@ func TestStorageDelete(ctx context.Context, strg s2.Storage) error {
 	return nil
 }
 
-// TestStoragePutMetadata validates PutMetadata updates metadata without changing the object body.
+// TestStoragePutMetadata validates PutMetadata replaces the user metadata and leaves the body, Content-Type and ETag alone.
 func TestStoragePutMetadata(ctx context.Context, strg s2.Storage) error {
 	name := "s2test-putmeta.txt"
 	body := []byte("metadata test")
