@@ -2,7 +2,7 @@
 //
 // The suite assumes a backend whose ETag is the MD5 of the body. A configuration
 // that answers something else, such as an s3 root using SSE-KMS or SSE-C, fails
-// TestStorageGetPut even though the implementation is correct.
+// every ETag assertion even though the implementation is correct.
 package s2test
 
 import (

@@ -384,7 +384,7 @@ type Object interface {
 }
 ```
 
-`Metadata` holds only what the caller put there; s2 reserves no keys in it. What each backend stores and reports is in [docs/backends.md](docs/backends.md#content-type-and-etag).
+`Metadata` holds only what the caller put there. What each backend stores and reports — including the one name s2-server still reserves on `s3` and `gcs` roots until v1.0.0 — is in [docs/backends.md](docs/backends.md#content-type-and-etag).
 
 Move is a free function rather than a method so backends do not have to implement two near-identical operations. Backends that can do better than `Copy + Delete` (e.g. `osfs` via filesystem rename) satisfy the optional `s2.Mover` interface, which `s2.Move` discovers via type assertion:
 

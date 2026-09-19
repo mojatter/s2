@@ -176,7 +176,7 @@ Authentication priority: `connection_string` > `account_name`+`account_key` > De
 
 ## Content-Type and ETag
 
-Both are attributes of `s2.Object`, not entries in `Metadata()`. Each backend answers them from what it stores natively, so reading them off a `List` result costs no extra request.
+Both are attributes of `s2.Object`, not entries in `Metadata()`. Each backend answers them from what it stores natively, and a `List` result carries the ETag without extra requests. Content-Type is different: S3's listing does not return it, so on an `s3` root every listed object reports `""` and only `Get` has the real value.
 
 | Backend | Content-Type when the caller supplies one | Content-Type when the caller supplies none | ETag |
 |-------|-------------|-------------|-------------|
@@ -185,11 +185,15 @@ Both are attributes of `s2.Object`, not entries in `Metadata()`. Each backend an
 | `gcs` | Stored as the object's `contentType` | Nothing is stored; `ContentType()` is `""` | The MD5 attribute as quoted hex, else the provider's opaque `Etag` |
 | `azblob` | Stored as the blob's `Content-Type` | The provider's own default, `application/octet-stream` | The `Content-MD5` s2 sets on upload, else the provider's opaque `ETag` |
 
-An empty `ContentType()` means "nothing is stored", not "unknown to the caller": s2-server then guesses from the key's extension and falls back to `binary/octet-stream`. Only `osfs`, `memfs` and `gcs` can produce it, so the same object served from an `s3` or `azblob` root answers that root's default instead of the guess. s2-server's console guesses at upload time, because a browser cannot set the type on a form upload, and stores the guess.
+When `ContentType()` is `""`, s2-server guesses from the key's extension and falls back to `binary/octet-stream`. Stored objects answer `""` only on `osfs`, `memfs` and `gcs`, so the same body uploaded to an `s3` or `azblob` root answers that provider's default and never reaches the guess.
+
+The console's upload form is the one place that guesses before storing: it keeps the type the browser sent, unless that is missing or `application/octet-stream`, in which case it stores the extension's type — and nothing at all when the key's extension says nothing. The S3 API stores only what the client sent, so the same key can end up with a stored type through the console and none through `PutObject`.
 
 `ETag` values are quoted, as S3 returns them. s2 never assembles the composite `md5-of-md5s-N` form for multipart uploads; the ETag is the MD5 of the whole assembled body. On an `s3` root with SSE-KMS or SSE-C the provider's ETag is not the body's MD5, and s2 passes it through unchanged.
 
-A pre-v0.18.0 s2-server kept both values as `s2-etag` and `s2-content-type` metadata keys. Those objects are still read: `osfs` and `memfs` recognise the older flat sidecar, and `s3` and `gcs` lift the two keys into the attributes and hide them from `Metadata()` — but only for an object that still carries `s2-etag`, so a key a client sends today stays ordinary metadata. All of that compatibility is scheduled for removal in v1.0.0 ([#247](https://github.com/mojatter/s2/issues/247)).
+A pre-v0.18.0 s2-server kept both values as `s2-etag` and `s2-content-type` metadata keys. Those objects are still read: `osfs` and `memfs` recognise the older flat sidecar, and `s3` and `gcs` lift the two keys into the attributes and hide them from `Metadata()`.
+
+On `s3` and `gcs` that lift happens only for an object carrying `s2-etag`, which makes the name reserved on those roots. s2-server drops an incoming `x-amz-meta-s2-etag` header so a client cannot trigger it, but a library caller that writes the key itself gets its object read as a pre-v0.18.0 write, with `s2-content-type` promoted to `ContentType()`. All of this is scheduled for removal in v1.0.0 ([#247](https://github.com/mojatter/s2/issues/247)).
 
 ### Metadata names on azblob
 
