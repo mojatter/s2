@@ -3,10 +3,10 @@ module github.com/mojatter/s2/s2env
 go 1.26.0
 
 require (
-	github.com/mojatter/s2 v0.17.0
-	github.com/mojatter/s2/azblob v0.17.0
-	github.com/mojatter/s2/gcs v0.17.0
-	github.com/mojatter/s2/s3 v0.17.0
+	github.com/mojatter/s2 v0.18.0
+	github.com/mojatter/s2/azblob v0.18.0
+	github.com/mojatter/s2/gcs v0.18.0
+	github.com/mojatter/s2/s3 v0.18.0
 	github.com/stretchr/testify v1.12.1
 )
 
