@@ -62,9 +62,6 @@ func (o *object) LastModified() time.Time {
 
 func (o *object) Metadata() s2.Metadata {
 	_ = o.load()
-	if o.m.Metadata == nil {
-		o.m.Metadata = make(s2.Metadata)
-	}
 	return o.m.Metadata
 }
 

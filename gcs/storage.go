@@ -160,6 +160,9 @@ func (s *gcsStorage) Get(ctx context.Context, name string) (s2.Object, error) {
 		return nil, mapNotExist(err, name)
 	}
 	md, contentType := objectMetadata(attrs)
+	if md == nil {
+		md = make(s2.Metadata)
+	}
 	return &object{
 		client:       s.client,
 		bucket:       s.bucket,

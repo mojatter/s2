@@ -90,6 +90,7 @@ func NewObjectFromFile(ctx context.Context, name string, opts ...ObjectOption) (
 	for _, opt := range opts {
 		opt(o)
 	}
+	o.initMetadata()
 	return o, nil
 }
 
@@ -104,6 +105,7 @@ func NewObjectReader(name string, body io.ReadCloser, length uint64, opts ...Obj
 	for _, opt := range opts {
 		opt(o)
 	}
+	o.initMetadata()
 	return o
 }
 
@@ -175,9 +177,6 @@ func (o *object) LastModified() time.Time {
 }
 
 func (o *object) Metadata() Metadata {
-	if o.metadata == nil {
-		o.metadata = make(Metadata)
-	}
 	return o.metadata
 }
 
@@ -188,4 +187,12 @@ func (o *object) ContentType() string {
 // ETag returns "": the entity tag is assigned by the storage that stores the object.
 func (o *object) ETag() string {
 	return ""
+}
+
+// initMetadata runs after the options, so WithMetadata(nil) still leaves a
+// writable map for the obj.Metadata().Set(...) idiom.
+func (o *object) initMetadata() {
+	if o.metadata == nil {
+		o.metadata = make(Metadata)
+	}
 }

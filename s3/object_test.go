@@ -66,10 +66,9 @@ func (s *ObjectTestSuite) TestObjectMetadataNil() {
 		bucket: "my-bucket",
 		name:   "test.txt",
 	}
-	// metadata is nil, Metadata() should return an empty (non-nil) Metadata
-	md := obj.Metadata()
-	s.NotNil(md)
-	s.Equal(0, len(md))
+	// Metadata() is a pure read: a List result keeps the nil the backend gave
+	// it. Storage.Get is what guarantees a writable map.
+	s.Nil(obj.Metadata())
 }
 
 func (s *ObjectTestSuite) TestObjectOpenRange() {

@@ -340,6 +340,29 @@ func TestStorageGetPut(ctx context.Context, strg s2.Storage) error {
 		return fmt.Errorf("Delete(%q) failed: %w", large, err)
 	}
 
+	// Get answers a writable metadata map even for an object stored without
+	// any. It goes through a bare Object because s2.NewObjectBytes always
+	// carries a map, which would let a backend echo one back and pass.
+	//
+	// This reaches a backend that stores metadata verbatim. One that keeps a
+	// record of its own may normalize nil on the way in — fs writes an empty
+	// map into the sidecar — and has to cover the objects it did not write
+	// with a test of its own.
+	bare := "s2test-getput-nometa.txt"
+	if err := strg.Put(ctx, &BytesObject{Name_: bare, Data: []byte("bare")}); err != nil {
+		return fmt.Errorf("Put(%q) failed: %w", bare, err)
+	}
+	gotBare, err := strg.Get(ctx, bare)
+	if err != nil {
+		return fmt.Errorf("Get(%q) failed: %w", bare, err)
+	}
+	if gotBare.Metadata() == nil {
+		errorf("Get(%q).Metadata() is nil, want a writable map", bare)
+	}
+	if err := strg.Delete(ctx, bare); err != nil {
+		return fmt.Errorf("Delete(%q) failed: %w", bare, err)
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("TestStorageGetPut found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
 	}

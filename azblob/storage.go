@@ -197,6 +197,10 @@ func (s *azblobStorage) Get(ctx context.Context, name string) (s2.Object, error)
 	if err != nil {
 		return nil, mapNotExist(err, name)
 	}
+	md := s2.Metadata(fromPtrMetadata(props.metadata))
+	if md == nil {
+		md = make(s2.Metadata)
+	}
 	return &object{
 		client:      s.client,
 		container:   s.container,
@@ -204,7 +208,7 @@ func (s *azblobStorage) Get(ctx context.Context, name string) (s2.Object, error)
 		name:        name,
 		length:      s2.MustUint64(props.contentLength),
 		modified:    props.lastModified,
-		metadata:    s2.Metadata(fromPtrMetadata(props.metadata)),
+		metadata:    md,
 		contentType: props.contentType,
 		etag:        blobETag(props.contentMD5, props.etag),
 	}, nil

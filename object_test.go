@@ -91,6 +91,16 @@ func TestObjectOptions(t *testing.T) {
 		assert.Equal(t, "1", v)
 	})
 
+	t.Run("WithMetadata(nil) still leaves a writable map", func(t *testing.T) {
+		obj := NewObjectBytes("nil-meta.txt", []byte("data"), WithMetadata(nil))
+
+		require.NotNil(t, obj.Metadata())
+		obj.Metadata().Set("key", "val")
+		v, ok := obj.Metadata().Get("key")
+		assert.True(t, ok)
+		assert.Equal(t, "val", v)
+	})
+
 	t.Run("WithLastModified on NewObjectBytes", func(t *testing.T) {
 		ts := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
 		obj := NewObjectBytes("time.txt", []byte("data"), WithLastModified(ts))

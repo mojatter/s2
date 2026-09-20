@@ -3,6 +3,7 @@ package fs
 import (
 	"io"
 	"io/fs"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -133,11 +134,11 @@ type fakeFileInfo struct {
 	size int64
 }
 
-func (f *fakeFileInfo) Size() int64      { return f.size }
-func (f *fakeFileInfo) IsDir() bool      { return false }
-func (f *fakeFileInfo) Name() string     { return "fake" }
-func (f *fakeFileInfo) Mode() fs.FileMode { return 0 }
-func (f *fakeFileInfo) Sys() any         { return nil }
+func (f *fakeFileInfo) Size() int64        { return f.size }
+func (f *fakeFileInfo) IsDir() bool        { return false }
+func (f *fakeFileInfo) Name() string       { return "fake" }
+func (f *fakeFileInfo) Mode() fs.FileMode  { return 0 }
+func (f *fakeFileInfo) Sys() any           { return nil }
 func (f *fakeFileInfo) ModTime() time.Time { return time.Time{} }
 
 func (s *ObjectTestSuite) TestMetadata() {
@@ -150,8 +151,10 @@ func (s *ObjectTestSuite) TestMetadata() {
 		wantETag        string
 	}{
 		{
+			// newObjectFileInfo is the List path: the accessor is a pure read,
+			// so a missing sidecar leaves the map nil. Storage.Get fills it.
 			caseName:     "no sidecar",
-			wantMetadata: s2.Metadata{},
+			wantMetadata: nil,
 			wantETag:     `"1234-5"`,
 		},
 		{
@@ -183,7 +186,7 @@ func (s *ObjectTestSuite) TestMetadata() {
 		{
 			caseName:     "unreadable sidecar",
 			sidecar:      `{`,
-			wantMetadata: s2.Metadata{},
+			wantMetadata: nil,
 			wantETag:     `"1234-5"`,
 		},
 	}
@@ -202,4 +205,27 @@ func (s *ObjectTestSuite) TestMetadata() {
 			s.Equal(tc.wantETag, obj.ETag())
 		})
 	}
+}
+
+// Accessors on a shared Object must be safe to call concurrently. The object
+// comes from the List path, whose sidecar is read lazily, and the file has no
+// sidecar at all, so the metadata map stays nil -- the case that used to make
+// Metadata() write to the object on a read. Meaningful under -race.
+func (s *ObjectTestSuite) TestObjectAccessorsAreConcurrencySafe() {
+	modTime := time.Unix(0, 0x1234)
+	fsys := fstest.MapFS{"a.txt": &fstest.MapFile{Data: []byte("hello"), ModTime: modTime}}
+	info, err := fs.Stat(fsys, "a.txt")
+	s.Require().NoError(err)
+
+	obj := newObjectFileInfo(fsys, "a.txt", info)
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			s.Nil(obj.Metadata())
+			s.Equal(`"1234-5"`, obj.ETag())
+			s.Empty(obj.ContentType())
+		})
+	}
+	wg.Wait()
 }
