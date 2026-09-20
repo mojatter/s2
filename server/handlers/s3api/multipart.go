@@ -1,7 +1,6 @@
 package s3api
 
 import (
-	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible multipart ETag
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -127,12 +126,15 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 
 	etag, err := s.Multipart.PutPart(ctx, uploadID, partNumber, data)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
+		code, msg, status := uploadErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
 	}
 
-	w.Header().Set("ETag", etag)
+	if etag != "" {
+		// As in handlePutObject: no header beats an empty, invalid one.
+		w.Header().Set("ETag", etag)
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -221,27 +223,22 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 		totalLen += obj.Length()
 	}
 
-	// The object's ETag is its body MD5, as for PutObject, not S3's md5-of-md5s-N form.
-	hash := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
+	// The object's ETag is whatever the backend stored, not S3's md5-of-md5s-N form.
 	pr := &partsReader{parts: partObjs}
-	body := struct {
-		io.Reader
-		io.Closer
-	}{io.TeeReader(pr, hash), pr}
-	if err := strg.Put(ctx, s2.NewObjectReader(key, body, totalLen, s2.WithMetadata(md), s2.WithContentType(contentType))); err != nil {
+	res, err := s2.Upload(ctx, strg, s2.NewObjectReader(key, pr, totalLen, s2.WithMetadata(md), s2.WithContentType(contentType)), s2.UploadOptions{})
+	if err != nil {
 		_ = pr.Close()
-		code, msg, status := s2ErrorToS3Error(err)
+		code, msg, status := uploadErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
 	}
 	_ = s.Multipart.Remove(ctx, uploadID)
-	etag := `"` + hex.EncodeToString(hash.Sum(nil)) + `"`
 
 	writeXML(w, http.StatusOK, CompleteMultipartUploadResult{
 		Location: "/" + bucketName + "/" + key,
 		Bucket:   bucketName,
 		Key:      key,
-		ETag:     etag,
+		ETag:     res.ETag,
 	})
 }
 

@@ -2,8 +2,6 @@ package s3api
 
 import (
 	"context"
-	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -440,10 +438,7 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Wrap body with MD5 hash calculation
-	hash := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
-	decodedBody := unwrapAWSChunkedBody(r)
-	body := io.TeeReader(decodedBody, hash)
+	body := unwrapAWSChunkedBody(r)
 	contentLength := r.ContentLength
 	if v := r.Header.Get("X-Amz-Decoded-Content-Length"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
@@ -453,13 +448,18 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	// An absent Content-Type stays unstored; readers resolve it (#210).
 	obj := s2.NewObjectReader(key, io.NopCloser(body), s2.MustUint64(contentLength),
 		s2.WithContentType(requestContentType(r)), s2.WithMetadata(parseMetadataHeaders(r)))
-	if err := strg.Put(ctx, obj); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
+	res, err := s2.Upload(ctx, strg, obj, s2.UploadOptions{})
+	if err != nil {
+		code, msg, status := uploadErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
 	}
 
-	w.Header().Set("ETag", `"`+hex.EncodeToString(hash.Sum(nil))+`"`)
+	if res.ETag != "" {
+		// A backend that cannot report one is better served by no header than
+		// by an empty one, which is not a valid entity tag.
+		w.Header().Set("ETag", res.ETag)
+	}
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -543,18 +543,19 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	hash := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
-	dstObj := s2.NewObjectReader(dstKey, io.NopCloser(io.TeeReader(rc, hash)), srcObj.Length(),
+	// NopCloser: the deferred Close above owns rc, not the backend's Put.
+	dstObj := s2.NewObjectReader(dstKey, io.NopCloser(rc), srcObj.Length(),
 		s2.WithMetadata(md), s2.WithContentType(contentType))
-	if err := dstStrg.Put(ctx, dstObj); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
+	res, err := s2.Upload(ctx, dstStrg, dstObj, s2.UploadOptions{})
+	if err != nil {
+		code, msg, status := uploadErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return
 	}
 
 	result := CopyObjectResult{
 		LastModified: time.Now().UTC(),
-		ETag:         `"` + hex.EncodeToString(hash.Sum(nil)) + `"`,
+		ETag:         res.ETag,
 	}
 	writeXML(w, http.StatusOK, result)
 }

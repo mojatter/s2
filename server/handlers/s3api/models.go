@@ -60,7 +60,7 @@ type Content struct {
 type CopyObjectResult struct {
 	XMLName      xml.Name  `xml:"http://s3.amazonaws.com/doc/2006-03-01/ CopyObjectResult"`
 	LastModified time.Time `xml:"LastModified"`
-	ETag         string    `xml:"ETag"`
+	ETag         string    `xml:"ETag,omitempty"`
 }
 
 // LocationConstraint represents the XML response for GetBucketLocation.
@@ -126,7 +126,7 @@ type CompleteMultipartUploadResult struct {
 	Location string   `xml:"Location"`
 	Bucket   string   `xml:"Bucket"`
 	Key      string   `xml:"Key"`
-	ETag     string   `xml:"ETag"`
+	ETag     string   `xml:"ETag,omitempty"`
 }
 
 // ListMultipartUploadsResult is the XML response for ListMultipartUploads.
