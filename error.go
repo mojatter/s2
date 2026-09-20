@@ -23,3 +23,9 @@ var ErrRequiredConfigRoot = errors.New("s2: required config.root")
 //	    // unknown backend
 //	}
 var ErrUnknownType = errors.New("s2: unknown storage type")
+
+// ErrUnknownETag is returned by Upload when the object was stored but its ETag
+// could not be learned, because the read-back that would have supplied it
+// failed. The write happened; only UploadResult.ETag is missing. The read-back's
+// own error is wrapped alongside, so errors.Is still finds ErrNotExist under it.
+var ErrUnknownETag = errors.New("s2: object stored but its etag is unknown")

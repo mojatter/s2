@@ -148,6 +148,80 @@ func Move(ctx context.Context, s Storage, src, dst string) error {
 	return s.Delete(ctx, src)
 }
 
+// Uploader is an optional interface that a Storage implementation may satisfy
+// to report what it stored. Put answers nothing, so a caller that needs the
+// stored ETag otherwise has to read the object back; a backend already has the
+// value in its own write response.
+//
+// Storage implementations are not required to satisfy Uploader; the free
+// function Upload falls back to Put followed by Get when they do not.
+type Uploader interface {
+	Upload(ctx context.Context, obj Object, opts UploadOptions) (UploadResult, error)
+}
+
+// UploadOptions controls an Upload call. It carries no settings today and
+// exists so that one can be added without breaking implementations.
+type UploadOptions struct{}
+
+// UploadResult reports what the backend stored. A field the backend does not
+// know is left at its zero value.
+type UploadResult struct {
+	// ETag is the stored object's entity tag in quoted form, the same value a
+	// following Get reports — including "" for a backend that has none, since
+	// [Object.ETag] is itself "" when unknown.
+	ETag string
+}
+
+// Upload stores obj on s and reports what was stored. If s implements Uploader,
+// its Upload method is used and no read-back happens. Otherwise Upload falls
+// back to Put followed by Get, which costs one more round trip and answers the
+// same ETag. A capability that reports no ETag is read back the same way, so
+// the result carries exactly what a following Get answers — which is "" for a
+// backend that reports no ETag at all.
+//
+// A read-back failure is returned as the call's error even though the object
+// was stored; it wraps [ErrUnknownETag] over the error Get gave. A caller
+// mapping errors to a status must not turn that into "no such object" — the
+// write succeeded — and can tell the case apart with errors.Is.
+//
+// The fallback is not atomic: a concurrent write to the same name can land
+// between the Put and the read-back, and the ETag then describes that write
+// rather than obj. Only a backend implementing Uploader is free of this.
+func Upload(ctx context.Context, s Storage, obj Object, opts UploadOptions) (UploadResult, error) {
+	if u, ok := s.(Uploader); ok {
+		res, err := u.Upload(ctx, obj, opts)
+		if err != nil || res.ETag != "" {
+			return res, err
+		}
+		// The capability reported no ETag; a read-back still can.
+		res.ETag, err = readBackETag(ctx, s, obj.Name())
+		if err != nil {
+			return UploadResult{}, fmt.Errorf("%w: %w", ErrUnknownETag, err)
+		}
+		return res, nil
+	}
+	if err := s.Put(ctx, obj); err != nil {
+		return UploadResult{}, err
+	}
+	etag, err := readBackETag(ctx, s, obj.Name())
+	if err != nil {
+		return UploadResult{}, fmt.Errorf("%w: %w", ErrUnknownETag, err)
+	}
+	return UploadResult{ETag: etag}, nil
+}
+
+// readBackETag reports the ETag a Get answers for name.
+func readBackETag(ctx context.Context, s Storage, name string) (string, error) {
+	got, err := s.Get(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if got == nil {
+		return "", nil
+	}
+	return got.ETag(), nil
+}
+
 // NewStorageFunc is a function that creates a new storage.
 type NewStorageFunc func(ctx context.Context, cfg Config) (Storage, error)
 
