@@ -24,11 +24,13 @@ type Object interface {
 	Length() uint64
 	// LastModified returns the last modified time of the object.
 	LastModified() time.Time
-	// Metadata returns the user metadata of the object.
+	// Metadata returns the object's user metadata. Writing to the returned
+	// map changes the in-memory Object, never the stored one.
 	//
-	// Note: Depending on the storage implementation (e.g., S3), objects
-	// returned by List operations may not contain metadata. Use Storage.Get
-	// to fetch the complete metadata.
+	// Storage.Get returns a writable map even when the object has none. A
+	// List result reports whatever the backend holds, which may be nil: reads
+	// are safe on a nil map, writes to one panic. On some backends (e.g. S3)
+	// a listed object carries no metadata at all; use Storage.Get for it.
 	Metadata() Metadata
 	// ContentType returns the object's MIME type, or "" when unknown.
 	// Objects returned by List may report "" (e.g., S3); use Storage.Get.
@@ -42,7 +44,7 @@ type Object interface {
 // NewObject, NewObjectReader, and NewObjectBytes.
 type ObjectOption func(*object)
 
-// WithMetadata sets the metadata on the object.
+// WithMetadata sets the metadata on the object, keeping md by reference.
 func WithMetadata(md Metadata) ObjectOption {
 	return func(o *object) {
 		o.metadata = md

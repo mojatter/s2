@@ -40,8 +40,8 @@ type ListOptions struct {
 // ListResult is the response from Storage.List.
 type ListResult struct {
 	// Objects are the objects matching the request, in lexicographic order.
-	// Their metadata may be unset depending on the backend; use Storage.Get
-	// to fetch full metadata.
+	// Their metadata may be unset depending on the backend, and Metadata()
+	// may report nil; use Storage.Get for full metadata and a writable map.
 	Objects []Object
 	// CommonPrefixes are the directory-like grouping prefixes (only populated
 	// when ListOptions.Recursive is false).
@@ -86,6 +86,8 @@ type Storage interface {
 	// matching opts.
 	List(ctx context.Context, opts ListOptions) (ListResult, error)
 	// Get returns the object identified by name, including its metadata.
+	// The returned Object's Metadata map is non-nil and writable even when
+	// the object carries none; a List result may report nil instead.
 	// If no object exists at name, the returned error wraps ErrNotExist.
 	Get(ctx context.Context, name string) (Object, error)
 	// Exists reports whether anything is present at name. Backends that
