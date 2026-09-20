@@ -340,6 +340,27 @@ func TestStorageGetPut(ctx context.Context, strg s2.Storage) error {
 		return fmt.Errorf("Delete(%q) failed: %w", large, err)
 	}
 
+	// s2.Upload reports the ETag a following Get answers, whether the backend
+	// implements the capability or falls back to Put and Get. The check is
+	// relative, so it holds whatever form the ETag takes.
+	up := "s2test-getput-upload.txt"
+	upRes, err := s2.Upload(ctx, strg, s2.NewObjectBytes(up, []byte("upload result")), s2.UploadOptions{})
+	if err != nil {
+		return fmt.Errorf("Upload(%q) failed: %w", up, err)
+	}
+	gotUp, err := strg.Get(ctx, up)
+	if err != nil {
+		return fmt.Errorf("Get(%q) failed: %w", up, err)
+	}
+	if upRes.ETag == "" {
+		errorf("Upload(%q) reported no ETag", up)
+	} else if gotUp.ETag() != upRes.ETag {
+		errorf("Upload(%q).ETag = %q, but Get reports %q", up, upRes.ETag, gotUp.ETag())
+	}
+	if err := strg.Delete(ctx, up); err != nil {
+		return fmt.Errorf("Delete(%q) failed: %w", up, err)
+	}
+
 	// Get answers a writable metadata map even for an object stored without
 	// any. It goes through a bare Object because s2.NewObjectBytes always
 	// carries a map, which would let a backend echo one back and pass.

@@ -119,16 +119,16 @@ func (m *mockAzblobClient) downloadStream(_ context.Context, container, blobName
 	return io.NopCloser(bytes.NewReader(body)), nil
 }
 
-func (m *mockAzblobClient) upload(_ context.Context, container, blobName string, body io.Reader, metadata map[string]*string, contentType string) error {
+func (m *mockAzblobClient) upload(_ context.Context, container, blobName string, body io.Reader, metadata map[string]*string, contentType string) (string, error) {
 	data, err := io.ReadAll(body)
 	if err != nil {
-		return err
+		return "", err
 	}
 	m.put(container, blobName, data, metadata)
 	b, _ := m.get(container, blobName)
 	sum := md5.Sum(data) // #nosec G401 -- mirrors sdkClient's Content-MD5
 	b.contentType, b.contentMD5 = contentType, sum[:]
-	return nil
+	return blobETag(sum[:], ""), nil
 }
 
 func (m *mockAzblobClient) deleteBlob(_ context.Context, container, blobName string) error {

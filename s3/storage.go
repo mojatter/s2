@@ -343,10 +343,18 @@ func mapNotExist(err error, name string) error {
 	return err
 }
 
+var _ s2.Uploader = (*storage)(nil)
+
 func (s *storage) Put(ctx context.Context, obj s2.Object) error {
+	_, err := s.Upload(ctx, obj, s2.UploadOptions{})
+	return err
+}
+
+// Upload implements s2.Uploader with the ETag PutObject already answers.
+func (s *storage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOptions) (s2.UploadResult, error) {
 	rc, err := obj.Open()
 	if err != nil {
-		return err
+		return s2.UploadResult{}, err
 	}
 	defer func() { _ = rc.Close() }()
 
@@ -357,7 +365,7 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 	if !ok {
 		b, err := io.ReadAll(rc)
 		if err != nil {
-			return err
+			return s2.UploadResult{}, err
 		}
 		body = bytes.NewReader(b)
 	}
@@ -372,8 +380,11 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 	if ct := obj.ContentType(); ct != "" {
 		input.ContentType = aws.String(ct)
 	}
-	_, err = s.client.PutObject(ctx, input)
-	return err
+	out, err := s.client.PutObject(ctx, input)
+	if err != nil {
+		return s2.UploadResult{}, err
+	}
+	return s2.UploadResult{ETag: aws.ToString(out.ETag)}, nil
 }
 
 // PutMetadata copies the object onto itself, resending its Content-Type, which a REPLACE copy would otherwise reset.

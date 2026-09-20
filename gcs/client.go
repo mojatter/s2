@@ -33,10 +33,17 @@ type gcsObject interface {
 	attrs(ctx context.Context) (*storage.ObjectAttrs, error)
 	newReader(ctx context.Context) (io.ReadCloser, error)
 	newRangeReader(ctx context.Context, offset, length int64) (io.ReadCloser, error)
-	newWriter(ctx context.Context, metadata map[string]string, contentType string) io.WriteCloser
+	newWriter(ctx context.Context, metadata map[string]string, contentType string) gcsWriter
 	patch(ctx context.Context, p objectPatch) error
 	copyTo(ctx context.Context, dst gcsObject) error
 	delete(ctx context.Context) error
+}
+
+// gcsWriter is an object writer whose attributes are readable once it closes.
+type gcsWriter interface {
+	io.WriteCloser
+	// attrs reports what was stored; valid only after a successful Close.
+	attrs() *storage.ObjectAttrs
 }
 
 type gcsObjectIterator interface {
@@ -101,7 +108,7 @@ func (o *sdkObject) newRangeReader(ctx context.Context, offset, length int64) (i
 	return o.obj.NewRangeReader(ctx, offset, length)
 }
 
-func (o *sdkObject) newWriter(ctx context.Context, metadata map[string]string, contentType string) io.WriteCloser {
+func (o *sdkObject) newWriter(ctx context.Context, metadata map[string]string, contentType string) gcsWriter {
 	w := o.obj.NewWriter(ctx)
 	if len(metadata) > 0 {
 		w.Metadata = metadata
@@ -109,8 +116,14 @@ func (o *sdkObject) newWriter(ctx context.Context, metadata map[string]string, c
 	w.ContentType = contentType
 	// Without this the SDK sniffs the body; an unset type is guessed from the name on read instead.
 	w.ForceEmptyContentType = contentType == ""
-	return w
+	return &sdkWriter{Writer: w}
 }
+
+type sdkWriter struct {
+	*storage.Writer
+}
+
+func (w *sdkWriter) attrs() *storage.ObjectAttrs { return w.Attrs() }
 
 // patchObject renders p as a request body. NullFields carries the per-key deletes that ObjectAttrsToUpdate cannot express.
 func patchObject(p objectPatch) *storagev1.Object {

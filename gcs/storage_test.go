@@ -230,7 +230,7 @@ func (o *mockGCSObject) newRangeReader(_ context.Context, offset, length int64) 
 	return io.NopCloser(bytes.NewReader(body[offset:end])), nil
 }
 
-func (o *mockGCSObject) newWriter(_ context.Context, metadata map[string]string, contentType string) io.WriteCloser {
+func (o *mockGCSObject) newWriter(_ context.Context, metadata map[string]string, contentType string) gcsWriter {
 	return &mockWriter{client: o.client, bucket: o.bucket, key: o.key, metadata: metadata, contentType: contentType}
 }
 
@@ -309,6 +309,7 @@ type mockWriter struct {
 	buf         bytes.Buffer
 	metadata    map[string]string
 	contentType string
+	closed      bool
 }
 
 func (w *mockWriter) Write(p []byte) (int, error) {
@@ -320,7 +321,17 @@ func (w *mockWriter) Close() error {
 	if obj, ok := w.client.get(w.bucket, w.key); ok {
 		obj.contentType = w.contentType
 	}
+	w.closed = true
 	return nil
+}
+
+// attrs mirrors the SDK: nil until Close, then the stored object's attributes.
+func (w *mockWriter) attrs() *storage.ObjectAttrs {
+	if !w.closed {
+		return nil
+	}
+	sum := md5.Sum(w.buf.Bytes()) // #nosec G401 -- mirrors the provider's Content-MD5
+	return &storage.ObjectAttrs{Name: w.key, Size: int64(w.buf.Len()), MD5: sum[:]}
 }
 
 // mockPageTokenPrefix marks the mock's page tokens. Real ones are opaque, so

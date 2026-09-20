@@ -203,10 +203,18 @@ func (s *gcsStorage) Exists(ctx context.Context, name string) (bool, error) {
 	return true, nil
 }
 
+var _ s2.Uploader = (*gcsStorage)(nil)
+
 func (s *gcsStorage) Put(ctx context.Context, obj s2.Object) error {
+	_, err := s.Upload(ctx, obj, s2.UploadOptions{})
+	return err
+}
+
+// Upload implements s2.Uploader with the attributes the writer reports on Close.
+func (s *gcsStorage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOptions) (s2.UploadResult, error) {
 	rc, err := obj.Open()
 	if err != nil {
-		return err
+		return s2.UploadResult{}, err
 	}
 	defer func() { _ = rc.Close() }()
 
@@ -214,9 +222,16 @@ func (s *gcsStorage) Put(ctx context.Context, obj s2.Object) error {
 
 	if _, err := io.Copy(w, rc); err != nil {
 		_ = w.Close()
-		return fmt.Errorf("gcs: put %q: %w", obj.Name(), err)
+		return s2.UploadResult{}, fmt.Errorf("gcs: put %q: %w", obj.Name(), err)
 	}
-	return w.Close()
+	if err := w.Close(); err != nil {
+		return s2.UploadResult{}, err
+	}
+	attrs := w.attrs()
+	if attrs == nil {
+		return s2.UploadResult{}, nil
+	}
+	return s2.UploadResult{ETag: objectETag(attrs)}, nil
 }
 
 // PutMetadata replaces the user metadata; a Content-Type under the legacy s2-content-type key moves to the object's own.

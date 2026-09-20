@@ -47,7 +47,8 @@ type blobItem struct {
 type azblobClient interface {
 	getProperties(ctx context.Context, container, blob string) (blobProps, error)
 	downloadStream(ctx context.Context, container, blobName string, offset, count int64) (io.ReadCloser, error)
-	upload(ctx context.Context, container, blobName string, body io.Reader, metadata map[string]*string, contentType string) error
+	// upload stores the blob and reports the ETag a later read derives.
+	upload(ctx context.Context, container, blobName string, body io.Reader, metadata map[string]*string, contentType string) (string, error)
 	deleteBlob(ctx context.Context, container, blobName string) error
 	setMetadata(ctx context.Context, container, blobName string, metadata map[string]*string) error
 	copyBlob(ctx context.Context, container, src, dst string) error
@@ -106,7 +107,7 @@ func (c *sdkClient) downloadStream(ctx context.Context, ctr, blobName string, of
 	return resp.Body, nil
 }
 
-func (c *sdkClient) upload(ctx context.Context, ctr, blobName string, body io.Reader, metadata map[string]*string, contentType string) error {
+func (c *sdkClient) upload(ctx context.Context, ctr, blobName string, body io.Reader, metadata map[string]*string, contentType string) (string, error) {
 	headers := &blob.HTTPHeaders{}
 	if contentType != "" {
 		headers.BlobContentType = &contentType
@@ -116,7 +117,10 @@ func (c *sdkClient) upload(ctx context.Context, ctr, blobName string, body io.Re
 		Metadata:    metadata,
 		HTTPHeaders: headers,
 	})
-	return err
+	if err != nil {
+		return "", err
+	}
+	return blobETag(headers.BlobContentMD5, ""), nil
 }
 
 // md5Reader records the body's MD5 in headers at EOF; UploadStream reads headers only when it commits, after EOF.
