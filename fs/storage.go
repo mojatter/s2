@@ -256,22 +256,34 @@ func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
 	return true, nil
 }
 
+var _ s2.Uploader = (*storage)(nil)
+
 func (s *storage) Put(ctx context.Context, obj s2.Object) error {
+	_, err := s.Upload(ctx, obj, s2.UploadOptions{})
+	return err
+}
+
+// Upload implements s2.Uploader. The ETag is the body MD5 this call computes.
+func (s *storage) Upload(_ context.Context, obj s2.Object, _ s2.UploadOptions) (s2.UploadResult, error) {
 	rc, err := obj.Open()
 	if err != nil {
-		return err
+		return s2.UploadResult{}, err
 	}
 	defer func() { _ = rc.Close() }()
 
 	h := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
 	if err := atomicWrite(s.fsys, obj.Name(), io.TeeReader(rc, h)); err != nil {
-		return err
+		return s2.UploadResult{}, err
 	}
-	return s.saveMetaForNewBody(obj.Name(), meta{
-		ETag:        quotedMD5(h),
+	etag := quotedMD5(h)
+	if err := s.saveMetaForNewBody(obj.Name(), meta{
+		ETag:        etag,
 		ContentType: obj.ContentType(),
 		Metadata:    obj.Metadata(),
-	})
+	}); err != nil {
+		return s2.UploadResult{}, err
+	}
+	return s2.UploadResult{ETag: etag}, nil
 }
 
 // saveMetaForNewBody writes the sidecar of a body just written, dropping a stale one when the write fails.

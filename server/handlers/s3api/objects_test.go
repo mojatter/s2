@@ -2430,3 +2430,137 @@ func BenchmarkHTTPPutObject(b *testing.B)      { benchHTTPPutObject(b, s2.TypeOS
 func BenchmarkHTTPGetObject(b *testing.B)      { benchHTTPGetObject(b, s2.TypeOSFS) }
 func BenchmarkHTTPPutObjectMemFS(b *testing.B) { benchHTTPPutObject(b, s2.TypeMemFS) }
 func BenchmarkHTTPGetObjectMemFS(b *testing.B) { benchHTTPGetObject(b, s2.TypeMemFS) }
+
+// typeOpaqueETag is an osfs root whose ETags are not the body MD5, as an s3
+// bucket using SSE-KMS or SSE-C answers.
+const typeOpaqueETag = s2.Type("opaque-etag-test")
+
+type opaqueETagStorage struct {
+	s2.Storage
+}
+
+func opaqueETag(name string) string { return `"opaque-` + name + `"` }
+
+func (o opaqueETagStorage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
+	sub, err := o.Storage.Sub(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return opaqueETagStorage{sub}, nil
+}
+
+func (o opaqueETagStorage) Get(ctx context.Context, name string) (s2.Object, error) {
+	obj, err := o.Storage.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return opaqueETagObject{obj}, nil
+}
+
+// Upload makes this satisfy s2.Uploader, so the handlers take the capability
+// path rather than the Put-then-Get fallback.
+func (o opaqueETagStorage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOptions) (s2.UploadResult, error) {
+	if err := o.Put(ctx, obj); err != nil {
+		return s2.UploadResult{}, err
+	}
+	return s2.UploadResult{ETag: opaqueETag(obj.Name())}, nil
+}
+
+type opaqueETagObject struct {
+	s2.Object
+}
+
+func (o opaqueETagObject) ETag() string { return opaqueETag(o.Name()) }
+
+func (s *ObjectsTestSuite) newOpaqueETagServer() *server.Server {
+	s.T().Helper()
+	root := s.T().TempDir()
+	// Built before registering: NewStorage holds the registry lock while it
+	// calls the factory, so a factory calling it back would deadlock.
+	base, err := s2.NewStorage(context.Background(), s2.Config{Type: s2.TypeOSFS, Root: root})
+	s.Require().NoError(err)
+	s2.RegisterNewStorageFunc(typeOpaqueETag, func(context.Context, s2.Config) (s2.Storage, error) {
+		return opaqueETagStorage{base}, nil
+	})
+	s.T().Cleanup(func() { s2.UnregisterNewStorageFunc(typeOpaqueETag) })
+
+	cfg := server.DefaultConfig()
+	cfg.Root = root
+	cfg.Type = typeOpaqueETag
+	srv, err := server.NewServer(context.Background(), cfg)
+	s.Require().NoError(err)
+	s.Require().NoError(srv.Buckets.Create(context.Background(), "kms"))
+	return srv
+}
+
+// A write and a later read must agree on the ETag even when the backend does
+// not derive it from the body (#249).
+func (s *ObjectsTestSuite) TestWriteAnswersTheStoredETag() {
+	srv := s.newOpaqueETagServer()
+	ts := httptest.NewServer(srv.S3Handler())
+	defer ts.Close()
+
+	do := func(method, target string, body string, header map[string]string) (*http.Response, []byte) {
+		s.T().Helper()
+		var rdr io.Reader
+		if body != "" {
+			rdr = strings.NewReader(body)
+		}
+		req, err := http.NewRequest(method, ts.URL+target, rdr)
+		s.Require().NoError(err)
+		for k, v := range header {
+			req.Header.Set(k, v)
+		}
+		resp, err := ts.Client().Do(req)
+		s.Require().NoError(err)
+		defer func() { _ = resp.Body.Close() }()
+
+		b, err := io.ReadAll(resp.Body)
+		s.Require().NoError(err)
+		return resp, b
+	}
+
+	s.Run("PutObject", func() {
+		put, _ := do(http.MethodPut, "/kms/a.txt", "hello", nil)
+		s.Require().Equal(http.StatusOK, put.StatusCode)
+
+		head, _ := do(http.MethodHead, "/kms/a.txt", "", nil)
+		s.Require().Equal(http.StatusOK, head.StatusCode)
+		s.Equal(opaqueETag("a.txt"), put.Header.Get("ETag"))
+		s.Equal(put.Header.Get("ETag"), head.Header.Get("ETag"))
+	})
+
+	s.Run("CopyObject", func() {
+		src, _ := do(http.MethodPut, "/kms/src.txt", "hello", nil)
+		s.Require().Equal(http.StatusOK, src.StatusCode)
+
+		cp, body := do(http.MethodPut, "/kms/dst.txt", "", map[string]string{"x-amz-copy-source": "/kms/src.txt"})
+		s.Require().Equal(http.StatusOK, cp.StatusCode)
+		var result CopyObjectResult
+		s.Require().NoError(xml.Unmarshal(body, &result))
+
+		head, _ := do(http.MethodHead, "/kms/dst.txt", "", nil)
+		s.Equal(opaqueETag("dst.txt"), result.ETag)
+		s.Equal(result.ETag, head.Header.Get("ETag"))
+	})
+
+	s.Run("CompleteMultipartUpload", func() {
+		created, body := do(http.MethodPost, "/kms/m.txt?uploads", "", nil)
+		s.Require().Equal(http.StatusOK, created.StatusCode)
+		var initiated InitiateMultipartUploadResult
+		s.Require().NoError(xml.Unmarshal(body, &initiated))
+
+		part, _ := do(http.MethodPut, "/kms/m.txt?partNumber=1&uploadId="+initiated.UploadID, "hello", nil)
+		s.Require().Equal(http.StatusOK, part.StatusCode)
+
+		done, body := do(http.MethodPost, "/kms/m.txt?uploadId="+initiated.UploadID,
+			completeBody(CompletePart{PartNumber: 1, ETag: part.Header.Get("ETag")}), nil)
+		s.Require().Equal(http.StatusOK, done.StatusCode)
+		var completed CompleteMultipartUploadResult
+		s.Require().NoError(xml.Unmarshal(body, &completed))
+
+		head, _ := do(http.MethodHead, "/kms/m.txt", "", nil)
+		s.Equal(opaqueETag("m.txt"), completed.ETag)
+		s.Equal(completed.ETag, head.Header.Get("ETag"))
+	})
+}

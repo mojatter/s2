@@ -145,6 +145,17 @@ func (r *awsChunkedReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// uploadErrorToS3Error maps a failure from s2.Upload. ErrUnknownETag means the
+// object was stored and only the read-back failed, so it must not answer
+// NoSuchKey: that would tell the client its write did not land. A retry of the
+// same request converges, since the write is idempotent.
+func uploadErrorToS3Error(err error) (string, string, int) {
+	if errors.Is(err, s2.ErrUnknownETag) {
+		return "InternalError", err.Error(), http.StatusInternalServerError
+	}
+	return s2ErrorToS3Error(err)
+}
+
 func s2ErrorToS3Error(err error) (string, string, int) {
 	if errors.Is(err, s2.ErrNotExist) {
 		return "NoSuchKey", err.Error(), http.StatusNotFound

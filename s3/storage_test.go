@@ -204,7 +204,8 @@ func (m *mockS3Client) PutObject(ctx context.Context, params *s3.PutObjectInput,
 		return nil, err
 	}
 	m.putWithContentType(aws.ToString(params.Bucket), aws.ToString(params.Key), b, params.Metadata, aws.ToString(params.ContentType))
-	return &s3.PutObjectOutput{}, nil
+	// The real PutObject answers the stored object's ETag, as Head and Get do.
+	return &s3.PutObjectOutput{ETag: aws.String(mockETag(b))}, nil
 }
 
 func (m *mockS3Client) DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {

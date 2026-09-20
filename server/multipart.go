@@ -198,25 +198,22 @@ func (ms *MultipartStore) PutPart(ctx context.Context, id string, n int, data []
 	if err != nil {
 		return "", err
 	}
-	putErr := u.Put(ctx, s2.NewObjectBytes(uploadPartName(n), data))
+	// The storage's ETag, not the part's MD5, is what Complete checks against.
+	res, putErr := s2.Upload(ctx, u, s2.NewObjectBytes(uploadPartName(n), data), s2.UploadOptions{})
 	// Only a record known to be gone drops the part; a failed probe leaves it.
 	if exists, err := u.Exists(ctx, uploadMetaName); err == nil && !exists {
 		_ = ms.Remove(ctx, id)
 		return "", ErrNoSuchUpload
 	}
+	if isNotExist(putErr) {
+		// A backend without s2.Uploader reads the part back, so an Abort
+		// between the write and that read surfaces here.
+		return "", ErrNoSuchUpload
+	}
 	if putErr != nil {
 		return "", putErr
 	}
-	// The storage's ETag, not the part's MD5, is what Complete checks against.
-	obj, err := u.Get(ctx, uploadPartName(n))
-	if isNotExist(err) {
-		// Only an Abort or Sweep since the probe removes a part just written.
-		return "", ErrNoSuchUpload
-	}
-	if err != nil {
-		return "", err
-	}
-	return obj.ETag(), nil
+	return res.ETag, nil
 }
 
 // Part returns part n of id.

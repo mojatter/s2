@@ -235,14 +235,27 @@ func (s *azblobStorage) Exists(ctx context.Context, name string) (bool, error) {
 	return len(res.items) > 0, nil
 }
 
+var _ s2.Uploader = (*azblobStorage)(nil)
+
 func (s *azblobStorage) Put(ctx context.Context, obj s2.Object) error {
+	_, err := s.Upload(ctx, obj, s2.UploadOptions{})
+	return err
+}
+
+// Upload implements s2.Uploader. upload reports the Content-MD5 it sent, which
+// is the ETag a later Get derives.
+func (s *azblobStorage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOptions) (s2.UploadResult, error) {
 	rc, err := obj.Open()
 	if err != nil {
-		return err
+		return s2.UploadResult{}, err
 	}
 	defer func() { _ = rc.Close() }()
 
-	return s.client.upload(ctx, s.container, s.key(obj.Name()), rc, toPtrMetadata(obj.Metadata()), obj.ContentType())
+	etag, err := s.client.upload(ctx, s.container, s.key(obj.Name()), rc, toPtrMetadata(obj.Metadata()), obj.ContentType())
+	if err != nil {
+		return s2.UploadResult{}, err
+	}
+	return s2.UploadResult{ETag: etag}, nil
 }
 
 func (s *azblobStorage) PutMetadata(ctx context.Context, name string, metadata s2.Metadata) error {

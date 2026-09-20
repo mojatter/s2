@@ -392,6 +392,13 @@ Move is a free function rather than a method so backends do not have to implemen
 err := s2.Move(ctx, strg, "src.txt", "dst.txt")
 ```
 
+`Put` reports nothing about what it stored, so a caller that needs the ETag would have to read the object back. `s2.Upload` avoids that: backends that can report it — all four bundled ones do — satisfy the optional `s2.Uploader` interface, and the free function falls back to `Put` followed by `Get` for those that do not.
+
+```go
+res, err := s2.Upload(ctx, strg, obj, s2.UploadOptions{})
+// res.ETag is what a later Get reports.
+```
+
 Errors that report a missing object wrap [`s2.ErrNotExist`](https://pkg.go.dev/github.com/mojatter/s2#pkg-variables); detect them with `errors.Is`:
 
 ```go
