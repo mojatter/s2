@@ -37,6 +37,28 @@
 // concurrent Puts to the same object resolve to one of the writes — there
 // is no defined ordering — but no torn writes are exposed.
 //
+// An Object's attribute accessors — Name, Length, LastModified, Metadata,
+// ContentType and ETag — are safe for concurrent use by multiple goroutines,
+// on an Object returned by Get or List as much as on one you built, and Put
+// leaves them alone. A backend that resolves an attribute lazily on first call
+// must synchronize that itself; the fs backend reads its sidecar under a
+// sync.Once.
+//
+// Open and OpenRange differ by how the Object was made. One from
+// [NewObjectReader] or [NewObjectBytes] wraps a single reader and hands the
+// same one to every caller, so its body can be read — and therefore stored
+// with Put — only once. One from Get, List or [NewObjectFromFile] opens a new
+// reader per call.
+//
+// Writing to the map [Object.Metadata] returns changes the in-memory Object
+// and never the stored object, and must not be done while the Object is shared
+// between goroutines. [WithMetadata] keeps the caller's map by reference, so
+// every Object built from one map shares it — and so does the caller; pass a
+// [Metadata.Clone] to hand over an independent copy. Get returns a writable map
+// even for an object that carries no metadata. A List result reports whatever
+// the backend holds, which may be nil: reads are safe on a nil map, writes to
+// one panic.
+//
 // PutMetadata is NOT atomic with Put. Calling Put followed by PutMetadata
 // leaves a window during which the object exists with whatever metadata
 // Put itself wrote.

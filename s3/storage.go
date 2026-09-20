@@ -245,6 +245,9 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 		return nil, fmt.Errorf("failed to get object: %w", err)
 	}
 	md, contentType := liftLegacy(params.Metadata)
+	if md == nil {
+		md = make(s2.Metadata)
+	}
 	if contentType == "" {
 		contentType = aws.ToString(params.ContentType)
 	}

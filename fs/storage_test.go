@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"path"
 	"strings"
 	"testing"
@@ -209,7 +210,10 @@ func (s *StorageTestSuite) TestList() {
 
 					s.Equal(w.Name(), g.Name())
 					s.Equal(w.Length(), g.Length())
-					s.Equal(w.Metadata(), g.Metadata())
+					// A List result reports nil where the fixture holds an
+					// empty map; maps.Equal treats the two as equal.
+					s.Truef(maps.Equal(w.Metadata(), g.Metadata()),
+						"Metadata() = %v, want %v", g.Metadata(), w.Metadata())
 					wb, err := io.ReadAll(wrc)
 					s.Require().NoError(err)
 					gb, err := io.ReadAll(grc)
@@ -290,7 +294,10 @@ func (s *StorageTestSuite) TestListRecursive() {
 
 					s.Equal(w.Name(), g.Name())
 					s.Equal(w.Length(), g.Length())
-					s.Equal(w.Metadata(), g.Metadata())
+					// A List result reports nil where the fixture holds an
+					// empty map; maps.Equal treats the two as equal.
+					s.Truef(maps.Equal(w.Metadata(), g.Metadata()),
+						"Metadata() = %v, want %v", g.Metadata(), w.Metadata())
 					wantBody, err := io.ReadAll(wrc)
 					s.Require().NoError(err)
 					gotBody, err := io.ReadAll(grc)
@@ -567,6 +574,9 @@ func (s *StorageTestSuite) TestGet() {
 			}
 			s.Require().NoError(err)
 			s.Equal(tc.name, got.Name())
+			// The fixture writes no sidecar, so this covers Get's guarantee
+			// of a writable map for an object s2 did not write.
+			s.NotNil(got.Metadata())
 			// NOTE: memfs might return zero time if not set correctly or supported
 			// s.NotZero(got.LastModified())
 		})

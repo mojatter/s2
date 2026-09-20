@@ -67,9 +67,9 @@ func (s *ObjectTestSuite) TestObjectMetadataNil() {
 		name:   "test.txt",
 	}
 
-	md := obj.Metadata()
-	s.NotNil(md)
-	s.Equal(0, len(md))
+	// Metadata() is a pure read: a List result keeps the nil the backend gave
+	// it. Storage.Get is what guarantees a writable map.
+	s.Nil(obj.Metadata())
 }
 
 func (s *ObjectTestSuite) TestObjectOpenRange() {

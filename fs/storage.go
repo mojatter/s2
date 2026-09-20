@@ -235,6 +235,9 @@ func (s *storage) get(name string) (*object, error) {
 	if err := obj.load(); err != nil {
 		return nil, err
 	}
+	if obj.m.Metadata == nil {
+		obj.m.Metadata = make(s2.Metadata)
+	}
 	return obj, nil
 }
 
