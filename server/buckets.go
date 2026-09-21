@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/mojatter/s2"
-	_ "github.com/mojatter/s2/fs"
+	"github.com/mojatter/s2/fs"
 )
 
 // ErrReservedBucketName is returned by Buckets.Create for a name reserved
@@ -158,12 +158,22 @@ func (bs *Buckets) CreatedAt(ctx context.Context, name string) (time.Time, error
 	return obj.LastModified(), nil
 }
 
+// meta returns the storage holding per-bucket state. The fs backend keeps
+// bucketMetaDir for object sidecars and refuses every spelling of it, so there
+// it takes SubSidecar; elsewhere the name is an ordinary prefix.
+func (bs *Buckets) meta(ctx context.Context) (s2.Storage, error) {
+	if sub, ok := fs.SubSidecar(bs.strg); ok {
+		return sub, nil
+	}
+	return bs.strg.Sub(ctx, bucketMetaDir)
+}
+
 // Generation returns the bucket's multipart generation, recording one when missing.
 func (bs *Buckets) Generation(ctx context.Context, name string) (int64, error) {
 	if !isBucketName(name) {
 		return 0, &ErrBucketNotFound{Name: name}
 	}
-	strg, err := bs.strg.Sub(ctx, bucketMetaDir)
+	strg, err := bs.meta(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -217,7 +227,11 @@ func (bs *Buckets) Create(ctx context.Context, name string) error {
 		}
 	}
 	// A new generation first, so a failed marker write cannot leave a stale one behind.
-	if err := bs.strg.Put(ctx, s2.NewObjectBytes(bucketMetaDir+"/"+name, []byte{})); err != nil {
+	meta, err := bs.meta(ctx)
+	if err != nil {
+		return err
+	}
+	if err := meta.Put(ctx, s2.NewObjectBytes(name, []byte{})); err != nil {
 		return err
 	}
 	sub, err := bs.strg.Sub(ctx, name)
@@ -236,7 +250,11 @@ func (bs *Buckets) Delete(ctx context.Context, name string) error {
 	if err := bs.strg.DeleteRecursive(ctx, name+"/"); err != nil {
 		return err
 	}
-	return bs.strg.Delete(ctx, bucketMetaDir+"/"+name)
+	meta, err := bs.meta(ctx)
+	if err != nil {
+		return err
+	}
+	return meta.Delete(ctx, name)
 }
 
 // FolderMarker is the object a folder actually consists of. Authorize it, not

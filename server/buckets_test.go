@@ -390,7 +390,7 @@ func (s *BucketsTestSuite) TestBucketNameIsOnePathElement() {
 	// Nothing was recorded for it either. A listing, not Exists: a
 	// generation is stored as a file, so statting a name under one fails for
 	// a reason that has nothing to do with the guard.
-	meta, err := s.buckets.strg.Sub(ctx, bucketMetaDir)
+	meta, err := s.buckets.meta(ctx)
 	s.Require().NoError(err)
 	res, err := meta.List(ctx, s2.ListOptions{Recursive: true})
 	s.Require().NoError(err)
@@ -404,7 +404,9 @@ func (s *BucketsTestSuite) TestDeleteRemovesGeneration() {
 	s.Require().NoError(s.buckets.Create(ctx, "photos"))
 	s.Require().NoError(s.buckets.Delete(ctx, "photos"))
 
-	exists, err := s.buckets.strg.Exists(ctx, bucketMetaDir+"/photos")
+	meta, err := s.buckets.meta(ctx)
+	s.Require().NoError(err)
+	exists, err := meta.Exists(ctx, "photos")
 	s.Require().NoError(err)
 	s.False(exists)
 	names, err := s.buckets.Names(ctx)

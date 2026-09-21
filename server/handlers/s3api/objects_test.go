@@ -2344,9 +2344,10 @@ func (c *countingStorage) List(ctx context.Context, opts s2.ListOptions) (s2.Lis
 }
 
 // TestListRefusesACursorNoListingCouldReturn walks the input space of the
-// prefix/cursor retry ladder: each of the two may be fine or refused. Every
-// cell is a fixed number of backend calls -- the ladder has no loop and no
-// scan, so a cursor sorting above every key costs one call, not a listing.
+// prefix/cursor retry ladder: each of the two may be fine, refused by the
+// shared validator, or refused by the backend alone. Every cell is a fixed
+// number of backend calls -- the ladder has no loop and no scan, so a cursor
+// sorting above every key costs one call, not a listing.
 func TestListRefusesACursorNoListingCouldReturn(t *testing.T) {
 	ctx := context.Background()
 	cfg := server.DefaultConfig()
@@ -2373,6 +2374,12 @@ func TestListRefusesACursorNoListingCouldReturn(t *testing.T) {
 		{caseName: "a prefix the validator refuses", prefix: "..", startAfter: "", wantKeys: []string{}, wantLists: 1},
 		{caseName: "both refused by the validator", prefix: "..", startAfter: "-//x", wantRefuse: true},
 		{caseName: "a cursor that is not valid UTF-8", prefix: "a", startAfter: "\xff", wantRefuse: true},
+		// A name only the backend reserves: the validator lets it through, so
+		// the ladder has to ask, and the answer is still a bad request.
+		{caseName: "a cursor only the backend refuses", prefix: "a", startAfter: ".meta", wantRefuse: true, wantLists: 3},
+		{caseName: "a validator-refused prefix and a backend-refused cursor", prefix: "..", startAfter: ".meta", wantRefuse: true, wantLists: 2},
+		{caseName: "a prefix only the backend refuses", prefix: ".meta", startAfter: ".m", wantKeys: []string{".metadata.json"}, wantLists: 2},
+		{caseName: "both refused by the backend", prefix: ".meta", startAfter: ".meta", wantRefuse: true, wantLists: 3},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
@@ -2679,6 +2686,11 @@ func (s *ObjectsTestSuite) TestListTakesAnyS3Prefix() {
 		{caseName: "an ordinary prefix", query: "prefix=im", wantKeys: 1},
 		{caseName: "an empty element", query: "prefix=images%2F%2F", wantKeys: 0},
 		{caseName: "a prefix that leaves the bucket", query: "prefix=..%2Fpfx2", wantKeys: 0},
+		// A name the backend reserves for itself, which the shared validator
+		// does not know about.
+		{caseName: "a reserved element", query: "prefix=.meta", wantKeys: 0},
+		{caseName: "a reserved directory", query: "prefix=.meta%2F", wantKeys: 0},
+		{caseName: "a reserved element below", query: "prefix=images%2F.meta", wantKeys: 0},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
@@ -2690,16 +2702,42 @@ func (s *ObjectsTestSuite) TestListTakesAnyS3Prefix() {
 
 	// The cursor is the other half and reads the other way: it names where a
 	// page stopped, so a spelling no page could have ended on is a bad
-	// request rather than a filter.
+	// request rather than a filter -- including one only the backend
+	// reserves, which the shared validator cannot know about.
 	refusedCursors := []string{
 		"start-after=.",
 		"start-after=..%2Fpfx2",
 		"start-after=images%2F%2Fa.png",
+		"start-after=.meta",
 	}
 	for _, query := range refusedCursors {
 		s.Run(query, func() {
 			body := s.roundTripBody(s.server, http.MethodGet, "/pfx?list-type=2&"+query)
 			s.Contains(body, "<Code>InvalidArgument</Code>", body)
+		})
+	}
+
+	// A name the backend reserves is an element, and an S3 prefix is bytes:
+	// ".meta" must still find ".metadata.json". Pushing the prefix down asks
+	// the backend a question it answers with a refusal, not with a key.
+	s.putObject("look", ".metadata.json", "m")
+	s.putObject("look", "docs/.metadata.json", "d")
+	lookalikeCases := []struct {
+		caseName string
+		query    string
+		wantKey  string
+	}{
+		{caseName: "one byte short of the reserved name", query: "prefix=.met", wantKey: ".metadata.json"},
+		{caseName: "exactly the reserved name", query: "prefix=.meta", wantKey: ".metadata.json"},
+		{caseName: "one byte past it", query: "prefix=.metad", wantKey: ".metadata.json"},
+		{caseName: "exactly the reserved name, delimited", query: "prefix=.meta&delimiter=%2F", wantKey: ".metadata.json"},
+		{caseName: "the reserved name below a directory", query: "prefix=docs%2F.meta", wantKey: "docs/.metadata.json"},
+	}
+	for _, tc := range lookalikeCases {
+		s.Run(tc.caseName, func() {
+			body := s.roundTripBody(s.server, http.MethodGet, "/look?list-type=2&"+tc.query)
+			s.Require().Contains(body, "ListBucketResult", body)
+			s.Contains(body, "<Key>"+tc.wantKey+"</Key>", body)
 		})
 	}
 
@@ -2746,6 +2784,50 @@ func (s *ObjectsTestSuite) TestBucketSegmentIsOnePathElement() {
 	}
 
 	obj, err := strg.Get(ctx, "private/secret.txt")
+	s.Require().NoError(err)
+	s.Equal("text/plain", obj.ContentType())
+	s.Equal(s2.Metadata{"k": "v"}, obj.Metadata())
+}
+
+func (s *ObjectsTestSuite) TestObjectKeyCannotBeASidecar() {
+	ctx := context.Background()
+	strg, err := s.server.Buckets.Get(ctx, "bucket1")
+	if err != nil {
+		s.createBucket("bucket1")
+		strg, err = s.server.Buckets.Get(ctx, "bucket1")
+	}
+	s.Require().NoError(err)
+	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"),
+		s2.WithContentType("text/plain"), s2.WithMetadata(s2.Metadata{"k": "v"}))))
+
+	// On fs the object's metadata lives at .meta/a.txt, so a key spelling that
+	// reaches it writes another object's metadata under its own name.
+	testCases := []struct {
+		caseName string
+		method   string
+		target   string
+	}{
+		{caseName: "GET", method: http.MethodGet, target: "/bucket1/.meta/a.txt"},
+		{caseName: "PUT", method: http.MethodPut, target: "/bucket1/.meta/a.txt"},
+		{caseName: "DELETE", method: http.MethodDelete, target: "/bucket1/.meta/a.txt"},
+		{caseName: "multipart create", method: http.MethodPost, target: "/bucket1/.meta/a.txt?uploads"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			resp := s.roundTrip(s.server, tc.method, tc.target)
+			s.Equal(http.StatusBadRequest, resp.StatusCode)
+		})
+	}
+
+	// A listing is not a name: the prefix is the byte filter S3 defines, and
+	// it matches nothing, rather than being refused.
+	s.Run("list prefix", func() {
+		body := s.roundTripBody(s.server, http.MethodGet, "/bucket1?list-type=2&prefix=.meta/")
+		s.Contains(body, "<KeyCount>0</KeyCount>", body)
+		s.NotContains(body, "a.txt")
+	})
+
+	obj, err := strg.Get(ctx, "a.txt")
 	s.Require().NoError(err)
 	s.Equal("text/plain", obj.ContentType())
 	s.Equal(s2.Metadata{"k": "v"}, obj.Metadata())

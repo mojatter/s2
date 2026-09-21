@@ -74,9 +74,29 @@ func (s *storage) Type() s2.Type {
 }
 
 func (s *storage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
-	if err := s2.ValidatePrefix(prefix); err != nil {
+	if err := validatePrefix(prefix); err != nil {
 		return nil, err
 	}
+	return s.sub(prefix)
+}
+
+// SubSidecar scopes strg to the directory holding object sidecars, which Sub
+// refuses like any other spelling of it. It is how s2's own code reaches the
+// state it keeps beside the objects; ok is false for any other storage.
+func SubSidecar(strg s2.Storage) (sub s2.Storage, ok bool) {
+	s, is := strg.(*storage)
+	if !is {
+		return nil, false
+	}
+	sub, err := s.sub(metaDir)
+	if err != nil {
+		return nil, false
+	}
+	return sub, true
+}
+
+// sub scopes the storage to prefix, which the caller has already vetted.
+func (s *storage) sub(prefix string) (s2.Storage, error) {
 	// A prefix selects rather than names, so it may be empty or end in "/";
 	// io/fs.Sub takes neither.
 	prefix = strings.TrimSuffix(prefix, "/")
@@ -95,8 +115,41 @@ func (s *storage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
 }
 
 // isMetaDir reports whether a directory entry is the internal metadata directory.
+// metaDir holds the JSON sidecar of every object beside it.
+const metaDir = ".meta"
+
 func isMetaDir(name string) bool {
-	return name == ".meta"
+	return name == metaDir
+}
+
+// validateName is [s2.ValidateName] plus the metadata directory: ".meta/x" is
+// the sidecar of the object "x", not an object of its own.
+func validateName(name string) error {
+	if err := s2.ValidateName(name); err != nil {
+		return err
+	}
+	return rejectMetaDir(name)
+}
+
+// validatePrefix is [s2.ValidatePrefix] with the same exclusion.
+func validatePrefix(prefix string) error {
+	if err := s2.ValidatePrefix(prefix); err != nil {
+		return err
+	}
+	return rejectMetaDir(prefix)
+}
+
+// rejectMetaDir rejects a name holding the metadata directory as any element.
+// Any, not just the first: a Sub writes its own sidecars beside the names it
+// scopes, and both listings hide the directory at every depth, so a name
+// reaching through one would be stored and read but never listed.
+func rejectMetaDir(name string) error {
+	for elem := range strings.SplitSeq(name, "/") {
+		if isMetaDir(elem) {
+			return fmt.Errorf("%w: %s is reserved for object metadata", s2.ErrInvalidName, name)
+		}
+	}
+	return nil
 }
 
 // defaultListLimit caps a List call when ListOptions.Limit is unset (0).
@@ -104,11 +157,11 @@ func isMetaDir(name string) bool {
 const defaultListLimit = 1000
 
 func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
-	if err := s2.ValidatePrefix(opts.Prefix); err != nil {
+	if err := validatePrefix(opts.Prefix); err != nil {
 		return s2.ListResult{}, err
 	}
 	// StartAfter is a key, and every backend joins it with the storage prefix.
-	if err := s2.ValidatePrefix(opts.StartAfter); err != nil {
+	if err := validatePrefix(opts.StartAfter); err != nil {
 		return s2.ListResult{}, err
 	}
 	limit := opts.Limit
@@ -197,6 +250,20 @@ func (s *storage) listRecursive(prefix, after string, limit int) (s2.ListResult,
 		if err != nil {
 			return err
 		}
+		// Ahead of the cursor: a cursor that sorts inside ".meta" -- the
+		// directory name itself, or ".meta!" -- would otherwise let the walk
+		// descend and report the sidecars as objects. A regular file by that
+		// name is not an object either, and listFlat skips it too; SkipDir on
+		// one would skip the rest of the directory holding it.
+		// Not the walk root: a Sub of the metadata directory is how code that
+		// keeps its own state there reaches it, and memfs reports that root's
+		// name as ".meta" where osfs reports ".".
+		if name != "." && isMetaDir(d.Name()) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
 		if after != "" && name <= after {
 			return nil
 		}
@@ -208,9 +275,6 @@ func (s *storage) listRecursive(prefix, after string, limit int) (s2.ListResult,
 			return fmt.Errorf("failed to get info: %w", err)
 		}
 		if info.IsDir() {
-			if isMetaDir(d.Name()) {
-				return fs.SkipDir
-			}
 			return nil
 		}
 		if isTempFile(d.Name()) {
@@ -233,7 +297,7 @@ func (s *storage) listRecursive(prefix, after string, limit int) (s2.ListResult,
 }
 
 func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
-	if err := s2.ValidateName(name); err != nil {
+	if err := validateName(name); err != nil {
 		return nil, err
 	}
 	return s.get(name)
@@ -262,7 +326,7 @@ func (s *storage) get(name string) (*object, error) {
 // to distinguish the two should use Get (which rejects directories)
 // or List (which only enumerates directories).
 func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
-	if err := s2.ValidateName(name); err != nil {
+	if err := validateName(name); err != nil {
 		return false, err
 	}
 	_, err := fs.Stat(s.fsys, name)
@@ -276,7 +340,7 @@ func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
 }
 
 func (s *storage) Put(ctx context.Context, obj s2.Object) error {
-	if err := s2.ValidateName(obj.Name()); err != nil {
+	if err := validateName(obj.Name()); err != nil {
 		return err
 	}
 	rc, err := obj.Open()
@@ -308,7 +372,7 @@ func (s *storage) saveMetaForNewBody(name string, m meta) error {
 
 // PutMetadata replaces the user metadata and keeps the ETag and content type.
 func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Metadata) error {
-	if err := s2.ValidateName(name); err != nil {
+	if err := validateName(name); err != nil {
 		return err
 	}
 	obj, err := s.get(name)
@@ -322,7 +386,7 @@ func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Meta
 
 func (s *storage) Copy(ctx context.Context, src, dst string) error {
 	for _, name := range []string{src, dst} {
-		if err := s2.ValidateName(name); err != nil {
+		if err := validateName(name); err != nil {
 			return err
 		}
 	}
@@ -347,7 +411,7 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 
 func (s *storage) Move(ctx context.Context, src, dst string) error {
 	for _, name := range []string{src, dst} {
-		if err := s2.ValidateName(name); err != nil {
+		if err := validateName(name); err != nil {
 			return err
 		}
 	}
@@ -380,9 +444,13 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 }
 
 func (s *storage) Delete(ctx context.Context, name string) error {
-	if err := s2.ValidateName(name); err != nil {
+	if err := validateName(name); err != nil {
 		return err
 	}
+	return s.delete(name)
+}
+
+func (s *storage) delete(name string) error {
 	// Ignore metadata deletion errors (file may not have metadata)
 	_ = wfs.RemoveFile(s.fsys, metaPath(name))
 	if err := wfs.RemoveFile(s.fsys, name); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -392,7 +460,7 @@ func (s *storage) Delete(ctx context.Context, name string) error {
 }
 
 func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
-	if err := s2.ValidatePrefix(prefix); err != nil {
+	if err := validatePrefix(prefix); err != nil {
 		return err
 	}
 	dirName := strings.TrimSuffix(prefix, "/")
@@ -405,6 +473,20 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 			}
 			return err
 		}
+		// A ".meta" directory holds other objects' sidecars rather than
+		// objects, at any depth: a Sub writes its own beside the names it
+		// scopes. A prefix that merely starts its name -- ".met" -- must not
+		// reach it, so it goes only when the directory holding it does. The
+		// base name, because SkipDir on a file would skip the rest of the
+		// directory holding that file. Not the walk root: this storage may
+		// itself be a Sub of one, and memfs reports that root's name as
+		// ".meta" where osfs reports ".".
+		if d.IsDir() && name != "." && isMetaDir(d.Name()) {
+			if prefix == "" || strings.HasPrefix(path.Dir(name)+"/", prefix) {
+				dirs = append(dirs, name)
+			}
+			return fs.SkipDir
+		}
 		if prefix != "" && !strings.HasPrefix(name, prefix) && name != dirName {
 			return nil
 		}
@@ -412,7 +494,9 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 			dirs = append(dirs, name)
 			return nil
 		}
-		return s.Delete(ctx, name)
+		// These names came from the walk, so they are whatever the filesystem
+		// already holds; validating them here would leave the rest behind.
+		return s.delete(name)
 	})
 	if err != nil {
 		return err
@@ -426,7 +510,7 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 }
 
 func (s *storage) SignedURL(ctx context.Context, opts s2.SignedURLOptions) (string, error) {
-	if err := s2.ValidateName(opts.Name); err != nil {
+	if err := validateName(opts.Name); err != nil {
 		return "", err
 	}
 	if opts.Method != "" && opts.Method != s2.SignedURLGet {

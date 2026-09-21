@@ -180,9 +180,15 @@ Every name a `Storage` method takes is used as written: it must satisfy [`fs.Val
 
 `ListOptions.Prefix`, `ListOptions.StartAfter`, `DeleteRecursive` and `Sub` select objects rather than name one, so they also take `""` and one trailing `/`.
 
+On `s3`, `gcs` and `azblob`, `Exists("")` is the one exception: it reports the storage root, which exists by construction, without a round trip. `"/"` is a spelling of the same thing and is refused like any other non-canonical name.
+
 `fs.ValidPath` requires valid UTF-8, which means a key holding raw bytes that are not UTF-8 is refused even on `s3`, `gcs` and `azblob`, where the provider itself would store it.
 
 A key that an `s3`, `gcs` or `azblob` root already holds in a non-canonical form — a zero-byte `photos/` folder marker written by another tool, or a key holding bytes that are not UTF-8 — is still listed, but `Get`, `Delete`, `Copy` and `SignedURL` refuse it. s2 addresses names through `path.Join`, which never produces a trailing slash, so such a key was never reached as spelled: the call resolved to the neighbouring object instead. The refusal replaces a wrong answer with an error. Removing one takes `DeleteRecursive` over the enclosing prefix, or a tool that speaks the provider's API directly.
+
+On `osfs` and `memfs` the element `.meta` is reserved at every depth: it holds the JSON sidecar of another object, so neither `.meta/a.txt` nor `docs/.meta/a.txt` is an object of its own and both are refused. Every depth, because a `Sub` writes its own sidecars beside the names it scopes, and a listing hides the directory wherever it appears — a name reaching through one would be stored and read but never listed. `Sub` refuses it too, so no caller-supplied prefix reaches the sidecars; s2's own code takes `fs.SubSidecar`, which returns the same storage without going through a name.
+
+An `osfs` or `memfs` root may already hold a key under `.meta`: nothing refused the name before v0.18.1, so an s2-server of that vintage stored one on request. Such a key is refused now, and no listing ever reported it. It cannot be read back, because s2 cannot tell it apart from the sidecar of the object beside it — that indistinguishability is what the reservation closes. Removing one takes `DeleteRecursive` over the enclosing folder, deleting the bucket, or, on `osfs`, deleting the file from the root directory.
 
 A third-party `Storage` should call `s2.ValidateName` and `s2.ValidatePrefix` at the entry of every method that takes a name or a prefix; `s2test.TestStorageNameEscape` checks that it does.
 

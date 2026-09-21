@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/mojatter/s2"
+	"github.com/mojatter/s2/fs"
 	"github.com/mojatter/s2/server"
 )
 
@@ -714,7 +715,13 @@ func (s *MultipartTestSuite) TestCompleteMultipartUploadPartReadFailure() {
 	uploadID := s.initiateUpload("mp-eio", "file.bin", nil)
 	p1 := s.uploadPart("mp-eio", "file.bin", uploadID, 1, "hello")
 	// A corrupt sidecar makes the fs backend's Get fail with a decode error.
-	s.Require().NoError(s.server.Multipart.Storage().Put(context.Background(), s2.NewObjectBytes(uploadID+"/.meta/00001", []byte("{"))))
+	// Through Sub, because the sidecar directory is not an object name.
+	ctx := context.Background()
+	upload, err := s.server.Multipart.Storage().Sub(ctx, uploadID)
+	s.Require().NoError(err)
+	meta, ok := fs.SubSidecar(upload)
+	s.Require().True(ok)
+	s.Require().NoError(meta.Put(ctx, s2.NewObjectBytes("00001", []byte("{"))))
 
 	w := s.complete("mp-eio", "file.bin", uploadID, p1)
 	s.Equal(http.StatusInternalServerError, w.Code, w.Body.String())
