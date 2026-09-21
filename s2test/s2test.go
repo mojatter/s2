@@ -1,8 +1,11 @@
 // Package s2test is a conformance suite for s2.Storage implementations.
 //
-// The suite assumes a backend whose ETag is the MD5 of the body. A configuration
-// that answers something else, such as an s3 root using SSE-KMS or SSE-C, fails
-// every ETag assertion even though the implementation is correct.
+// The ETag assertions expect the MD5 of the body by default. Pass
+// WithOpaqueETag to a helper when the backend answers something else, such as
+// an s3 root using SSE-KMS or SSE-C; the suite then requires only a quoted,
+// non-empty ETag that Get and List agree on and that an overwrite changes.
+// Neither mode accommodates a backend with no ETag at all, which [s2.Object]
+// allows: the suite requires one.
 package s2test
 
 import (
@@ -250,7 +253,8 @@ func TestStorageListPaging(ctx context.Context, strg s2.Storage) error {
 }
 
 // TestStorageGetPut validates that Put writes an object and Get reads it back with its metadata, Content-Type and ETag.
-func TestStorageGetPut(ctx context.Context, strg s2.Storage) error {
+func TestStorageGetPut(ctx context.Context, strg s2.Storage, opts ...Option) error {
+	o := newOptions(opts)
 	var errs []string
 	errorf := func(format string, args ...any) {
 		errs = append(errs, fmt.Sprintf(format, args...))
@@ -300,10 +304,10 @@ func TestStorageGetPut(ctx context.Context, strg s2.Storage) error {
 		errorf("Get(%q).ContentType() = %q, want %q", name, ct, "text/plain")
 	}
 
-	// The ETag is the body's MD5, and listed objects report the same one.
+	// Listed objects report the same ETag as Get, whatever form it takes.
 	etag := got.ETag()
-	if want := quotedMD5(body); etag != want {
-		errorf("Get(%q).ETag() = %q, want %q", name, etag, want)
+	if err := o.etagError(fmt.Sprintf("Get(%q)", name), etag, body); err != nil {
+		errorf("%v", err)
 	}
 	res, err := strg.List(ctx, s2.ListOptions{Recursive: true})
 	if err != nil {
@@ -323,7 +327,7 @@ func TestStorageGetPut(ctx context.Context, strg s2.Storage) error {
 		errorf("List(%q) did not return the object", name)
 	}
 
-	// A body larger than one upload block must still get its MD5 as the ETag.
+	// A body larger than one upload block must still get an ETag.
 	large := "s2test-getput-large.bin"
 	largeBody := bytes.Repeat([]byte("s2test"), (2<<20)/6+1)
 	if err := strg.Put(ctx, s2.NewObjectBytes(large, largeBody)); err != nil {
@@ -333,8 +337,37 @@ func TestStorageGetPut(ctx context.Context, strg s2.Storage) error {
 	if err != nil {
 		return fmt.Errorf("Get(%q) failed: %w", large, err)
 	}
-	if etag, want := gotLarge.ETag(), quotedMD5(largeBody); etag != want {
-		errorf("Get(%q).ETag() = %q, want %q", large, etag, want)
+	// Captured before the overwrite below: an Object may read lazily.
+	largeETag := gotLarge.ETag()
+	if err := o.etagError(fmt.Sprintf("Get(%q)", large), largeETag, largeBody); err != nil {
+		errorf("%v", err)
+	}
+	// Overwriting must change the ETag. Opaque mode has no other way to reject
+	// a constant or name-derived value. The replacement differs in length, so a
+	// backend deriving the ETag from size and mtime — the fs fallback for a
+	// missing sidecar — is never asked to tell apart a same-size replacement
+	// within one clock tick, and passes.
+	if o.opaqueETag {
+		reBody := []byte("s2test overwritten")
+		if err := strg.Put(ctx, s2.NewObjectBytes(large, reBody)); err != nil {
+			return fmt.Errorf("Put(%q) to overwrite failed: %w", large, err)
+		}
+		gotRe, err := strg.Get(ctx, large)
+		if err != nil {
+			return fmt.Errorf("Get(%q) after overwrite failed: %w", large, err)
+		}
+		// The ETag assertion below reads as if the body changed; make it so.
+		if n := gotRe.Length(); n != uint64(len(reBody)) {
+			errorf("Get(%q).Length() = %d after overwriting, want %d", large, n, len(reBody))
+		}
+		// Captured once, as largeETag was: an Object may read lazily.
+		reETag := gotRe.ETag()
+		if err := o.etagError(fmt.Sprintf("Get(%q) after overwrite", large), reETag, reBody); err != nil {
+			errorf("%v", err)
+		}
+		if reETag == largeETag {
+			errorf("Get(%q).ETag() is still %q after overwriting with a different body", large, reETag)
+		}
 	}
 	if err := strg.Delete(ctx, large); err != nil {
 		return fmt.Errorf("Delete(%q) failed: %w", large, err)
@@ -588,8 +621,9 @@ func TestStorageDelete(ctx context.Context, strg s2.Storage) error {
 	return nil
 }
 
-// TestStoragePutMetadata validates PutMetadata replaces the user metadata and leaves the body, Content-Type and ETag alone.
-func TestStoragePutMetadata(ctx context.Context, strg s2.Storage) error {
+// TestStoragePutMetadata validates PutMetadata replaces the user metadata and leaves the body, Content-Type and (unless WithOpaqueETag) the ETag alone.
+func TestStoragePutMetadata(ctx context.Context, strg s2.Storage, opts ...Option) error {
+	o := newOptions(opts)
 	name := "s2test-putmeta.txt"
 	body := []byte("metadata test")
 	if err := strg.Put(ctx, s2.NewObjectBytes(name, body, s2.WithContentType("text/csv"), s2.WithMetadata(s2.Metadata{"stale": "x"}))); err != nil {
@@ -635,8 +669,8 @@ func TestStoragePutMetadata(ctx context.Context, strg s2.Storage) error {
 	if ct := got.ContentType(); ct != "text/csv" {
 		return fmt.Errorf("ContentType() after PutMetadata = %q, want %q", ct, "text/csv")
 	}
-	if etag, want := got.ETag(), quotedMD5(body); etag != want {
-		return fmt.Errorf("ETag() after PutMetadata = %q, want %q", etag, want)
+	if err := o.etagError(fmt.Sprintf("Get(%q) after PutMetadata", name), got.ETag(), body); err != nil {
+		return err
 	}
 
 	return nil
