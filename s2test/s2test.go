@@ -222,6 +222,70 @@ func TestStorageListRecursive(ctx context.Context, strg s2.Storage, expected ...
 	return nil
 }
 
+// TestStorageListRecursivePrefix checks that a recursive ListOptions.Prefix
+// matches names by string rather than as a directory. It writes a pair of its
+// own, since a caller's fixture need not hold one that tells the two apart,
+// and removes it afterwards; a read-only storage cannot run it.
+func TestStorageListRecursivePrefix(ctx context.Context, strg s2.Storage) error {
+	var errs []string
+	errorf := func(format string, args ...any) {
+		errs = append(errs, fmt.Sprintf(format, args...))
+	}
+
+	checkMatch := func(name string, objs []s2.Object, want []string) {
+		if len(objs) != len(want) {
+			errorf("%s: got %d objects, expected %d", name, len(objs), len(want))
+			return
+		}
+		for i, obj := range objs {
+			if obj.Name() != want[i] {
+				errorf("%s: object at index %d has name %q, expected %q", name, i, obj.Name(), want[i])
+			}
+		}
+	}
+
+	base := "s2test-listrec-prefix"
+	sibling, inner := base+".txt", base+"/inner.txt"
+	stored := true
+	for _, name := range []string{sibling, inner} {
+		if err := strg.Put(ctx, s2.NewObjectBytes(name, []byte("x"))); err != nil {
+			errorf("Put(%q) failed: %v", name, err)
+			stored = false
+		}
+	}
+	if stored {
+		both := []string{sibling, inner}
+		sort.Strings(both)
+		testCases := []struct {
+			prefix string
+			want   []string
+		}{
+			{prefix: base, want: both},
+			// A trailing slash still confines the listing to the directory.
+			{prefix: base + "/", want: []string{inner}},
+		}
+		for _, tc := range testCases {
+			res, err := strg.List(ctx, s2.ListOptions{Prefix: tc.prefix, Recursive: true})
+			if err != nil {
+				errorf("List(prefix=%q, recursive) failed: %v", tc.prefix, err)
+				continue
+			}
+			checkMatch(fmt.Sprintf("List(prefix=%q, recursive)", tc.prefix), res.Objects, tc.want)
+		}
+	}
+	// Runs whatever happened above: anything left behind fails the next helper
+	// instead. Every backend's DeleteRecursive matches the prefix by string, so
+	// it takes the sibling too, and fs drops the directory it leaves.
+	if err := strg.DeleteRecursive(ctx, base); err != nil {
+		errorf("DeleteRecursive(%q) failed: %v", base, err)
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("TestStorageListRecursivePrefix found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
+	}
+	return nil
+}
+
 // TestStorageListPaging writes its own fixture, then lists it flat and
 // recursively (on a Sub storage), covering both resume paths.
 func TestStorageListPaging(ctx context.Context, strg s2.Storage) error {

@@ -367,6 +367,9 @@ func (s *StorageTestSuite) TestS2TestList() {
 	err := s2test.TestStorageListRecursive(ctx, strg, "a.txt", "b.txt", "cc/c1.txt", "cc/c2.txt")
 	s.Require().NoError(err)
 
+	err = s2test.TestStorageListRecursivePrefix(ctx, strg)
+	s.Require().NoError(err)
+
 	err = s2test.TestStorageList(ctx, strg, "", "a.txt", "b.txt")
 	s.Require().NoError(err)
 
