@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path"
 	"strings"
 	"sync"
 	"testing"
@@ -42,6 +41,13 @@ type mockS3Client struct {
 	lastListInput *s3.ListObjectsV2Input
 }
 
+// mockKey keys the store verbatim. S3 keys are opaque strings, and path.Join
+// would collapse "photos" and "photos/" into one entry -- the very fold these
+// tests exist to catch.
+func mockKey(bucket, key string) string {
+	return bucket + "\x00" + key
+}
+
 func newMockS3Client() *mockS3Client {
 	return &mockS3Client{
 		objects: make(map[string]*mockObject),
@@ -59,7 +65,7 @@ func (m *mockS3Client) putWithContentType(bucket, key string, body []byte, metad
 	if contentType == "" {
 		contentType = mockDefaultContentType
 	}
-	m.objects[path.Join(bucket, key)] = &mockObject{
+	m.objects[mockKey(bucket, key)] = &mockObject{
 		bucket:       bucket,
 		key:          key,
 		body:         body,
@@ -73,14 +79,14 @@ func (m *mockS3Client) delete(bucket, key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	delete(m.objects, path.Join(bucket, key))
+	delete(m.objects, mockKey(bucket, key))
 }
 
 func (m *mockS3Client) get(bucket, key string) (*mockObject, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	obj, ok := m.objects[path.Join(bucket, key)]
+	obj, ok := m.objects[mockKey(bucket, key)]
 	return obj, ok
 }
 
@@ -489,6 +495,23 @@ func (s *StorageTestSuite) TestS2TestDelete() {
 	}
 }
 
+func (s *StorageTestSuite) TestS2TestNameEscape() {
+	testCases := []struct {
+		caseName string
+		prefix   string
+	}{
+		{caseName: "no prefix"},
+		{caseName: "with prefix", prefix: "pfx"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			_, strg := s.testMockClient()
+			strg.(*storage).prefix = tc.prefix
+			s.Require().NoError(s2test.TestStorageNameEscape(context.Background(), strg))
+		})
+	}
+}
+
 func (s *StorageTestSuite) TestS2TestPutMetadata() {
 	_, strg := s.testMockClient()
 	s.Require().NoError(s2test.TestStoragePutMetadata(context.Background(), strg))
@@ -864,6 +887,7 @@ func (s *StorageTestSuite) TestExists() {
 		caseName string
 		name     string
 		want     bool
+		wantErr  bool
 	}{
 		{caseName: "leaf object", name: "a.txt", want: true},
 		{caseName: "leaf object missing", name: "not-found.txt", want: false},
@@ -878,12 +902,17 @@ func (s *StorageTestSuite) TestExists() {
 		// call to confirm what the next read or write would surface
 		// anyway.
 		{caseName: "storage root", name: "", want: true},
-		{caseName: "storage root slash", name: "/", want: true},
+		// "/" spells the same root, but a name is used as written.
+		{caseName: "storage root slash", name: "/", wantErr: true},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
 			_, strg := s.testMockClient()
 			got, err := strg.Exists(context.Background(), tc.name)
+			if tc.wantErr {
+				s.Require().ErrorIs(err, s2.ErrInvalidName)
+				return
+			}
 			s.Require().NoError(err)
 			s.Equal(tc.want, got)
 		})
@@ -990,4 +1019,45 @@ func (s *StorageTestSuite) TestSignedURL() {
 		s.Error(err)
 		s.ErrorContains(err, "unknown client type")
 	})
+}
+
+func (s *StorageTestSuite) TestListedObjectOpensItself() {
+	m := newMockS3Client()
+	// A zero-byte folder marker written by another tool, beside the object
+	// whose name it folds onto.
+	m.put("mybucket", "photos", []byte("THE NEIGHBOUR"), nil)
+	m.put("mybucket", "photos/", []byte(""), nil)
+	strg := &storage{client: m, presignClient: m, bucket: "mybucket"}
+
+	res, err := strg.List(context.Background(), s2.ListOptions{Recursive: true})
+	s.Require().NoError(err)
+	s.Require().Len(res.Objects, 2)
+	for _, obj := range res.Objects {
+		rc, err := obj.Open()
+		s.Require().NoError(err)
+		b, err := io.ReadAll(rc)
+		_ = rc.Close()
+		s.Require().NoError(err)
+		s.Lenf(b, int(obj.Length()), "%q opened a different object", obj.Name())
+	}
+}
+
+func (s *StorageTestSuite) TestObjectOpensTheKeyStorageWrote() {
+	m := newMockS3Client()
+	// A prefixed root: Put joins the prefix with the name, Open concatenates
+	// it so a listing's name survives verbatim. Both must land on one key.
+	strg := &storage{client: m, presignClient: m, bucket: "mybucket", prefix: "data/objects"}
+	ctx := context.Background()
+	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("BODY"))))
+
+	obj, err := strg.Get(ctx, "a.txt")
+	s.Require().NoError(err)
+	rc, err := obj.Open()
+	s.Require().NoError(err)
+
+	defer func() { _ = rc.Close() }()
+
+	b, err := io.ReadAll(rc)
+	s.Require().NoError(err)
+	s.Equal("BODY", string(b))
 }

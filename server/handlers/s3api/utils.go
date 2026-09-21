@@ -157,6 +157,9 @@ func s2ErrorToS3Error(err error) (string, string, int) {
 	if errors.As(err, &bucketNotFound) {
 		return "NoSuchBucket", err.Error(), http.StatusNotFound
 	}
+	if errors.Is(err, s2.ErrInvalidName) {
+		return "InvalidArgument", err.Error(), http.StatusBadRequest
+	}
 	if errors.Is(err, server.ErrReservedBucketName) {
 		return "InvalidBucketName", err.Error(), http.StatusBadRequest
 	}

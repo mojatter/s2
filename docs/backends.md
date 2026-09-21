@@ -174,6 +174,18 @@ As JSON:
 
 Authentication priority: `connection_string` > `account_name`+`account_key` > DefaultAzureCredential.
 
+## Object names
+
+Every name a `Storage` method takes is used as written: it must satisfy [`fs.ValidPath`](https://pkg.go.dev/io/fs#ValidPath) and not be `"."`. A name that only resolves after cleaning — `../x`, `/x`, `./x`, `a//b`, `x/` — is rejected rather than folded, so the name a caller authorizes is the name the backend reads and writes. Rejections wrap `s2.ErrInvalidName`; s2-server answers them with `400 InvalidArgument`.
+
+`ListOptions.Prefix`, `ListOptions.StartAfter`, `DeleteRecursive` and `Sub` select objects rather than name one, so they also take `""` and one trailing `/`.
+
+`fs.ValidPath` requires valid UTF-8, which means a key holding raw bytes that are not UTF-8 is refused even on `s3`, `gcs` and `azblob`, where the provider itself would store it.
+
+A key that an `s3`, `gcs` or `azblob` root already holds in a non-canonical form — a zero-byte `photos/` folder marker written by another tool, or a key holding bytes that are not UTF-8 — is still listed, but `Get`, `Delete`, `Copy` and `SignedURL` refuse it. s2 addresses names through `path.Join`, which never produces a trailing slash, so such a key was never reached as spelled: the call resolved to the neighbouring object instead. The refusal replaces a wrong answer with an error. Removing one takes `DeleteRecursive` over the enclosing prefix, or a tool that speaks the provider's API directly.
+
+A third-party `Storage` should call `s2.ValidateName` and `s2.ValidatePrefix` at the entry of every method that takes a name or a prefix; `s2test.TestStorageNameEscape` checks that it does.
+
 ## Content-Type and ETag
 
 Both are attributes of `s2.Object`, not entries in `Metadata()`. Each backend answers them from what it stores natively, and a `List` result carries the ETag without extra requests. Content-Type is different: S3's listing does not return it, so on an `s3` root every listed object reports `""` and only `Get` has the real value.

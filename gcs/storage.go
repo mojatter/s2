@@ -80,6 +80,9 @@ func (s *gcsStorage) Type() s2.Type {
 }
 
 func (s *gcsStorage) Sub(_ context.Context, prefix string) (s2.Storage, error) {
+	if err := s2.ValidatePrefix(prefix); err != nil {
+		return nil, err
+	}
 	return &gcsStorage{
 		client: s.client,
 		bucket: s.bucket,
@@ -90,6 +93,13 @@ func (s *gcsStorage) Sub(_ context.Context, prefix string) (s2.Storage, error) {
 const defaultListLimit = 1000
 
 func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	if err := s2.ValidatePrefix(opts.Prefix); err != nil {
+		return s2.ListResult{}, err
+	}
+	// StartAfter is a key, and every backend joins it with the storage prefix.
+	if err := s2.ValidatePrefix(opts.StartAfter); err != nil {
+		return s2.ListResult{}, err
+	}
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = defaultListLimit
@@ -102,7 +112,7 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 		q.Delimiter = "/"
 	}
 	if opts.After == "" && opts.StartAfter != "" {
-		q.StartOffset = s.key(opts.StartAfter)
+		q.StartOffset = joinKeepSlash(s.prefix, opts.StartAfter)
 	}
 
 	it := s.client.bucket(s.bucket).objects(ctx, q)
@@ -154,6 +164,9 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 }
 
 func (s *gcsStorage) Get(ctx context.Context, name string) (s2.Object, error) {
+	if err := s2.ValidateName(name); err != nil {
+		return nil, err
+	}
 	obj := s.client.bucket(s.bucket).object(s.key(name))
 	attrs, err := obj.attrs(ctx)
 	if err != nil {
@@ -174,8 +187,12 @@ func (s *gcsStorage) Get(ctx context.Context, name string) (s2.Object, error) {
 }
 
 func (s *gcsStorage) Exists(ctx context.Context, name string) (bool, error) {
-	if name == "" || name == "/" {
+	// "" is the root; "/" is a spelling of it that no name may take.
+	if name == "" {
 		return true, nil
+	}
+	if err := s2.ValidateName(name); err != nil {
+		return false, err
 	}
 
 	obj := s.client.bucket(s.bucket).object(s.key(name))
@@ -201,6 +218,9 @@ func (s *gcsStorage) Exists(ctx context.Context, name string) (bool, error) {
 }
 
 func (s *gcsStorage) Put(ctx context.Context, obj s2.Object) error {
+	if err := s2.ValidateName(obj.Name()); err != nil {
+		return err
+	}
 	rc, err := obj.Open()
 	if err != nil {
 		return err
@@ -219,6 +239,9 @@ func (s *gcsStorage) Put(ctx context.Context, obj s2.Object) error {
 // PutMetadata replaces the user metadata; a Content-Type under the legacy s2-content-type key moves to the object's own.
 // The patch answers the provider's 412 when the object changed between the read and the write, leaving it untouched.
 func (s *gcsStorage) PutMetadata(ctx context.Context, name string, metadata s2.Metadata) error {
+	if err := s2.ValidateName(name); err != nil {
+		return err
+	}
 	obj := s.client.bucket(s.bucket).object(s.key(name))
 	attrs, err := obj.attrs(ctx)
 	if err != nil {
@@ -250,12 +273,20 @@ func droppedKeys(md map[string]string, next s2.Metadata) []string {
 }
 
 func (s *gcsStorage) Copy(ctx context.Context, src, dst string) error {
+	for _, name := range []string{src, dst} {
+		if err := s2.ValidateName(name); err != nil {
+			return err
+		}
+	}
 	srcObj := s.client.bucket(s.bucket).object(s.key(src))
 	dstObj := s.client.bucket(s.bucket).object(s.key(dst))
 	return mapNotExist(srcObj.copyTo(ctx, dstObj), src)
 }
 
 func (s *gcsStorage) Delete(_ context.Context, name string) error {
+	if err := s2.ValidateName(name); err != nil {
+		return err
+	}
 	obj := s.client.bucket(s.bucket).object(s.key(name))
 	err := obj.delete(context.Background())
 	if errors.Is(err, storage.ErrObjectNotExist) {
@@ -265,6 +296,9 @@ func (s *gcsStorage) Delete(_ context.Context, name string) error {
 }
 
 func (s *gcsStorage) DeleteRecursive(ctx context.Context, prefix string) error {
+	if err := s2.ValidatePrefix(prefix); err != nil {
+		return err
+	}
 	q := &storage.Query{Prefix: joinKeepSlash(s.prefix, prefix)}
 	it := s.client.bucket(s.bucket).objects(ctx, q)
 
@@ -286,6 +320,9 @@ func (s *gcsStorage) DeleteRecursive(ctx context.Context, prefix string) error {
 }
 
 func (s *gcsStorage) SignedURL(_ context.Context, opts s2.SignedURLOptions) (string, error) {
+	if err := s2.ValidateName(opts.Name); err != nil {
+		return "", err
+	}
 	method := opts.Method
 	if method == "" {
 		method = s2.SignedURLGet
@@ -362,10 +399,15 @@ func emulatorEndpoint(host string) (string, error) {
 	return u.String(), nil
 }
 
-// joinKeepSlash is path.Join that keeps prefix's trailing slash, which confines a listing to that directory.
+// joinKeepSlash is path.Join that keeps the trailing slash confining a listing
+// to one directory: prefix's own, or the storage's when prefix is empty and so
+// means everything inside it -- a Sub of "photos" must not reach "photos-old/".
 func joinKeepSlash(base, prefix string) string {
 	p := path.Join(base, prefix)
-	if strings.HasSuffix(prefix, "/") && !strings.HasSuffix(p, "/") {
+	if p == "" || strings.HasSuffix(p, "/") {
+		return p
+	}
+	if prefix == "" || strings.HasSuffix(prefix, "/") {
 		p += "/"
 	}
 	return p

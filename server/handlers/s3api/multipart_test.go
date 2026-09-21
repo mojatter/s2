@@ -33,6 +33,7 @@ func (s *MultipartTestSuite) TestCreateMultipartUpload() {
 	testCases := []struct {
 		caseName    string
 		setupBucket bool
+		setupKey    string
 		bucket      string
 		key         string
 		wantStatus  int
@@ -52,11 +53,33 @@ func (s *MultipartTestSuite) TestCreateMultipartUpload() {
 			wantStatus:  http.StatusNotFound,
 			wantErrCode: "NoSuchBucket",
 		},
+		{
+			// The key is only written at Complete, so it is checked here.
+			caseName:    "a key the storage refuses",
+			setupBucket: true,
+			bucket:      "mp-invalid",
+			key:         "../other.bin",
+			wantStatus:  http.StatusBadRequest,
+			wantErrCode: "InvalidArgument",
+		},
+		{
+			// Nothing refuses the name; fs cannot stat it, which is the
+			// upload's problem rather than the initiate's.
+			caseName:    "a key nested under an existing object",
+			setupBucket: true,
+			setupKey:    "a.txt",
+			bucket:      "mp-nested",
+			key:         "a.txt/file.bin",
+			wantStatus:  http.StatusOK,
+		},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
 			if tc.setupBucket {
 				s.createBucket(tc.bucket)
+			}
+			if tc.setupKey != "" {
+				s.putObject(tc.bucket, tc.setupKey, "a")
 			}
 			req := httptest.NewRequest("POST", "/"+tc.bucket+"/"+tc.key+"?uploads", nil)
 			req.SetPathValue("bucket", tc.bucket)

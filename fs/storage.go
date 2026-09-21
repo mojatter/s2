@@ -74,6 +74,15 @@ func (s *storage) Type() s2.Type {
 }
 
 func (s *storage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
+	if err := s2.ValidatePrefix(prefix); err != nil {
+		return nil, err
+	}
+	// A prefix selects rather than names, so it may be empty or end in "/";
+	// io/fs.Sub takes neither.
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" {
+		return &storage{cfg: s.cfg, fsys: s.fsys, typ: s.typ}, nil
+	}
 	sub, err := fs.Sub(s.fsys, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sub %q: %w", prefix, err)
@@ -95,6 +104,13 @@ func isMetaDir(name string) bool {
 const defaultListLimit = 1000
 
 func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	if err := s2.ValidatePrefix(opts.Prefix); err != nil {
+		return s2.ListResult{}, err
+	}
+	// StartAfter is a key, and every backend joins it with the storage prefix.
+	if err := s2.ValidatePrefix(opts.StartAfter); err != nil {
+		return s2.ListResult{}, err
+	}
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = defaultListLimit
@@ -217,6 +233,9 @@ func (s *storage) listRecursive(prefix, after string, limit int) (s2.ListResult,
 }
 
 func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
+	if err := s2.ValidateName(name); err != nil {
+		return nil, err
+	}
 	return s.get(name)
 }
 
@@ -243,6 +262,9 @@ func (s *storage) get(name string) (*object, error) {
 // to distinguish the two should use Get (which rejects directories)
 // or List (which only enumerates directories).
 func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
+	if err := s2.ValidateName(name); err != nil {
+		return false, err
+	}
 	_, err := fs.Stat(s.fsys, name)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -254,6 +276,9 @@ func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
 }
 
 func (s *storage) Put(ctx context.Context, obj s2.Object) error {
+	if err := s2.ValidateName(obj.Name()); err != nil {
+		return err
+	}
 	rc, err := obj.Open()
 	if err != nil {
 		return err
@@ -283,6 +308,9 @@ func (s *storage) saveMetaForNewBody(name string, m meta) error {
 
 // PutMetadata replaces the user metadata and keeps the ETag and content type.
 func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Metadata) error {
+	if err := s2.ValidateName(name); err != nil {
+		return err
+	}
 	obj, err := s.get(name)
 	if err != nil {
 		return err
@@ -293,6 +321,11 @@ func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Meta
 }
 
 func (s *storage) Copy(ctx context.Context, src, dst string) error {
+	for _, name := range []string{src, dst} {
+		if err := s2.ValidateName(name); err != nil {
+			return err
+		}
+	}
 	srcObj, err := s.get(src)
 	if err != nil {
 		return err
@@ -313,6 +346,11 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 }
 
 func (s *storage) Move(ctx context.Context, src, dst string) error {
+	for _, name := range []string{src, dst} {
+		if err := s2.ValidateName(name); err != nil {
+			return err
+		}
+	}
 	// Prefer a direct rename on filesystems that support it: it's atomic and
 	// avoids reading the object body twice.
 	if _, ok := s.fsys.(wfs.RenameFS); ok {
@@ -342,6 +380,9 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 }
 
 func (s *storage) Delete(ctx context.Context, name string) error {
+	if err := s2.ValidateName(name); err != nil {
+		return err
+	}
 	// Ignore metadata deletion errors (file may not have metadata)
 	_ = wfs.RemoveFile(s.fsys, metaPath(name))
 	if err := wfs.RemoveFile(s.fsys, name); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -351,6 +392,9 @@ func (s *storage) Delete(ctx context.Context, name string) error {
 }
 
 func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
+	if err := s2.ValidatePrefix(prefix); err != nil {
+		return err
+	}
 	dirName := strings.TrimSuffix(prefix, "/")
 	var dirs []string
 	err := fs.WalkDir(s.fsys, ".", func(name string, d fs.DirEntry, err error) error {
@@ -382,6 +426,9 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 }
 
 func (s *storage) SignedURL(ctx context.Context, opts s2.SignedURLOptions) (string, error) {
+	if err := s2.ValidateName(opts.Name); err != nil {
+		return "", err
+	}
 	if opts.Method != "" && opts.Method != s2.SignedURLGet {
 		return "", fmt.Errorf("fs storage: unsupported signed URL method %q", opts.Method)
 	}

@@ -2,6 +2,7 @@ package s2
 
 import (
 	"fmt"
+	"io/fs"
 	"math"
 	"path"
 	"strings"
@@ -21,6 +22,30 @@ func MustUint64(v int64) uint64 {
 		panic(fmt.Sprintf("numconv: int64 value %d is negative", v))
 	}
 	return uint64(v)
+}
+
+// ValidateName wraps [ErrInvalidName] unless name is already the name the
+// storage will use: exactly [fs.ValidPath]. A name that only resolves after
+// cleaning -- "../x", "/x", "./x", "a//b", "x/" -- is rejected rather than
+// folded, so the name a caller authorizes is the name it reads.
+func ValidateName(name string) error {
+	// fs.ValidPath accepts "." as the root of an FS; a storage name may not
+	// be the root itself.
+	if name == "." || !fs.ValidPath(name) {
+		return fmt.Errorf("%w: %s", ErrInvalidName, name)
+	}
+	return nil
+}
+
+// ValidatePrefix is [ValidateName] for a value that selects objects rather
+// than naming one: "" selects everything, and one trailing "/" confines the
+// selection to a directory. Listing cursors take it too, since they are
+// compared against names rather than resolved to one.
+func ValidatePrefix(prefix string) error {
+	if prefix == "" {
+		return nil
+	}
+	return ValidateName(strings.TrimSuffix(prefix, "/"))
 }
 
 // Key joins a storage prefix and an object name.

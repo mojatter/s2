@@ -148,6 +148,11 @@ func (s *StorageTestSuite) TestS2TestDelete() {
 	s.Require().NoError(s2test.TestStorageDelete(context.Background(), strg))
 }
 
+func (s *StorageTestSuite) TestS2TestNameEscape() {
+	strg := NewStorageMem(s2.Config{})
+	s.Require().NoError(s2test.TestStorageNameEscape(context.Background(), strg))
+}
+
 func (s *StorageTestSuite) TestS2TestPutMetadata() {
 	strg := NewStorageMem(s2.Config{})
 	s.Require().NoError(s2test.TestStoragePutMetadata(context.Background(), strg))
@@ -748,6 +753,26 @@ func (s *StorageTestSuite) TestSub() {
 		s.Require().NoError(err)
 		s.Len(res.Objects, 2)
 	})
+
+	// A prefix selects rather than names, so these are the whole storage and
+	// the same directory; io/fs.Sub rejects both on its own.
+	testCases := []struct {
+		caseName string
+		prefix   string
+		want     int
+	}{
+		{caseName: "empty", prefix: "", want: 4},
+		{caseName: "trailing slash", prefix: "cc/", want: 2},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			sub, err := strg.Sub(context.Background(), tc.prefix)
+			s.Require().NoError(err)
+			res, err := sub.List(context.Background(), s2.ListOptions{Limit: 10, Recursive: true})
+			s.Require().NoError(err)
+			s.Len(res.Objects, tc.want)
+		})
+	}
 }
 
 func (s *StorageTestSuite) TestExists() {
