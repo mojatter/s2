@@ -1,15 +1,27 @@
 package s2
 
-import "strings"
+import (
+	"path"
+	"strings"
+)
 
 // ParseRoot splits a Root string like "bucket/some/prefix" into the
 // top-level name (bucket, container, or directory) and an optional
 // key prefix. Leading and trailing slashes are trimmed.
+//
+// The prefix is cleaned, so the two ways a backend spells a full key --
+// joining it with the name, or concatenating to keep the name verbatim --
+// resolve to the same string, and one that resolves to the root is empty
+// rather than ".".
 func ParseRoot(root string) (name, prefix string) {
 	parts := strings.SplitN(strings.Trim(root, "/"), "/", 2)
 	name = parts[0]
+	// path.Join resolves a prefix that names the root itself -- "." , "a/.."
+	// -- to ".", which joins away but is a live element in a listing prefix.
 	if len(parts) > 1 {
-		prefix = parts[1]
+		if p := path.Join(parts[1]); p != "." {
+			prefix = p
+		}
 	}
 	return
 }

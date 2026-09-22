@@ -14,7 +14,10 @@ var consoleHandlers = map[string]HandlerFunc{}
 
 // ConsoleHandler builds an HTTP handler that serves the Web Console.
 func (s *Server) ConsoleHandler() http.Handler {
-	return s.buildMux(consoleHandlers)
+	reject := func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "the request path is not valid", http.StatusBadRequest)
+	}
+	return s.buildMux(consoleHandlers, cleanPathHandler(reject))
 }
 
 // RegisterConsoleHandleFunc registers a handler that will be served by

@@ -59,3 +59,21 @@ func (s *s3apiSuite) roundTrip(srv *server.Server, method, target string) *http.
 	s.Require().NoError(err)
 	return resp
 }
+
+// roundTripBody is roundTrip when the body is what matters.
+func (s *s3apiSuite) roundTripBody(srv *server.Server, method, target string) string {
+	s.T().Helper()
+	ts := httptest.NewServer(srv.S3Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(method, ts.URL+target, nil)
+	s.Require().NoError(err)
+	resp, err := ts.Client().Do(req)
+	s.Require().NoError(err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	b, err := io.ReadAll(resp.Body)
+	s.Require().NoError(err)
+	return string(b)
+}

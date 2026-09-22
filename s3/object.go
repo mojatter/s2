@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path"
 	"strings"
 	"time"
 
@@ -31,15 +30,25 @@ func (o *object) Name() string {
 	return o.name
 }
 
+// key is the object's full key. Not path.Join: a listing hands out whatever
+// the bucket holds, and joining would fold a name such as "photos/" onto the
+// neighbouring object "photos".
+func (o *object) key() string {
+	if o.prefix == "" {
+		return o.name
+	}
+	return o.prefix + "/" + o.name
+}
+
 func (o *object) Open() (io.ReadCloser, error) {
 	res, err := o.client.GetObject(context.Background(), &s3.GetObjectInput{
 		Bucket: aws.String(o.bucket),
-		Key:    aws.String(path.Join(o.prefix, o.name)),
+		Key:    aws.String(o.key()),
 	})
 	if err != nil {
 		var noSuchKeyErr *s3types.NoSuchKey
 		if errors.As(err, &noSuchKeyErr) {
-			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, path.Join(o.prefix, o.name))
+			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, o.key())
 		}
 		return nil, fmt.Errorf("failed to get object: %w", err)
 	}
@@ -64,13 +73,13 @@ func (o *object) Metadata() s2.Metadata {
 func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
 	res, err := o.client.GetObject(context.Background(), &s3.GetObjectInput{
 		Bucket: aws.String(o.bucket),
-		Key:    aws.String(path.Join(o.prefix, o.name)),
+		Key:    aws.String(o.key()),
 		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)),
 	})
 	if err != nil {
 		var noSuchKeyErr *s3types.NoSuchKey
 		if errors.As(err, &noSuchKeyErr) {
-			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, path.Join(o.prefix, o.name))
+			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, o.key())
 		}
 		return nil, fmt.Errorf("failed to get object range: %w", err)
 	}

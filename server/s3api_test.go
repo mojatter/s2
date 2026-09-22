@@ -157,6 +157,112 @@ func TestCORSHandler(t *testing.T) {
 	}
 }
 
+func TestCleanPathHandler(t *testing.T) {
+	testCases := []struct {
+		caseName       string
+		target         string
+		wantCode       int
+		wantHandlerHit bool
+	}{
+		{
+			caseName:       "an ordinary key passes through",
+			target:         "/bucket/key.txt",
+			wantCode:       http.StatusOK,
+			wantHandlerHit: true,
+		},
+		{
+			caseName:       "a name that merely starts with dots passes through",
+			target:         "/bucket/..hidden.txt",
+			wantCode:       http.StatusOK,
+			wantHandlerHit: true,
+		},
+		{
+			caseName:       "a trailing slash passes through",
+			target:         "/bucket/",
+			wantCode:       http.StatusOK,
+			wantHandlerHit: true,
+		},
+		{
+			caseName:       "an encoded dot element is rejected",
+			target:         "/bucket/.%2Fkey.txt",
+			wantCode:       http.StatusBadRequest,
+			wantHandlerHit: false,
+		},
+		{
+			caseName:       "an encoded empty element is rejected",
+			target:         "/bucket/a%2F%2Fb.txt",
+			wantCode:       http.StatusBadRequest,
+			wantHandlerHit: false,
+		},
+		{
+			caseName:       "an encoded parent element in the key is rejected",
+			target:         "/bucket1/..%2Fbucket2%2Fsecret.txt",
+			wantCode:       http.StatusBadRequest,
+			wantHandlerHit: false,
+		},
+		{
+			caseName:       "a dot-encoded parent element is rejected",
+			target:         "/bucket1/%2e%2e%2Fbucket2%2Fsecret.txt",
+			wantCode:       http.StatusBadRequest,
+			wantHandlerHit: false,
+		},
+		{
+			caseName:       "an encoded parent element in the bucket is rejected",
+			target:         "/..%2Fescaped/key.txt",
+			wantCode:       http.StatusBadRequest,
+			wantHandlerHit: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			handlerHit := false
+			next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				handlerHit = true
+				w.WriteHeader(http.StatusOK)
+			})
+
+			reject := func(w http.ResponseWriter, r *http.Request) {
+				WriteS3Error(w, r, "InvalidArgument", "The request path is not valid", http.StatusBadRequest)
+			}
+			req := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			w := httptest.NewRecorder()
+			cleanPathHandler(reject)(next).ServeHTTP(w, req)
+
+			assert.Equal(t, tc.wantCode, w.Code)
+			assert.Equal(t, tc.wantHandlerHit, handlerHit)
+			if !tc.wantHandlerHit {
+				assert.Contains(t, w.Body.String(), "InvalidArgument")
+			}
+		})
+	}
+}
+
+// Each mux rejects a traversal in the shape its own clients expect.
+func TestCleanPathHandlerPerMux(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Root = t.TempDir()
+	srv, err := NewServer(context.Background(), cfg)
+	require.NoError(t, err)
+
+	const target = "/bucket1/..%2Fbucket2%2Fsecret.txt"
+
+	t.Run("the S3 API answers an XML error document", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		srv.S3Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, target, nil))
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Header().Get("Content-Type"), "xml")
+		assert.Contains(t, w.Body.String(), "InvalidArgument")
+	})
+
+	t.Run("the console answers plain text", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		srv.ConsoleHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, target, nil))
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.NotContains(t, w.Body.String(), "<Error>")
+	})
+}
+
 func TestHealthHandler(t *testing.T) {
 	testCases := []struct {
 		caseName    string

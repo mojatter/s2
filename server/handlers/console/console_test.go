@@ -110,6 +110,48 @@ func (s *IndexTestSuite) TestHandleCreateBucket() {
 		s.Equal(http.StatusBadRequest, w.Code)
 	})
 
+	// htmx swaps on neither, but a name the server refuses is the caller's
+	// mistake and a missing bucket is not a fault at all.
+	s.Run("a name that spans directories", func() {
+		form := url.Values{"name": {"outer/inner"}}
+		req := httptest.NewRequest("POST", "/buckets", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		handleCreateBucket(s.server, w, req)
+
+		s.Equal(http.StatusBadRequest, w.Code)
+	})
+
+	// isBucketName does not look at encoding; fs.ValidPath refuses it later,
+	// and that refusal is the caller's mistake, not a server fault.
+	s.Run("a name that is not valid UTF-8", func() {
+		form := url.Values{"name": {"\xff\xfe"}}
+		req := httptest.NewRequest("POST", "/buckets", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		handleCreateBucket(s.server, w, req)
+
+		s.Equal(http.StatusBadRequest, w.Code)
+	})
+
+	s.Run("deleting a name that is not valid UTF-8", func() {
+		req := httptest.NewRequest("DELETE", "/buckets/x", nil)
+		req.SetPathValue("name", "\xff")
+		w := httptest.NewRecorder()
+		handleDeleteBucket(s.server, w, req)
+
+		s.Equal(http.StatusBadRequest, w.Code)
+	})
+
+	s.Run("deleting a name that spans directories", func() {
+		req := httptest.NewRequest("DELETE", "/buckets/outer%2Finner", nil)
+		req.SetPathValue("name", "outer/inner")
+		w := httptest.NewRecorder()
+		handleDeleteBucket(s.server, w, req)
+
+		s.Equal(http.StatusNotFound, w.Code)
+	})
+
 	s.Run("rendered bucket list is filtered by policy", func() {
 		s.createBucket("denied-bucket")
 

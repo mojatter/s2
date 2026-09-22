@@ -45,6 +45,23 @@ func (s *ConfigTestSuite) TestParseRoot() {
 			wantName:   "my-bucket",
 			wantPrefix: "data",
 		},
+		{
+			// A backend spells a full key two ways -- joined with the object
+			// name, or concatenated to keep that name verbatim -- and they
+			// agree only while the prefix is already clean.
+			caseName:   "prefix cleaned",
+			root:       "my-bucket/data//objects/./",
+			wantName:   "my-bucket",
+			wantPrefix: "data/objects",
+		},
+		{
+			// "." joins away but is a live element in a listing prefix, so a
+			// storage rooted on it would write keys it could never list.
+			caseName:   "prefix resolving to the root",
+			root:       "my-bucket/a/..",
+			wantName:   "my-bucket",
+			wantPrefix: "",
+		},
 	}
 
 	for _, tc := range testCases {

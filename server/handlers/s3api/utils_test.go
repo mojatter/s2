@@ -55,6 +55,12 @@ func (s *UtilsTestSuite) TestS2ErrorToS3Error() {
 			wantStatus: http.StatusNotFound,
 		},
 		{
+			caseName:   "invalid name",
+			err:        fmt.Errorf("%w: ../other", s2.ErrInvalidName),
+			wantCode:   "InvalidArgument",
+			wantStatus: http.StatusBadRequest,
+		},
+		{
 			caseName:   "unknown error",
 			err:        fmt.Errorf("something broke"),
 			wantCode:   "InternalError",

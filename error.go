@@ -23,3 +23,12 @@ var ErrRequiredConfigRoot = errors.New("s2: required config.root")
 //	    // unknown backend
 //	}
 var ErrUnknownType = errors.New("s2: unknown storage type")
+
+// ErrInvalidName is returned for a name or prefix a storage refuses: one that
+// would resolve to something other than it spells, as "../other" does, or one
+// the backend keeps for its own state. Detect with errors.Is:
+//
+//	if errors.Is(err, s2.ErrInvalidName) {
+//	    // reject the caller's name
+//	}
+var ErrInvalidName = errors.New("s2: invalid name")

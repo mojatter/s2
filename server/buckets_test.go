@@ -361,12 +361,52 @@ func (s *BucketsTestSuite) TestGeneration() {
 	}
 }
 
+func (s *BucketsTestSuite) TestBucketNameIsOnePathElement() {
+	ctx := context.Background()
+	// One real bucket, so the per-bucket state exists to be listed below.
+	s.Require().NoError(s.buckets.Create(ctx, "photos"))
+
+	// A name that spans directories is not a bucket, on every entry point:
+	// the S3 API's {bucket} wildcard hands one over whenever a request
+	// spells the separator as "%2F".
+	testCases := []struct {
+		caseName string
+		call     func(name string) error
+	}{
+		{"create", func(name string) error { return s.buckets.Create(ctx, name) }},
+		{"delete", func(name string) error { return s.buckets.Delete(ctx, name) }},
+		{"created at", func(name string) error { _, err := s.buckets.CreatedAt(ctx, name); return err }},
+		{"generation", func(name string) error { _, err := s.buckets.Generation(ctx, name); return err }},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.Error(tc.call("outer/inner"))
+		})
+	}
+	exists, err := s.buckets.Exists(ctx, "outer/inner")
+	s.Require().NoError(err)
+	s.False(exists)
+
+	// Nothing was recorded for it either. A listing, not Exists: a
+	// generation is stored as a file, so statting a name under one fails for
+	// a reason that has nothing to do with the guard.
+	meta, err := s.buckets.meta(ctx)
+	s.Require().NoError(err)
+	res, err := meta.List(ctx, s2.ListOptions{Recursive: true})
+	s.Require().NoError(err)
+	for _, obj := range res.Objects {
+		s.NotEqual("outer/inner", obj.Name())
+	}
+}
+
 func (s *BucketsTestSuite) TestDeleteRemovesGeneration() {
 	ctx := context.Background()
 	s.Require().NoError(s.buckets.Create(ctx, "photos"))
 	s.Require().NoError(s.buckets.Delete(ctx, "photos"))
 
-	exists, err := s.buckets.strg.Exists(ctx, bucketMetaDir+"/photos")
+	meta, err := s.buckets.meta(ctx)
+	s.Require().NoError(err)
+	exists, err := meta.Exists(ctx, "photos")
 	s.Require().NoError(err)
 	s.False(exists)
 	names, err := s.buckets.Names(ctx)

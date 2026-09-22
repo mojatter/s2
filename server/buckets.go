@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/mojatter/s2"
-	_ "github.com/mojatter/s2/fs"
+	"github.com/mojatter/s2/fs"
 )
 
 // ErrReservedBucketName is returned by Buckets.Create for a name reserved
@@ -83,6 +83,15 @@ func healthPathReservedBucket(healthPath string) string {
 	return p
 }
 
+// isBucketName reports whether name can name a bucket: one path element that
+// is not internal state. The mux fills {bucket} from the escaped path and
+// unescapes it afterwards, so "bucket1%2F.meta" arrives here as a name
+// spanning two directories, which would scope the request to a prefix the
+// policy check never saw.
+func isBucketName(name string) bool {
+	return name != "" && !strings.Contains(name, "/") && !isHiddenBucketEntry(name)
+}
+
 func isValidBucketName(name string) bool {
 	if len(name) < 3 || len(name) > 63 {
 		return false
@@ -132,6 +141,9 @@ func (bs *Buckets) Get(ctx context.Context, name string) (s2.Storage, error) {
 
 // CreatedAt returns the bucket's .keep time; zero when s2 did not create the bucket.
 func (bs *Buckets) CreatedAt(ctx context.Context, name string) (time.Time, error) {
+	if !isBucketName(name) {
+		return time.Time{}, &ErrBucketNotFound{Name: name}
+	}
 	sub, err := bs.strg.Sub(ctx, name)
 	if err != nil {
 		return time.Time{}, err
@@ -146,9 +158,22 @@ func (bs *Buckets) CreatedAt(ctx context.Context, name string) (time.Time, error
 	return obj.LastModified(), nil
 }
 
+// meta returns the storage holding per-bucket state. The fs backend keeps
+// bucketMetaDir for object sidecars and refuses every spelling of it, so there
+// it takes SubSidecar; elsewhere the name is an ordinary prefix.
+func (bs *Buckets) meta(ctx context.Context) (s2.Storage, error) {
+	if sub, ok := fs.SubSidecar(bs.strg); ok {
+		return sub, nil
+	}
+	return bs.strg.Sub(ctx, bucketMetaDir)
+}
+
 // Generation returns the bucket's multipart generation, recording one when missing.
 func (bs *Buckets) Generation(ctx context.Context, name string) (int64, error) {
-	strg, err := bs.strg.Sub(ctx, bucketMetaDir)
+	if !isBucketName(name) {
+		return 0, &ErrBucketNotFound{Name: name}
+	}
+	strg, err := bs.meta(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -178,7 +203,7 @@ func (bs *Buckets) Generation(ctx context.Context, name string) (int64, error) {
 // has no "directory" primitive; s3 is intended for library-style use
 // against a single bucket, not as a multi-bucket server backend.
 func (bs *Buckets) Exists(ctx context.Context, name string) (bool, error) {
-	if isHiddenBucketEntry(name) {
+	if !isBucketName(name) {
 		return false, nil
 	}
 	return bs.strg.Exists(ctx, name)
@@ -191,6 +216,9 @@ func (bs *Buckets) Create(ctx context.Context, name string) error {
 	if isHiddenBucketEntry(name) {
 		return fmt.Errorf("%w: %q is internal state", ErrReservedBucketName, name)
 	}
+	if !isBucketName(name) {
+		return fmt.Errorf("%w: %q is not one path element", ErrReservedBucketName, name)
+	}
 	// An existing bucket keeps its marker, or its lack of one, so its generation holds.
 	marker := name + "/" + keepFile
 	for _, p := range []string{marker, name} {
@@ -199,7 +227,11 @@ func (bs *Buckets) Create(ctx context.Context, name string) error {
 		}
 	}
 	// A new generation first, so a failed marker write cannot leave a stale one behind.
-	if err := bs.strg.Put(ctx, s2.NewObjectBytes(bucketMetaDir+"/"+name, []byte{})); err != nil {
+	meta, err := bs.meta(ctx)
+	if err != nil {
+		return err
+	}
+	if err := meta.Put(ctx, s2.NewObjectBytes(name, []byte{})); err != nil {
 		return err
 	}
 	sub, err := bs.strg.Sub(ctx, name)
@@ -211,14 +243,25 @@ func (bs *Buckets) Create(ctx context.Context, name string) error {
 
 func (bs *Buckets) Delete(ctx context.Context, name string) error {
 	// The console calls Delete without Exists.
-	if isHiddenBucketEntry(name) {
+	if !isBucketName(name) {
 		return &ErrBucketNotFound{Name: name}
 	}
 	// The slash keeps the prefix match off buckets whose names merely start with name.
 	if err := bs.strg.DeleteRecursive(ctx, name+"/"); err != nil {
 		return err
 	}
-	return bs.strg.Delete(ctx, bucketMetaDir+"/"+name)
+	meta, err := bs.meta(ctx)
+	if err != nil {
+		return err
+	}
+	return meta.Delete(ctx, name)
+}
+
+// FolderMarker is the object a folder actually consists of. Authorize it, not
+// the folder's own name: a Deny on "<bucket>/private/*" does not match
+// "private", but the marker lands inside it.
+func FolderMarker(key string) string {
+	return key + "/" + keepFile
 }
 
 // CreateFolder writes a folder marker into an existing bucket; it never creates the bucket.
@@ -227,6 +270,5 @@ func (bs *Buckets) CreateFolder(ctx context.Context, bucket, key string) error {
 	if err != nil {
 		return err
 	}
-	obj := s2.NewObjectBytes(key+"/"+keepFile, []byte{})
-	return sub.Put(ctx, obj)
+	return sub.Put(ctx, s2.NewObjectBytes(FolderMarker(key), []byte{}))
 }

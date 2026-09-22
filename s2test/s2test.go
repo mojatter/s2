@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"sort"
 	"strings"
 
@@ -245,7 +246,6 @@ func TestStorageListPaging(ctx context.Context, strg s2.Storage) error {
 	if err != nil {
 		return fmt.Errorf("Sub(%q) failed: %w", dir, err)
 	}
-
 	return TestStorageListRecursive(ctx, sub, "a.txt", "b.txt", "c.txt", "d.txt", "sub/e.txt")
 }
 
@@ -601,4 +601,187 @@ func TestStoragePutMetadata(ctx context.Context, strg s2.Storage) error {
 func quotedMD5(body []byte) string {
 	sum := md5.Sum(body) // #nosec G401 -- S3-compatible ETag
 	return `"` + hex.EncodeToString(sum[:]) + `"`
+}
+
+// TestStorageNameEscape validates that a name or prefix reaching outside the
+// storage root reaches nothing. It writes a sibling of a Sub prefix, then
+// drives every name-taking method of that Sub with "../<sibling>": each must
+// fail or report nothing, and the sibling must survive untouched.
+func TestStorageNameEscape(ctx context.Context, strg s2.Storage) error {
+	var errs []string
+	errorf := func(format string, args ...any) {
+		errs = append(errs, fmt.Sprintf(format, args...))
+	}
+
+	const (
+		dir     = "s2test-escape"
+		sibling = "s2test-escape-sibling.txt"
+		body    = "untouched"
+	)
+	// Both spellings: path.Clean absorbs a ".." against a leading "/", so the
+	// rooted form escapes a guard that only looks at the cleaned name.
+	escapes := []string{"../" + sibling, "/../" + sibling}
+	if err := strg.Put(ctx, s2.NewObjectBytes(sibling, []byte(body))); err != nil {
+		return fmt.Errorf("Put(%q) failed: %w", sibling, err)
+	}
+	if err := strg.Put(ctx, s2.NewObjectBytes(dir+"/inner.txt", []byte("inner"))); err != nil {
+		return fmt.Errorf("Put(%q) failed: %w", dir+"/inner.txt", err)
+	}
+	sub, err := strg.Sub(ctx, dir)
+	if err != nil {
+		return fmt.Errorf("Sub(%q) failed: %w", dir, err)
+	}
+	// Decoys inside the Sub, under the names an escaping one folds to when a
+	// backend cleans the path one level instead of rejecting it. Without them
+	// a folding backend passes: nothing outside the root was touched. Each
+	// carries a Content-Type and metadata, because a fold can land on a
+	// backend's sidecar and take those alone.
+	decoys := []string{sibling, "decoy.txt"}
+	for _, name := range decoys {
+		obj := s2.NewObjectBytes(name, []byte(body),
+			s2.WithContentType("text/plain"),
+			s2.WithMetadata(s2.Metadata{"decoy": "yes"}))
+		if err := sub.Put(ctx, obj); err != nil {
+			return fmt.Errorf("Sub(%q).Put(%q) failed: %w", dir, name, err)
+		}
+	}
+
+	// Reads must not reach it. The error value is the backend's own.
+	for _, escape := range escapes {
+		if obj, err := sub.Get(ctx, escape); err == nil && obj != nil {
+			errorf("Sub(%q).Get(%q) reached the object outside the root", dir, escape)
+		}
+		if ok, err := sub.Exists(ctx, escape); err == nil && ok {
+			errorf("Sub(%q).Exists(%q) = true", dir, escape)
+		}
+		for _, prefix := range []string{escape, path.Dir(escape) + "/"} {
+			if res, err := sub.List(ctx, s2.ListOptions{Prefix: prefix, Recursive: true}); err == nil && len(res.Objects) > 0 {
+				errorf("Sub(%q).List(prefix=%q) returned %d objects", dir, prefix, len(res.Objects))
+			}
+		}
+		// A Sub of a Sub must not escape either.
+		if nested, err := sub.Sub(ctx, path.Dir(escape)); err == nil && nested != nil {
+			if res, err := nested.List(ctx, s2.ListOptions{Recursive: true}); err == nil && len(res.Objects) > 0 {
+				errorf("Sub(%q).Sub(%q) listed %d objects outside the root", dir, path.Dir(escape), len(res.Objects))
+			}
+		}
+	}
+
+	// Writes must not reach it either. Each is checked against the body below.
+	// An escaping name is driven as the source as well as the destination: a
+	// backend that validates only the destination still copies the outside
+	// object in.
+	copied, moved := "s2test-escape-copied.txt", "s2test-escape-moved.txt"
+	for _, escape := range escapes {
+		_ = sub.Put(ctx, s2.NewObjectBytes(escape, []byte("overwritten")))
+		_ = sub.PutMetadata(ctx, escape, s2.Metadata{"escaped": "yes"})
+		_ = sub.Copy(ctx, "inner.txt", escape)
+		_ = sub.Copy(ctx, escape, copied)
+		_ = s2.Move(ctx, sub, escape, moved)
+		_ = sub.Delete(ctx, escape)
+		_ = sub.DeleteRecursive(ctx, path.Dir(escape)+"/")
+		if u, err := sub.SignedURL(ctx, s2.SignedURLOptions{Name: escape}); err == nil && u != "" {
+			errorf("Sub(%q).SignedURL(%q) signed a name outside the root", dir, escape)
+		}
+	}
+	// Nothing from outside may have landed inside under a name of its own.
+	for _, name := range []string{copied, moved} {
+		if ok, err := sub.Exists(ctx, name); err == nil && ok {
+			errorf("Sub(%q).Exists(%q) = true: the object outside the root was brought in", dir, name)
+			_ = sub.Delete(ctx, name)
+		}
+	}
+
+	// A trailing "/" names nothing either: it folds to the object beside it,
+	// and a backend that joins before it validates takes that object's
+	// sidecar with it.
+	for _, name := range decoys {
+		_ = sub.Delete(ctx, name+"/")
+		_ = sub.PutMetadata(ctx, name+"/", s2.Metadata{"escaped": "yes"})
+	}
+	// "/" is a spelling of the root rather than a name, so nothing is there.
+	if ok, err := sub.Exists(ctx, "/"); err == nil && ok {
+		errorf("Sub(%q).Exists(%q) = true", dir, "/")
+	}
+
+	// The decoys must be intact too -- body, Content-Type and metadata: a
+	// backend that folds an escaping name by one level lands on them rather
+	// than outside the root.
+	for _, name := range decoys {
+		got, err := sub.Get(ctx, name)
+		if err != nil {
+			errorf("Sub(%q).Get(%q) did not survive the escape attempts: %v", dir, name, err)
+			continue
+		}
+		if err := checkDecoy(got, body); err != nil {
+			errorf("Sub(%q).Get(%q): %v", dir, name, err)
+		}
+	}
+
+	// An empty prefix means everything inside the Sub, not everything whose
+	// name starts with it: the root sibling is spelled dir+"-sibling.txt", and
+	// a backend that joins without restoring the separator reaches it.
+	if err := sub.DeleteRecursive(ctx, ""); err != nil {
+		errorf("Sub(%q).DeleteRecursive(%q) failed: %v", dir, "", err)
+	}
+
+	got, err := strg.Get(ctx, sibling)
+	if err != nil {
+		errorf("%q did not survive the escape attempts: %v", sibling, err)
+	} else {
+		rc, err := got.Open()
+		if err != nil {
+			errorf("Open(%q) failed: %v", sibling, err)
+		} else {
+			b, err := io.ReadAll(rc)
+			_ = rc.Close()
+			if err != nil {
+				errorf("reading %q failed: %v", sibling, err)
+			} else if string(b) != body {
+				errorf("%q is now %q, want %q", sibling, string(b), body)
+			}
+		}
+		if v, ok := got.Metadata()["escaped"]; ok {
+			errorf("%q gained metadata from outside the root: escaped=%q", sibling, v)
+		}
+	}
+
+	if err := strg.Delete(ctx, sibling); err != nil {
+		errorf("Delete(%q) failed: %v", sibling, err)
+	}
+	// With the trailing slash: DeleteRecursive matches the prefix by string,
+	// and the caller may hold keys that merely start with dir -- this helper's
+	// own sibling is named that way on purpose.
+	if err := strg.DeleteRecursive(ctx, dir+"/"); err != nil {
+		errorf("DeleteRecursive(%q) failed: %v", dir+"/", err)
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("TestStorageNameEscape found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
+	}
+	return nil
+}
+
+// checkDecoy reports how obj differs from the decoy TestStorageNameEscape wrote.
+func checkDecoy(obj s2.Object, body string) error {
+	rc, err := obj.Open()
+	if err != nil {
+		return fmt.Errorf("Open failed: %w", err)
+	}
+	defer func() { _ = rc.Close() }()
+
+	b, err := io.ReadAll(rc)
+	if err != nil {
+		return fmt.Errorf("read failed: %w", err)
+	}
+	if string(b) != body {
+		return fmt.Errorf("body is %q, want %q", string(b), body)
+	}
+	if ct := obj.ContentType(); ct != "text/plain" {
+		return fmt.Errorf("ContentType() is %q, want %q", ct, "text/plain")
+	}
+	if v := obj.Metadata()["decoy"]; v != "yes" {
+		return fmt.Errorf("metadata decoy=%q, want %q", v, "yes")
+	}
+	return nil
 }

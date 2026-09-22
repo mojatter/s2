@@ -148,6 +148,11 @@ func (s *StorageTestSuite) TestS2TestDelete() {
 	s.Require().NoError(s2test.TestStorageDelete(context.Background(), strg))
 }
 
+func (s *StorageTestSuite) TestS2TestNameEscape() {
+	strg := NewStorageMem(s2.Config{})
+	s.Require().NoError(s2test.TestStorageNameEscape(context.Background(), strg))
+}
+
 func (s *StorageTestSuite) TestS2TestPutMetadata() {
 	strg := NewStorageMem(s2.Config{})
 	s.Require().NoError(s2test.TestStoragePutMetadata(context.Background(), strg))
@@ -748,6 +753,58 @@ func (s *StorageTestSuite) TestSub() {
 		s.Require().NoError(err)
 		s.Len(res.Objects, 2)
 	})
+
+	// A prefix selects rather than names, so these are the whole storage and
+	// the same directory; io/fs.Sub rejects both on its own.
+	testCases := []struct {
+		caseName string
+		prefix   string
+		want     int
+	}{
+		{caseName: "empty", prefix: "", want: 4},
+		{caseName: "trailing slash", prefix: "cc/", want: 2},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			sub, err := strg.Sub(context.Background(), tc.prefix)
+			s.Require().NoError(err)
+			res, err := sub.List(context.Background(), s2.ListOptions{Limit: 10, Recursive: true})
+			s.Require().NoError(err)
+			s.Len(res.Objects, tc.want)
+		})
+	}
+
+	// The metadata directory is closed to Sub as it is to object names, and
+	// SubSidecar is how s2's own code reaches it. The walk root is that
+	// directory, and memfs reports its name as ".meta".
+	s.Run("the metadata directory", func() {
+		ctx := context.Background()
+		root := &storage{fsys: memfs.New(), typ: s2.TypeMemFS}
+		s.Require().NoError(root.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"))))
+
+		_, err := root.Sub(ctx, ".meta")
+		s.Require().ErrorIs(err, s2.ErrInvalidName)
+		_, err = root.Sub(ctx, "docs/.meta/")
+		s.Require().ErrorIs(err, s2.ErrInvalidName)
+
+		meta, ok := SubSidecar(root)
+		s.Require().True(ok)
+		s.Require().NoError(meta.Put(ctx, s2.NewObjectBytes("bucket1", []byte{})))
+
+		for _, recursive := range []bool{true, false} {
+			res, err := meta.List(ctx, s2.ListOptions{Recursive: recursive})
+			s.Require().NoError(err)
+			s.Lenf(res.Objects, 2, "recursive=%v", recursive)
+		}
+
+		// And it deletes within itself: the walk root is that directory, so a
+		// guard that matches it by name aborts the whole walk silently.
+		s.Require().NoError(meta.Put(ctx, s2.NewObjectBytes("gen/b1", []byte{})))
+		s.Require().NoError(meta.DeleteRecursive(ctx, "gen/"))
+		res, err := meta.List(ctx, s2.ListOptions{Recursive: true})
+		s.Require().NoError(err)
+		s.Len(res.Objects, 2)
+	})
 }
 
 func (s *StorageTestSuite) TestExists() {
@@ -1071,3 +1128,133 @@ func BenchmarkPutObject(b *testing.B)      { benchPutObject(b, s2.TypeOSFS) }
 func BenchmarkGetObject(b *testing.B)      { benchGetObject(b, s2.TypeOSFS) }
 func BenchmarkPutObjectMemFS(b *testing.B) { benchPutObject(b, s2.TypeMemFS) }
 func BenchmarkGetObjectMemFS(b *testing.B) { benchGetObject(b, s2.TypeMemFS) }
+
+func (s *StorageTestSuite) TestListCursorDoesNotReachSidecars() {
+	ctx := context.Background()
+	strg := &storage{fsys: memfs.New(), typ: s2.TypeMemFS}
+	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("private/secret.txt", []byte("x"),
+		s2.WithContentType("text/plain"))))
+
+	// A cursor that sorts inside ".meta" must not let the walk descend into
+	// it: the sidecars would be reported as objects, and opening one returns
+	// the metadata of an object the caller never listed.
+	testCases := []struct {
+		caseName string
+		opts     s2.ListOptions
+	}{
+		{caseName: "no cursor", opts: s2.ListOptions{Recursive: true}},
+		{caseName: "the dir itself", opts: s2.ListOptions{Recursive: true, After: ".meta"}},
+		{caseName: "just past the dir", opts: s2.ListOptions{Recursive: true, After: ".meta!"}},
+		{caseName: "start after", opts: s2.ListOptions{Recursive: true, StartAfter: ".meta!"}},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			res, err := strg.List(ctx, tc.opts)
+			s.Require().NoError(err)
+			for _, obj := range res.Objects {
+				s.NotContains(obj.Name(), ".meta/")
+			}
+		})
+	}
+}
+
+func (s *StorageTestSuite) TestMetaDirIsNotAnObjectName() {
+	ctx := context.Background()
+	strg := &storage{fsys: memfs.New(), typ: s2.TypeMemFS}
+	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"),
+		s2.WithContentType("text/plain"), s2.WithMetadata(s2.Metadata{"k": "v"}))))
+
+	// Every name below is the sidecar of a.txt, not an object of its own.
+	testCases := []struct {
+		caseName string
+		call     func(name string) error
+	}{
+		{"get", func(name string) error { _, err := strg.Get(ctx, name); return err }},
+		{"exists", func(name string) error { _, err := strg.Exists(ctx, name); return err }},
+		{"put", func(name string) error {
+			return strg.Put(ctx, s2.NewObjectBytes(name, []byte(`{"content_type":"evil/x"}`)))
+		}},
+		{"put metadata", func(name string) error { return strg.PutMetadata(ctx, name, s2.Metadata{"k": "w"}) }},
+		{"copy", func(name string) error { return strg.Copy(ctx, name, "copy.txt") }},
+		{"move", func(name string) error { return strg.Move(ctx, name, "moved.txt") }},
+		{"delete", func(name string) error { return strg.Delete(ctx, name) }},
+		{"delete recursive", func(name string) error { return strg.DeleteRecursive(ctx, name+"/") }},
+		{"list", func(name string) error { _, err := strg.List(ctx, s2.ListOptions{Prefix: name}); return err }},
+		{"signed url", func(name string) error {
+			_, err := strg.SignedURL(ctx, s2.SignedURLOptions{Name: name})
+			return err
+		}},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			// Nested too: a Sub writes its sidecars beside the names it
+			// scopes, and neither listing would ever show the name.
+			for _, name := range []string{".meta/a.txt", "docs/.meta/a.txt", "a/.meta"} {
+				s.ErrorIsf(tc.call(name), s2.ErrInvalidName, "name %q", name)
+			}
+		})
+	}
+
+	// ".met" is a prefix of ".meta" without naming it.
+	s.Run("a prefix that merely starts the meta dir", func() {
+		s.Require().NoError(strg.DeleteRecursive(ctx, ".met"))
+	})
+
+	// The same one level down: a Sub keeps its sidecars beside the names it
+	// scopes, so every bucket in a server root has one.
+	s.Run("a prefix that merely starts a nested meta dir", func() {
+		root := &storage{fsys: memfs.New(), typ: s2.TypeMemFS}
+		sub, err := root.Sub(ctx, "photos")
+		s.Require().NoError(err)
+		s.Require().NoError(sub.Put(ctx, s2.NewObjectBytes("a.txt", []byte("body"),
+			s2.WithContentType("text/plain"), s2.WithMetadata(s2.Metadata{"k": "v"}))))
+
+		s.Require().NoError(root.DeleteRecursive(ctx, "photos/.met"))
+
+		got, err := sub.Get(ctx, "a.txt")
+		s.Require().NoError(err)
+		s.Equal("text/plain", got.ContentType())
+		s.Equal(s2.Metadata{"k": "v"}, got.Metadata())
+
+		// Clearing the directory that holds it still takes it along.
+		s.Require().NoError(root.DeleteRecursive(ctx, "photos/"))
+		res, err := root.List(ctx, s2.ListOptions{Recursive: true})
+		s.Require().NoError(err)
+		s.Empty(res.Objects)
+	})
+
+	// A regular file named ".meta" is not the sidecar directory. Skipping it
+	// as one would skip the rest of the directory holding it, and the walk
+	// must delete it rather than refuse the name it just read.
+	s.Run("a regular file named like the meta dir", func() {
+		fsys := memfs.New()
+		for _, name := range []string{".meta", "sub/kept.txt"} {
+			_, err := fsys.WriteFile(name, []byte("x"), fs.ModePerm)
+			s.Require().NoError(err)
+		}
+		strg := &storage{fsys: fsys, typ: s2.TypeMemFS}
+
+		// It is not an object either, so no listing offers a name that Get
+		// would then refuse.
+		for _, opts := range []s2.ListOptions{{Recursive: true}, {}} {
+			res, err := strg.List(ctx, opts)
+			s.Require().NoError(err)
+			for _, obj := range res.Objects {
+				s.NotEqual(".meta", obj.Name())
+			}
+		}
+
+		s.Require().NoError(strg.DeleteRecursive(ctx, "sub/"))
+		_, err := fs.Stat(fsys, "sub/kept.txt")
+		s.Require().ErrorIs(err, fs.ErrNotExist)
+
+		s.Require().NoError(strg.DeleteRecursive(ctx, ""))
+		_, err = fs.Stat(fsys, ".meta")
+		s.Require().ErrorIs(err, fs.ErrNotExist)
+	})
+
+	obj, err := strg.Get(ctx, "a.txt")
+	s.Require().NoError(err)
+	s.Equal("text/plain", obj.ContentType())
+	s.Equal(s2.Metadata{"k": "v"}, obj.Metadata())
+}

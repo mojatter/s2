@@ -148,6 +148,9 @@ func (s *storage) Type() s2.Type {
 }
 
 func (s *storage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
+	if err := s2.ValidatePrefix(prefix); err != nil {
+		return nil, err
+	}
 	return &storage{
 		client: s.client,
 		bucket: s.bucket,
@@ -160,6 +163,13 @@ func (s *storage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
 const defaultListLimit = 1000
 
 func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	if err := s2.ValidatePrefix(opts.Prefix); err != nil {
+		return s2.ListResult{}, err
+	}
+	// StartAfter is a key, and every backend joins it with the storage prefix.
+	if err := s2.ValidatePrefix(opts.StartAfter); err != nil {
+		return s2.ListResult{}, err
+	}
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = defaultListLimit
@@ -184,7 +194,7 @@ func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult,
 	case opts.After != "":
 		input.ContinuationToken = aws.String(opts.After)
 	case opts.StartAfter != "":
-		input.StartAfter = aws.String(s2.Key(s.prefix, opts.StartAfter))
+		input.StartAfter = aws.String(joinKeepSlash(s.prefix, opts.StartAfter))
 	}
 	if delimiter != "" {
 		input.Delimiter = aws.String(delimiter)
@@ -234,6 +244,9 @@ func (s *storage) listPrefix(prefix string) string {
 }
 
 func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
+	if err := s2.ValidateName(name); err != nil {
+		return nil, err
+	}
 	params, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(path.Join(s.prefix, name)),
@@ -279,8 +292,12 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 // existing, and forcing a HeadBucket round-trip on every call adds
 // no information that the first real read or write would not.
 func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
-	if name == "" || name == "/" {
+	// "" is the root; "/" is a spelling of it that no name may take.
+	if name == "" {
 		return true, nil
+	}
+	if err := s2.ValidateName(name); err != nil {
+		return false, err
 	}
 	key := path.Join(s.prefix, name)
 
@@ -341,6 +358,9 @@ func mapNotExist(err error, name string) error {
 }
 
 func (s *storage) Put(ctx context.Context, obj s2.Object) error {
+	if err := s2.ValidateName(obj.Name()); err != nil {
+		return err
+	}
 	rc, err := obj.Open()
 	if err != nil {
 		return err
@@ -377,6 +397,9 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 // A Content-Type kept under the legacy s2-content-type key moves to the object's own.
 // The HeadObject and CopyObject calls are not atomic: a Put between them loses its Content-Type.
 func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Metadata) error {
+	if err := s2.ValidateName(name); err != nil {
+		return err
+	}
 	key := path.Join(s.prefix, name)
 	head, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -401,6 +424,11 @@ func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Meta
 }
 
 func (s *storage) Copy(ctx context.Context, src, dst string) error {
+	for _, name := range []string{src, dst} {
+		if err := s2.ValidateName(name); err != nil {
+			return err
+		}
+	}
 	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:     aws.String(s.bucket),
 		Key:        aws.String(path.Join(s.prefix, dst)),
@@ -410,6 +438,9 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 }
 
 func (s *storage) Delete(ctx context.Context, name string) error {
+	if err := s2.ValidateName(name); err != nil {
+		return err
+	}
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(path.Join(s.prefix, name)),
@@ -418,6 +449,9 @@ func (s *storage) Delete(ctx context.Context, name string) error {
 }
 
 func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
+	if err := s2.ValidatePrefix(prefix); err != nil {
+		return err
+	}
 	paginator := s3.NewListObjectsV2Paginator(s.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(s.bucket),
 		Prefix: aws.String(joinKeepSlash(s.prefix, prefix)),
@@ -452,6 +486,9 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 }
 
 func (s *storage) SignedURL(ctx context.Context, opts s2.SignedURLOptions) (string, error) {
+	if err := s2.ValidateName(opts.Name); err != nil {
+		return "", err
+	}
 	method := opts.Method
 	if method == "" {
 		method = s2.SignedURLGet
@@ -493,10 +530,15 @@ func (s *storage) SignedURL(ctx context.Context, opts s2.SignedURLOptions) (stri
 	}
 }
 
-// joinKeepSlash is path.Join that keeps prefix's trailing slash, which confines a listing to that directory.
+// joinKeepSlash is path.Join that keeps the trailing slash confining a listing
+// to one directory: prefix's own, or the storage's when prefix is empty and so
+// means everything inside it -- a Sub of "photos" must not reach "photos-old/".
 func joinKeepSlash(base, prefix string) string {
 	p := path.Join(base, prefix)
-	if strings.HasSuffix(prefix, "/") && !strings.HasSuffix(p, "/") {
+	if p == "" || strings.HasSuffix(p, "/") {
+		return p
+	}
+	if prefix == "" || strings.HasSuffix(prefix, "/") {
 		p += "/"
 	}
 	return p

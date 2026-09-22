@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -49,7 +50,35 @@ var s3Handlers = map[string]HandlerFunc{}
 // routes registered via RegisterS3HandleFunc, wrapped with the health
 // endpoint at cfg.HealthPath (when set) and permissive CORS headers.
 func (s *Server) S3Handler() http.Handler {
-	return s.buildMux(s3Handlers, healthHandler(s.Config.HealthPath), corsHandler)
+	reject := func(w http.ResponseWriter, r *http.Request) {
+		WriteS3Error(w, r, "InvalidArgument", "The request path is not valid", http.StatusBadRequest)
+	}
+	return s.buildMux(s3Handlers, cleanPathHandler(reject), healthHandler(s.Config.HealthPath), corsHandler)
+}
+
+// cleanPathHandler answers with reject when the request path is not already
+// the path it resolves to. ServeMux redirects a "." or ".." element it can
+// see, but an encoded "..%2F" stays inside a single element and reaches a
+// backend as a key that leaves the bucket; a "." or an empty element is
+// milder but still resolves to a different name than it spells, which is how
+// a policy written against the spelled name is evaded -- authorization reads
+// the raw path, the backend reads the resolved one. reject differs per mux:
+// the S3 API owes the client an XML error document, the console a plain one.
+func cleanPathHandler(reject http.HandlerFunc) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			elems := strings.Split(r.URL.Path, "/")
+			for i, elem := range elems {
+				// The first and last elements are empty for the leading and
+				// an optional trailing "/", which resolve to nothing.
+				if elem == "." || elem == ".." || (elem == "" && i > 0 && i < len(elems)-1) {
+					reject(w, r)
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // RegisterS3HandleFunc registers a handler that will be served by
