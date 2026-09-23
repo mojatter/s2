@@ -35,11 +35,19 @@ func objectsData(ctx context.Context, s *server.Server, bucket, prefix, search s
 		prefixes []string
 	)
 	if search != "" {
-		listPrefix := search
+		folder := ""
 		if prefix != "" {
-			listPrefix = prefix + "/" + search
+			folder = prefix + "/"
 		}
+		listPrefix := folder + search
 		res, err := strg.List(ctx, s2.ListOptions{Prefix: listPrefix, Recursive: true})
+		if errors.Is(err, s2.ErrInvalidName) {
+			// A search term is free text, not a path: typing "." must still
+			// find the dotfiles. One the storage will not take as a prefix is
+			// matched here against the folder's own listing instead. The
+			// folder is a path, so a bad one is still a bad request.
+			res, err = searchFolder(ctx, strg, folder, listPrefix)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -94,7 +102,7 @@ func objectsData(ctx context.Context, s *server.Server, bucket, prefix, search s
 func writeObjectsFragment(ctx context.Context, w http.ResponseWriter, s *server.Server, bucket, prefix, search string) {
 	data, err := objectsData(ctx, s, bucket, prefix, search)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeStorageError(w, err, http.StatusNotFound)
 		return
 	}
 	var buf bytes.Buffer
@@ -118,7 +126,7 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	data, err := objectsData(ctx, s, name, prefix, search)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeStorageError(w, err, http.StatusNotFound)
 		return
 	}
 	if err := s.RenderConsoleIndex(ctx, w, data); err != nil {
@@ -138,16 +146,21 @@ func handleCreateFolder(s *server.Server, w http.ResponseWriter, r *http.Request
 	}
 
 	key := path.Join(prefix, folderName)
-	if !server.DenyUnlessAllowedS3Action(w, server.UserFromContext(ctx), server.ActionPutObject, name, key) {
-		return
+	// Both: the marker is what is written, and a Deny on the folder's own
+	// name is meant to stop the folder from existing at all.
+	user := server.UserFromContext(ctx)
+	for _, authorize := range []string{key, server.FolderMarker(key)} {
+		if !server.DenyUnlessAllowedS3Action(w, user, server.ActionPutObject, name, authorize) {
+			return
+		}
 	}
 	if err := s.Buckets.CreateFolder(ctx, name, key); err != nil {
-		status := http.StatusInternalServerError
+		fallback := http.StatusInternalServerError
 		var notFound *server.ErrBucketNotFound
 		if errors.As(err, &notFound) {
-			status = http.StatusNotFound
+			fallback = http.StatusNotFound
 		}
-		http.Error(w, err.Error(), status)
+		writeStorageError(w, err, fallback)
 		return
 	}
 
@@ -184,7 +197,7 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 
 	strg, err := s.Buckets.Get(ctx, name)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeStorageError(w, err, http.StatusNotFound)
 		return
 	}
 
@@ -194,7 +207,7 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	}
 	obj := s2.NewObjectReader(key, io.NopCloser(file), s2.MustUint64(header.Size), s2.WithContentType(uploadContentType(header, key)))
 	if err := strg.Put(ctx, obj); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeStorageError(w, err, http.StatusInternalServerError)
 		return
 	}
 
@@ -212,7 +225,7 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 
 	strg, err := s.Buckets.Get(ctx, name)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeStorageError(w, err, http.StatusNotFound)
 		return
 	}
 
@@ -243,7 +256,7 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 			for {
 				res, err := strg.List(ctx, s2.ListOptions{Prefix: key, Recursive: true, After: after})
 				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
+					writeStorageError(w, err, http.StatusInternalServerError)
 					return
 				}
 				for _, obj := range res.Objects {
@@ -251,7 +264,7 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 						break pagination
 					}
 					if err := strg.Delete(ctx, obj.Name()); err != nil {
-						http.Error(w, err.Error(), http.StatusInternalServerError)
+						writeStorageError(w, err, http.StatusInternalServerError)
 						return
 					}
 				}
@@ -261,12 +274,12 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 				after = res.NextAfter
 			}
 		} else if err := strg.DeleteRecursive(ctx, key); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeStorageError(w, err, http.StatusInternalServerError)
 			return
 		}
 	} else {
 		if err := strg.Delete(ctx, key); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			writeStorageError(w, err, http.StatusInternalServerError)
 			return
 		}
 	}
@@ -280,4 +293,54 @@ func init() {
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/folders", middleware.BasicAuth(handleCreateFolder))
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/upload", middleware.BasicAuth(handleUploadFile))
 	server.RegisterConsoleHandleFunc("DELETE /buckets/{name}/objects", middleware.BasicAuth(handleDeleteObject))
+}
+
+// maxSearchFetches bounds the folder scan behind a search term the storage
+// will not take as a prefix: a match may sort past the first backend page.
+const maxSearchFetches = 10
+
+// searchFolder lists folder and keeps the names beginning with listPrefix,
+// the filtering the storage would refuse to do itself.
+func searchFolder(ctx context.Context, strg s2.Storage, folder, listPrefix string) (s2.ListResult, error) {
+	var (
+		out   s2.ListResult
+		after string
+	)
+	for range maxSearchFetches {
+		res, err := strg.List(ctx, s2.ListOptions{Prefix: folder, After: after, Recursive: true})
+		if err != nil {
+			return s2.ListResult{}, err
+		}
+		for _, obj := range res.Objects {
+			if strings.HasPrefix(obj.Name(), listPrefix) {
+				out.Objects = append(out.Objects, obj)
+			}
+		}
+		// Names come back sorted, so nothing beyond the term's range matches.
+		if n := len(res.Objects); n > 0 && pastSearchRange(res.Objects[n-1].Name(), listPrefix) {
+			break
+		}
+		if res.NextAfter == "" || res.NextAfter == after {
+			break
+		}
+		after = res.NextAfter
+	}
+	return out, nil
+}
+
+// pastSearchRange reports whether name sorts beyond every key listPrefix can
+// still match.
+func pastSearchRange(name, listPrefix string) bool {
+	return name > listPrefix && !strings.HasPrefix(name, listPrefix)
+}
+
+// writeStorageError answers with 400 for a name the storage refuses and with
+// fallback otherwise, so a rejected key never reads as a server fault or as a
+// missing bucket.
+func writeStorageError(w http.ResponseWriter, err error, fallback int) {
+	status := fallback
+	if errors.Is(err, s2.ErrInvalidName) {
+		status = http.StatusBadRequest
+	}
+	http.Error(w, err.Error(), status)
 }

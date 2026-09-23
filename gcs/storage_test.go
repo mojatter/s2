@@ -641,6 +641,23 @@ func (s *StorageTestSuite) TestS2TestDelete() {
 	}
 }
 
+func (s *StorageTestSuite) TestS2TestNameEscape() {
+	testCases := []struct {
+		caseName string
+		prefix   string
+	}{
+		{caseName: "no prefix"},
+		{caseName: "with prefix", prefix: "pfx"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			_, strg := s.testMockStorage()
+			strg.(*gcsStorage).prefix = tc.prefix
+			s.Require().NoError(s2test.TestStorageNameEscape(context.Background(), strg))
+		})
+	}
+}
+
 func (s *StorageTestSuite) TestS2TestPutMetadata() {
 	_, strg := s.testMockStorage()
 	s.Require().NoError(s2test.TestStoragePutMetadata(context.Background(), strg))
@@ -795,18 +812,24 @@ func (s *StorageTestSuite) TestExists() {
 		caseName string
 		name     string
 		want     bool
+		wantErr  bool
 	}{
 		{caseName: "leaf object", name: "a.txt", want: true},
 		{caseName: "leaf object missing", name: "not-found.txt", want: false},
 		{caseName: "non-empty prefix", name: "cc", want: true},
 		{caseName: "missing prefix", name: "no-such", want: false},
 		{caseName: "storage root", name: "", want: true},
-		{caseName: "storage root slash", name: "/", want: true},
+		// "/" spells the same root, but a name is used as written.
+		{caseName: "storage root slash", name: "/", wantErr: true},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
 			_, strg := s.testMockStorage()
 			got, err := strg.Exists(context.Background(), tc.name)
+			if tc.wantErr {
+				s.Require().ErrorIs(err, s2.ErrInvalidName)
+				return
+			}
 			s.Require().NoError(err)
 			s.Equal(tc.want, got)
 		})

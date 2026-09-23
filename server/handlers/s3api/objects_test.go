@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/mojatter/s2"
@@ -2330,6 +2331,154 @@ func (s *ObjectsTestSuite) TestXMLResponseFormat() {
 	s.Contains(w.Body.String(), `xmlns="http://s3.amazonaws.com/doc/2006-03-01/"`)
 }
 
+// countingStorage records how many times a listing reaches the backend, so a
+// retry ladder can be pinned by its cost and not only by its answer.
+type countingStorage struct {
+	s2.Storage
+	lists int
+}
+
+func (c *countingStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	c.lists++
+	return c.Storage.List(ctx, opts)
+}
+
+// TestListRefusesACursorNoListingCouldReturn walks the input space of the
+// prefix/cursor retry ladder: each of the two may be fine, refused by the
+// shared validator, or refused by the backend alone. Every cell is a fixed
+// number of backend calls -- the ladder has no loop and no scan, so a cursor
+// sorting above every key costs one call, not a listing.
+func TestListRefusesACursorNoListingCouldReturn(t *testing.T) {
+	ctx := context.Background()
+	cfg := server.DefaultConfig()
+	cfg.Type = s2.TypeMemFS
+	srv, err := server.NewServer(ctx, cfg)
+	require.NoError(t, err)
+	require.NoError(t, srv.Buckets.Create(ctx, "lad"))
+	strg, err := srv.Buckets.Get(ctx, "lad")
+	require.NoError(t, err)
+	for _, key := range []string{".metadata.json", "a.txt", "b.txt"} {
+		require.NoError(t, strg.Put(ctx, s2.NewObjectBytes(key, []byte("x"))))
+	}
+
+	testCases := []struct {
+		caseName   string
+		prefix     string
+		startAfter string
+		wantKeys   []string
+		wantRefuse bool
+		wantLists  int
+	}{
+		{caseName: "both fine", prefix: "a", startAfter: "", wantKeys: []string{"a.txt"}, wantLists: 1},
+		{caseName: "a cursor the validator refuses", prefix: "a", startAfter: "../x", wantRefuse: true},
+		{caseName: "a prefix the validator refuses", prefix: "..", startAfter: "", wantKeys: []string{}, wantLists: 1},
+		{caseName: "both refused by the validator", prefix: "..", startAfter: "-//x", wantRefuse: true},
+		{caseName: "a cursor that is not valid UTF-8", prefix: "a", startAfter: "\xff", wantRefuse: true},
+		// A name only the backend reserves: the validator lets it through, so
+		// the ladder has to ask, and the answer is still a bad request.
+		{caseName: "a cursor only the backend refuses", prefix: "a", startAfter: ".meta", wantRefuse: true, wantLists: 3},
+		{caseName: "a validator-refused prefix and a backend-refused cursor", prefix: "..", startAfter: ".meta", wantRefuse: true, wantLists: 2},
+		{caseName: "a prefix only the backend refuses", prefix: ".meta", startAfter: ".m", wantKeys: []string{".metadata.json"}, wantLists: 2},
+		{caseName: "both refused by the backend", prefix: ".meta", startAfter: ".meta", wantRefuse: true, wantLists: 3},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			cs := &countingStorage{Storage: strg}
+			objs, _, _, err := listObjects(ctx, cs, listObjectsParams{
+				bucketName: "lad",
+				prefix:     tc.prefix,
+				startAfter: tc.startAfter,
+				maxKeys:    maxObjectKeys,
+			})
+			if tc.wantRefuse {
+				require.ErrorIs(t, err, s2.ErrInvalidName)
+			} else {
+				require.NoError(t, err)
+				keys := make([]string, 0, len(objs))
+				for _, obj := range objs {
+					keys = append(keys, obj.Name())
+				}
+				require.Equal(t, tc.wantKeys, keys)
+			}
+			require.Equal(t, tc.wantLists, cs.lists)
+		})
+	}
+
+	// And the refusal reaches the client as a bad request, not a 500 or an
+	// empty page.
+	req := httptest.NewRequest(http.MethodGet, "/lad?list-type=2&start-after=..%2Fx", nil)
+	req.SetPathValue("bucket", "lad")
+	w := httptest.NewRecorder()
+	handleListObjects(srv, w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "<Code>InvalidArgument</Code>")
+}
+
+// TestListKeepsTheCursorWhenThePrefixIsRefused drives the one shape where a
+// storage refuses a listing it can still answer: an ordinary prefix that
+// happens to spell a name the backend reserves, with an ordinary cursor. The
+// prefix is what falls back; the cursor must survive, including across the
+// page boundary. Its own memfs server: the case needs more keys than one
+// page holds, which is slow to lay down on a temp directory.
+func TestListKeepsTheCursorWhenThePrefixIsRefused(t *testing.T) {
+	ctx := context.Background()
+	cfg := server.DefaultConfig()
+	cfg.Type = s2.TypeMemFS
+	srv, err := server.NewServer(ctx, cfg)
+	require.NoError(t, err)
+	require.NoError(t, srv.Buckets.Create(ctx, "cur"))
+	strg, err := srv.Buckets.Get(ctx, "cur")
+	require.NoError(t, err)
+
+	// "!" sorts below ".", so a scan for a cursor among the dotted keys runs
+	// past the fetch bound before it reaches one.
+	for i := range 1200 {
+		require.NoError(t, strg.Put(ctx, s2.NewObjectBytes(fmt.Sprintf("!%04d.txt", i), []byte("x"))))
+	}
+	for i := range 1200 {
+		require.NoError(t, strg.Put(ctx, s2.NewObjectBytes(fmt.Sprintf(".meta-%04d", i), []byte("x"))))
+	}
+
+	page := func(query string) ([]string, string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/cur?list-type=2&max-keys=100&"+query, nil)
+		req.SetPathValue("bucket", "cur")
+		w := httptest.NewRecorder()
+		handleListObjects(srv, w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		var res ListBucketResult
+		require.NoError(t, xml.Unmarshal(w.Body.Bytes(), &res))
+		keys := make([]string, 0, len(res.Contents))
+		for _, c := range res.Contents {
+			keys = append(keys, c.Key)
+		}
+		return keys, res.NextContinuationToken
+	}
+
+	testCases := []struct {
+		caseName  string
+		query     string
+		wantFirst string
+	}{
+		{caseName: "a reserved prefix", query: "prefix=.meta&start-after=.meta-0999", wantFirst: ".meta-1000"},
+		{caseName: "a reserved prefix, cursor at the very start", query: "prefix=.meta&start-after=.meta-0000", wantFirst: ".meta-0001"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			keys, token := page(tc.query)
+			require.NotEmpty(t, keys)
+			require.Equal(t, tc.wantFirst, keys[0])
+			require.NotEmpty(t, token)
+
+			// S3 clients resume with the token alone, so it must carry the
+			// cursor's effect: the next page continues rather than restarts.
+			next, _ := page("continuation-token=" + url.QueryEscape(token))
+			require.NotEmpty(t, next)
+			require.Greater(t, next[0], keys[len(keys)-1])
+		})
+	}
+}
+
 // --- HTTP Benchmarks ---
 //
 // End-to-end HTTP-layer benchmarks against the S3 handler with a 1 KiB
@@ -2426,7 +2575,266 @@ func benchHTTPGetObject(b *testing.B, typ s2.Type) {
 	}
 }
 
-func BenchmarkHTTPPutObject(b *testing.B)      { benchHTTPPutObject(b, s2.TypeOSFS) }
+// A key that leaves its bucket never reaches a backend, whatever the verb.
+func (s *ObjectsTestSuite) TestObjectKeyCannotLeaveTheBucket() {
+	s.putObject("bucket1", "a.txt", "a")
+	s.putObject("bucket2", "secret.txt", "TOPSECRET")
+
+	testCases := []struct {
+		caseName string
+		method   string
+		target   string
+	}{
+		{caseName: "GET", method: http.MethodGet, target: "/bucket1/..%2Fbucket2%2Fsecret.txt"},
+		{caseName: "HEAD", method: http.MethodHead, target: "/bucket1/..%2Fbucket2%2Fsecret.txt"},
+		{caseName: "PUT", method: http.MethodPut, target: "/bucket1/..%2Fbucket2%2Fsecret.txt"},
+		{caseName: "DELETE", method: http.MethodDelete, target: "/bucket1/..%2Fbucket2%2Fsecret.txt"},
+		{caseName: "dot-encoded GET", method: http.MethodGet, target: "/bucket1/%2e%2e%2Fbucket2%2Fsecret.txt"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			resp := s.roundTrip(s.server, tc.method, tc.target)
+			s.Equal(http.StatusBadRequest, resp.StatusCode)
+		})
+	}
+
+	// x-amz-copy-source is a header, so the path check never sees it either.
+	s.Run("copy source that leaves its bucket", func() {
+		ts := httptest.NewServer(s.server.S3Handler())
+		defer ts.Close()
+
+		req, err := http.NewRequest(http.MethodPut, ts.URL+"/bucket1/copied.txt", nil)
+		s.Require().NoError(err)
+		req.Header.Set("x-amz-copy-source", "/bucket1//../bucket2/secret.txt")
+		resp, err := ts.Client().Do(req)
+		s.Require().NoError(err)
+
+		defer func() { _ = resp.Body.Close() }()
+
+		s.Equal(http.StatusBadRequest, resp.StatusCode)
+	})
+
+	// An empty source bucket would resolve to the root holding every bucket,
+	// and authorize against a bucket named "".
+	s.Run("copy source without a bucket", func() {
+		ts := httptest.NewServer(s.server.S3Handler())
+		defer ts.Close()
+
+		req, err := http.NewRequest(http.MethodPut, ts.URL+"/bucket1/copied.txt", nil)
+		s.Require().NoError(err)
+		req.Header.Set("x-amz-copy-source", "//bucket2/secret.txt")
+		resp, err := ts.Client().Do(req)
+		s.Require().NoError(err)
+
+		defer func() { _ = resp.Body.Close() }()
+
+		s.Equal(http.StatusBadRequest, resp.StatusCode)
+	})
+
+	// A key that resolves to a different name than it spells is what evades a
+	// policy written against the spelled one.
+	s.Run("a key with a dot element", func() {
+		resp := s.roundTrip(s.server, http.MethodGet, "/bucket1/.%2Fa.txt")
+		s.Equal(http.StatusBadRequest, resp.StatusCode)
+	})
+
+	// A list prefix is a query parameter, so the path check never sees it.
+	// Every backend validates it at the entry of List instead, so it is
+	// refused rather than answered with the neighbouring bucket.
+	s.Run("list with an escaping prefix", func() {
+		body := s.roundTripBody(s.server, http.MethodGet, "/bucket1?list-type=2&prefix=..%2Fbucket2")
+		s.NotContains(body, "secret.txt")
+	})
+
+	// CreateMultipartUpload does not write the key, so without an early check
+	// the refusal would only arrive once every part had been uploaded.
+	s.Run("multipart create with an escaping key", func() {
+		resp := s.roundTrip(s.server, http.MethodPost, "/bucket1/..%2Fbucket2%2Fsecret.txt?uploads")
+		s.Equal(http.StatusBadRequest, resp.StatusCode)
+	})
+
+	// The neighbour is still there, with its body.
+	strg, err := s.server.Buckets.Get(context.Background(), "bucket2")
+	s.Require().NoError(err)
+	obj, err := strg.Get(context.Background(), "secret.txt")
+	s.Require().NoError(err)
+	rc, err := obj.Open()
+	s.Require().NoError(err)
+
+	defer func() { _ = rc.Close() }()
+
+	b, err := io.ReadAll(rc)
+	s.Require().NoError(err)
+	s.Equal("TOPSECRET", string(b))
+}
+
+func (s *ObjectsTestSuite) TestListTakesAnyS3Prefix() {
+	s.putObject("pfx", ".hidden.txt", "h")
+	s.putObject("pfx", "images/a.png", "a")
+
+	// An S3 prefix filters key bytes; a storage name is a path. A prefix the
+	// storage would refuse as a name is not a bad request -- it is a filter
+	// that matches nothing, or one whose directory portion is empty.
+	testCases := []struct {
+		caseName string
+		query    string
+		wantKeys int
+	}{
+		{caseName: "a dot", query: "prefix=.", wantKeys: 1},
+		{caseName: "a dot, delimited", query: "prefix=.&delimiter=/", wantKeys: 1},
+		{caseName: "two dots", query: "prefix=..", wantKeys: 0},
+		{caseName: "an ordinary prefix", query: "prefix=im", wantKeys: 1},
+		{caseName: "an empty element", query: "prefix=images%2F%2F", wantKeys: 0},
+		{caseName: "a prefix that leaves the bucket", query: "prefix=..%2Fpfx2", wantKeys: 0},
+		// A name the backend reserves for itself, which the shared validator
+		// does not know about.
+		{caseName: "a reserved element", query: "prefix=.meta", wantKeys: 0},
+		{caseName: "a reserved directory", query: "prefix=.meta%2F", wantKeys: 0},
+		{caseName: "a reserved element below", query: "prefix=images%2F.meta", wantKeys: 0},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			body := s.roundTripBody(s.server, http.MethodGet, "/pfx?list-type=2&"+tc.query)
+			s.Require().Contains(body, "ListBucketResult", body)
+			s.Contains(body, fmt.Sprintf("<KeyCount>%d</KeyCount>", tc.wantKeys), body)
+		})
+	}
+
+	// The cursor is the other half and reads the other way: it names where a
+	// page stopped, so a spelling no page could have ended on is a bad
+	// request rather than a filter -- including one only the backend
+	// reserves, which the shared validator cannot know about.
+	refusedCursors := []string{
+		"start-after=.",
+		"start-after=..%2Fpfx2",
+		"start-after=images%2F%2Fa.png",
+		"start-after=.meta",
+	}
+	for _, query := range refusedCursors {
+		s.Run(query, func() {
+			body := s.roundTripBody(s.server, http.MethodGet, "/pfx?list-type=2&"+query)
+			s.Contains(body, "<Code>InvalidArgument</Code>", body)
+		})
+	}
+
+	// A name the backend reserves is an element, and an S3 prefix is bytes:
+	// ".meta" must still find ".metadata.json". Pushing the prefix down asks
+	// the backend a question it answers with a refusal, not with a key.
+	s.putObject("look", ".metadata.json", "m")
+	s.putObject("look", "docs/.metadata.json", "d")
+	lookalikeCases := []struct {
+		caseName string
+		query    string
+		wantKey  string
+	}{
+		{caseName: "one byte short of the reserved name", query: "prefix=.met", wantKey: ".metadata.json"},
+		{caseName: "exactly the reserved name", query: "prefix=.meta", wantKey: ".metadata.json"},
+		{caseName: "one byte past it", query: "prefix=.metad", wantKey: ".metadata.json"},
+		{caseName: "exactly the reserved name, delimited", query: "prefix=.meta&delimiter=%2F", wantKey: ".metadata.json"},
+		{caseName: "the reserved name below a directory", query: "prefix=docs%2F.meta", wantKey: "docs/.metadata.json"},
+	}
+	for _, tc := range lookalikeCases {
+		s.Run(tc.caseName, func() {
+			body := s.roundTripBody(s.server, http.MethodGet, "/look?list-type=2&"+tc.query)
+			s.Require().Contains(body, "ListBucketResult", body)
+			s.Contains(body, "<Key>"+tc.wantKey+"</Key>", body)
+		})
+	}
+
+	// A cursor the storage takes still rules out whole directories, which the
+	// delimited listing reports as common prefixes rather than as keys.
+	s.putObject("cur", "a/1.txt", "a")
+	s.putObject("cur", "z/1.txt", "z")
+	s.Run("a canonical cursor rules out a directory", func() {
+		body := s.roundTripBody(s.server, http.MethodGet, "/cur?list-type=2&delimiter=%2F&start-after=z%2F")
+		s.Contains(body, "<Prefix>z/</Prefix>", body)
+		s.NotContains(body, "<Prefix>a/</Prefix>", body)
+	})
+}
+
+func (s *ObjectsTestSuite) TestBucketSegmentIsOnePathElement() {
+	ctx := context.Background()
+	s.createBucket("bucket1")
+	strg, err := s.server.Buckets.Get(ctx, "bucket1")
+	s.Require().NoError(err)
+	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("private/secret.txt", []byte("TOPSECRET"),
+		s2.WithContentType("text/plain"), s2.WithMetadata(s2.Metadata{"k": "v"}))))
+
+	// The mux fills {bucket} from the escaped path, so a "%2F" makes a bucket
+	// name that spans directories: the request is authorized against that
+	// spelling and served from a prefix the policy check never saw.
+	testCases := []struct {
+		caseName   string
+		method     string
+		target     string
+		wantStatus int
+	}{
+		{caseName: "GET a sidecar as a bucket", method: http.MethodGet, target: "/bucket1%2F.meta/private%2Fsecret.txt", wantStatus: http.StatusNotFound},
+		{caseName: "PUT a sidecar as a bucket", method: http.MethodPut, target: "/bucket1%2F.meta/private%2Fsecret.txt", wantStatus: http.StatusNotFound},
+		{caseName: "DELETE a sidecar as a bucket", method: http.MethodDelete, target: "/bucket1%2F.meta/private%2Fsecret.txt", wantStatus: http.StatusNotFound},
+		{caseName: "a sub-prefix as a bucket", method: http.MethodGet, target: "/bucket1%2Fprivate/secret.txt", wantStatus: http.StatusNotFound},
+		{caseName: "list a sub-prefix as a bucket", method: http.MethodGet, target: "/bucket1%2Fprivate?list-type=2", wantStatus: http.StatusNotFound},
+		{caseName: "create one", method: http.MethodPut, target: "/outer%2Finner", wantStatus: http.StatusBadRequest},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			resp := s.roundTrip(s.server, tc.method, tc.target)
+			s.Equal(tc.wantStatus, resp.StatusCode)
+		})
+	}
+
+	obj, err := strg.Get(ctx, "private/secret.txt")
+	s.Require().NoError(err)
+	s.Equal("text/plain", obj.ContentType())
+	s.Equal(s2.Metadata{"k": "v"}, obj.Metadata())
+}
+
+func (s *ObjectsTestSuite) TestObjectKeyCannotBeASidecar() {
+	ctx := context.Background()
+	strg, err := s.server.Buckets.Get(ctx, "bucket1")
+	if err != nil {
+		s.createBucket("bucket1")
+		strg, err = s.server.Buckets.Get(ctx, "bucket1")
+	}
+	s.Require().NoError(err)
+	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"),
+		s2.WithContentType("text/plain"), s2.WithMetadata(s2.Metadata{"k": "v"}))))
+
+	// On fs the object's metadata lives at .meta/a.txt, so a key spelling that
+	// reaches it writes another object's metadata under its own name.
+	testCases := []struct {
+		caseName string
+		method   string
+		target   string
+	}{
+		{caseName: "GET", method: http.MethodGet, target: "/bucket1/.meta/a.txt"},
+		{caseName: "PUT", method: http.MethodPut, target: "/bucket1/.meta/a.txt"},
+		{caseName: "DELETE", method: http.MethodDelete, target: "/bucket1/.meta/a.txt"},
+		{caseName: "multipart create", method: http.MethodPost, target: "/bucket1/.meta/a.txt?uploads"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			resp := s.roundTrip(s.server, tc.method, tc.target)
+			s.Equal(http.StatusBadRequest, resp.StatusCode)
+		})
+	}
+
+	// A listing is not a name: the prefix is the byte filter S3 defines, and
+	// it matches nothing, rather than being refused.
+	s.Run("list prefix", func() {
+		body := s.roundTripBody(s.server, http.MethodGet, "/bucket1?list-type=2&prefix=.meta/")
+		s.Contains(body, "<KeyCount>0</KeyCount>", body)
+		s.NotContains(body, "a.txt")
+	})
+
+	obj, err := strg.Get(ctx, "a.txt")
+	s.Require().NoError(err)
+	s.Equal("text/plain", obj.ContentType())
+	s.Equal(s2.Metadata{"k": "v"}, obj.Metadata())
+}
+
+func BenchmarkHTTPPutObject(b *testing.B) { benchHTTPPutObject(b, s2.TypeOSFS) }
+
 func BenchmarkHTTPGetObject(b *testing.B)      { benchHTTPGetObject(b, s2.TypeOSFS) }
 func BenchmarkHTTPPutObjectMemFS(b *testing.B) { benchHTTPPutObject(b, s2.TypeMemFS) }
 func BenchmarkHTTPGetObjectMemFS(b *testing.B) { benchHTTPGetObject(b, s2.TypeMemFS) }

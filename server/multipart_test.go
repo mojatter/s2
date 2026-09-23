@@ -598,12 +598,9 @@ func (s *MultipartStoreTestSuite) TestRemove() {
 
 			s.Require().NoError(ms.Remove(ctx, "id1"))
 
-			// fs keeps metadata in .meta sidecars; they must go with the upload.
-			for _, name := range []string{"id1", ".meta/id1"} {
-				exists, err := ms.Storage().Exists(ctx, name)
-				s.Require().NoError(err)
-				s.Falsef(exists, "%s should have been removed", name)
-			}
+			exists, err := ms.Storage().Exists(ctx, "id1")
+			s.Require().NoError(err)
+			s.False(exists, "id1 should have been removed")
 			_, _, err = ms.Metadata(ctx, "id2", "photos", "b.jpg", 0)
 			s.NoError(err, "a sibling upload must survive")
 		})

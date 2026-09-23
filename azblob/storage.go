@@ -111,6 +111,9 @@ func (s *azblobStorage) Type() s2.Type {
 }
 
 func (s *azblobStorage) Sub(_ context.Context, prefix string) (s2.Storage, error) {
+	if err := s2.ValidatePrefix(prefix); err != nil {
+		return nil, err
+	}
 	return &azblobStorage{
 		client:    s.client,
 		container: s.container,
@@ -125,6 +128,13 @@ const defaultListLimit = 1000
 // by paging from the start and discarding names up to it, one request per
 // page skipped; prefer After for pagination.
 func (s *azblobStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	if err := s2.ValidatePrefix(opts.Prefix); err != nil {
+		return s2.ListResult{}, err
+	}
+	// StartAfter is a key, and every backend joins it with the storage prefix.
+	if err := s2.ValidatePrefix(opts.StartAfter); err != nil {
+		return s2.ListResult{}, err
+	}
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = defaultListLimit
@@ -136,7 +146,7 @@ func (s *azblobStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListR
 	// bucket rescans from the start on every request.
 	startAfter := ""
 	if opts.After == "" && opts.StartAfter != "" {
-		startAfter = s.key(opts.StartAfter)
+		startAfter = joinKeepSlash(s.prefix, opts.StartAfter)
 	}
 
 	out := s2.ListResult{
@@ -193,6 +203,9 @@ func (s *azblobStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListR
 }
 
 func (s *azblobStorage) Get(ctx context.Context, name string) (s2.Object, error) {
+	if err := s2.ValidateName(name); err != nil {
+		return nil, err
+	}
 	props, err := s.client.getProperties(ctx, s.container, s.key(name))
 	if err != nil {
 		return nil, mapNotExist(err, name)
@@ -215,8 +228,12 @@ func (s *azblobStorage) Get(ctx context.Context, name string) (s2.Object, error)
 }
 
 func (s *azblobStorage) Exists(ctx context.Context, name string) (bool, error) {
-	if name == "" || name == "/" {
+	// "" is the root; "/" is a spelling of it that no name may take.
+	if name == "" {
 		return true, nil
+	}
+	if err := s2.ValidateName(name); err != nil {
+		return false, err
 	}
 
 	_, err := s.client.getProperties(ctx, s.container, s.key(name))
@@ -245,6 +262,9 @@ func (s *azblobStorage) Put(ctx context.Context, obj s2.Object) error {
 // Upload implements s2.Uploader. upload reports the Content-MD5 it sent, which
 // is the ETag a later Get derives.
 func (s *azblobStorage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOptions) (s2.UploadResult, error) {
+	if err := s2.ValidateName(obj.Name()); err != nil {
+		return s2.UploadResult{}, err
+	}
 	rc, err := obj.Open()
 	if err != nil {
 		return s2.UploadResult{}, err
@@ -259,10 +279,18 @@ func (s *azblobStorage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOp
 }
 
 func (s *azblobStorage) PutMetadata(ctx context.Context, name string, metadata s2.Metadata) error {
+	if err := s2.ValidateName(name); err != nil {
+		return err
+	}
 	return s.client.setMetadata(ctx, s.container, s.key(name), toPtrMetadata(metadata))
 }
 
 func (s *azblobStorage) Copy(ctx context.Context, src, dst string) error {
+	for _, name := range []string{src, dst} {
+		if err := s2.ValidateName(name); err != nil {
+			return err
+		}
+	}
 	err := s.client.copyBlob(ctx, s.container, s.key(src), s.key(dst))
 	// CopyFromURL fetches the source over HTTP rather than resolving it as a
 	// blob reference, so a missing source surfaces as CannotVerifyCopySource
@@ -274,6 +302,9 @@ func (s *azblobStorage) Copy(ctx context.Context, src, dst string) error {
 }
 
 func (s *azblobStorage) Delete(_ context.Context, name string) error {
+	if err := s2.ValidateName(name); err != nil {
+		return err
+	}
 	err := s.client.deleteBlob(context.Background(), s.container, s.key(name))
 	if isBlobNotFound(err) {
 		return nil
@@ -282,6 +313,9 @@ func (s *azblobStorage) Delete(_ context.Context, name string) error {
 }
 
 func (s *azblobStorage) DeleteRecursive(ctx context.Context, prefix string) error {
+	if err := s2.ValidatePrefix(prefix); err != nil {
+		return err
+	}
 	fullPrefix := joinKeepSlash(s.prefix, prefix)
 	for {
 		res, err := s.client.listBlobs(ctx, s.container, fullPrefix, int32(defaultListLimit), "")
@@ -302,6 +336,9 @@ func (s *azblobStorage) DeleteRecursive(ctx context.Context, prefix string) erro
 }
 
 func (s *azblobStorage) SignedURL(_ context.Context, opts s2.SignedURLOptions) (string, error) {
+	if err := s2.ValidateName(opts.Name); err != nil {
+		return "", err
+	}
 	method := opts.Method
 	if method == "" {
 		method = s2.SignedURLGet
@@ -343,10 +380,15 @@ func isBlobNotFound(err error) bool {
 	return bloberror.HasCode(err, bloberror.BlobNotFound, bloberror.ContainerNotFound, bloberror.ResourceNotFound)
 }
 
-// joinKeepSlash is path.Join that keeps prefix's trailing slash, which confines a listing to that directory.
+// joinKeepSlash is path.Join that keeps the trailing slash confining a listing
+// to one directory: prefix's own, or the storage's when prefix is empty and so
+// means everything inside it -- a Sub of "photos" must not reach "photos-old/".
 func joinKeepSlash(base, prefix string) string {
 	p := path.Join(base, prefix)
-	if strings.HasSuffix(prefix, "/") && !strings.HasSuffix(p, "/") {
+	if p == "" || strings.HasSuffix(p, "/") {
+		return p
+	}
+	if prefix == "" || strings.HasSuffix(prefix, "/") {
 		p += "/"
 	}
 	return p
