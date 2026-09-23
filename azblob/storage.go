@@ -140,7 +140,7 @@ func (s *azblobStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListR
 		limit = defaultListLimit
 	}
 
-	prefix := s.fullPrefix(opts.Prefix)
+	prefix := s.listPrefix(opts.Prefix, opts.Recursive)
 	marker := opts.After
 	// TODO: the s3api handler resumes with a key, not a marker, so paging a
 	// bucket rescans from the start on every request.
@@ -358,9 +358,12 @@ func (s *azblobStorage) key(name string) string {
 	return path.Join(s.prefix, name)
 }
 
-func (s *azblobStorage) fullPrefix(prefix string) string {
-	full := path.Join(s.prefix, prefix)
-	if full != "" && !strings.HasSuffix(full, "/") {
+// listPrefix is the query prefix for a listing; only a delimited one treats the caller's prefix as a directory.
+func (s *azblobStorage) listPrefix(prefix string, recursive bool) string {
+	// joinKeepSlash gives the empty prefix a trailing slash, so a listing that
+	// narrows nothing still cannot reach a sibling of the storage prefix.
+	full := joinKeepSlash(s.prefix, prefix)
+	if full != "" && !recursive && !strings.HasSuffix(full, "/") {
 		full += "/"
 	}
 	return full

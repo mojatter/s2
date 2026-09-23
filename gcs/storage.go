@@ -106,7 +106,7 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 	}
 
 	q := &storage.Query{
-		Prefix: s.fullPrefix(opts.Prefix),
+		Prefix: s.listPrefix(opts.Prefix, opts.Recursive),
 	}
 	if !opts.Recursive {
 		q.Delimiter = "/"
@@ -365,9 +365,12 @@ func (s *gcsStorage) key(name string) string {
 	return path.Join(s.prefix, name)
 }
 
-func (s *gcsStorage) fullPrefix(prefix string) string {
-	full := path.Join(s.prefix, prefix)
-	if full != "" && !strings.HasSuffix(full, "/") {
+// listPrefix is the query prefix for a listing; only a delimited one treats the caller's prefix as a directory.
+func (s *gcsStorage) listPrefix(prefix string, recursive bool) string {
+	// joinKeepSlash gives the empty prefix a trailing slash, so a listing that
+	// narrows nothing still cannot reach a sibling of the storage prefix.
+	full := joinKeepSlash(s.prefix, prefix)
+	if full != "" && !recursive && !strings.HasSuffix(full, "/") {
 		full += "/"
 	}
 	return full

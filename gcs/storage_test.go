@@ -488,6 +488,45 @@ func (s *StorageTestSuite) testMockStorage() (*mockGCSClient, s2.Storage) {
 	}
 }
 
+// A recursive listing matches the caller's prefix by string, but the storage
+// prefix must still confine it to its own directory.
+func (s *StorageTestSuite) TestListRecursivePrefixIsNotADirectory() {
+	testCases := []struct {
+		caseName    string
+		storePrefix string
+		optsPrefix  string
+		want        []string
+	}{
+		{
+			caseName:   "the caller's prefix reaches a sibling",
+			optsPrefix: "cc",
+			want:       []string{"cc.txt", "cc/c1.txt", "cc/c2.txt"},
+		},
+		{
+			caseName:   "a trailing slash confines it",
+			optsPrefix: "cc/",
+			want:       []string{"cc/c1.txt", "cc/c2.txt"},
+		},
+		{
+			caseName:    "the storage prefix never reaches a sibling",
+			storePrefix: "cc",
+			want:        []string{"c1.txt", "c2.txt"},
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m, strg := s.testMockStorage()
+			m.put("mybucket", "cc.txt", []byte("sibling"), nil)
+			strg.(*gcsStorage).prefix = tc.storePrefix
+			ctx := context.Background()
+
+			res, err := strg.List(ctx, s2.ListOptions{Prefix: tc.optsPrefix, Recursive: true})
+			s.Require().NoError(err)
+			s.Equal(tc.want, objectNames(res.Objects))
+		})
+	}
+}
+
 func (s *StorageTestSuite) TestNewStorageError() {
 	s.Run("empty root", func() {
 		_, err := NewStorage(context.Background(), s2.Config{})
@@ -510,6 +549,9 @@ func (s *StorageTestSuite) TestS2TestList() {
 	ctx := context.Background()
 
 	err := s2test.TestStorageListRecursive(ctx, strg, "a.txt", "b.txt", "cc/c1.txt", "cc/c2.txt")
+	s.Require().NoError(err)
+
+	err = s2test.TestStorageListRecursivePrefix(ctx, strg)
 	s.Require().NoError(err)
 
 	err = s2test.TestStorageList(ctx, strg, "", "a.txt", "b.txt")

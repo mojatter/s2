@@ -180,6 +180,8 @@ Every name a `Storage` method takes is used as written: it must satisfy [`fs.Val
 
 `ListOptions.Prefix`, `ListOptions.StartAfter`, `DeleteRecursive` and `Sub` select objects rather than name one, so they also take `""` and one trailing `/`.
 
+A recursive `List` matches `ListOptions.Prefix` against names by string, so `report` reaches both `report.txt` and `report/2024.pdf`; only a non-recursive one reads it as a directory. `s2test.TestStorageListRecursivePrefix` checks that.
+
 On `s3`, `gcs` and `azblob`, `Exists("")` is the one exception: it reports the storage root, which exists by construction, without a round trip. `"/"` is a spelling of the same thing and is refused like any other non-canonical name.
 
 `fs.ValidPath` requires valid UTF-8, which means a key holding raw bytes that are not UTF-8 is refused even on `s3`, `gcs` and `azblob`, where the provider itself would store it.
