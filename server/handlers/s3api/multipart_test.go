@@ -20,7 +20,6 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	"github.com/mojatter/s2"
-	"github.com/mojatter/s2/fs"
 	"github.com/mojatter/s2/server"
 )
 
@@ -358,7 +357,7 @@ func (s *MultipartTestSuite) TestUploadOfRecreatedBucket() {
 	s.createBucket("mp-reborn")
 	// Backdated before the upload so the successor cannot share its generation.
 	at := time.Now().Add(-time.Hour)
-	s.Require().NoError(os.Chtimes(filepath.Join(root, ".meta", "mp-reborn"), at, at))
+	s.Require().NoError(os.Chtimes(filepath.Join(root, ".buckets", "mp-reborn"), at, at))
 	uploadID := s.initiateUpload("mp-reborn", "file.bin", nil)
 	p1 := s.uploadPart("mp-reborn", "file.bin", uploadID, 1, "hello")
 	s.Require().NoError(s.server.Buckets.Delete(context.Background(), "mp-reborn"))
@@ -715,13 +714,9 @@ func (s *MultipartTestSuite) TestCompleteMultipartUploadPartReadFailure() {
 	uploadID := s.initiateUpload("mp-eio", "file.bin", nil)
 	p1 := s.uploadPart("mp-eio", "file.bin", uploadID, 1, "hello")
 	// A corrupt sidecar makes the fs backend's Get fail with a decode error.
-	// Through Sub, because the sidecar directory is not an object name.
-	ctx := context.Background()
-	upload, err := s.server.Multipart.Storage().Sub(ctx, uploadID)
-	s.Require().NoError(err)
-	meta, ok := fs.SubSidecar(upload)
-	s.Require().True(ok)
-	s.Require().NoError(meta.Put(ctx, s2.NewObjectBytes("00001", []byte("{"))))
+	// Written through the filesystem: the sidecar directory is not a name.
+	sidecar := filepath.Join(s.server.Config.Root, ".multipart", uploadID, ".meta", "00001")
+	s.Require().NoError(os.WriteFile(sidecar, []byte("{"), 0o600))
 
 	w := s.complete("mp-eio", "file.bin", uploadID, p1)
 	s.Equal(http.StatusInternalServerError, w.Code, w.Body.String())
@@ -887,7 +882,7 @@ func (s *MultipartTestSuite) TestListMultipartUploads() {
 	s.createBucket("mp-other")
 	// Backdated before its upload so only the recreate below retires it.
 	otherAt := time.Now().Add(-time.Hour)
-	s.Require().NoError(os.Chtimes(filepath.Join(root, ".meta", "mp-other"), otherAt, otherAt))
+	s.Require().NoError(os.Chtimes(filepath.Join(root, ".buckets", "mp-other"), otherAt, otherAt))
 	backdate := func(id string, age time.Duration) {
 		at := time.Now().Add(-age)
 		s.Require().NoError(os.Chtimes(filepath.Join(root, ".multipart", id, "meta"), at, at))

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/mojatter/s2"
-	"github.com/mojatter/s2/fs"
+	_ "github.com/mojatter/s2/fs" // registers the osfs and memfs backends
 )
 
 // ErrReservedBucketName is returned by Buckets.Create for a name reserved
@@ -18,8 +18,8 @@ var ErrReservedBucketName = errors.New("bucket name is reserved")
 
 const keepFile = ".keep"
 
-// bucketMetaDir holds per-bucket state, borrowing the directory fs already hides.
-const bucketMetaDir = ".meta"
+// bucketStateDir holds per-bucket state beside the buckets, as multipartDir does.
+const bucketStateDir = ".buckets"
 
 func isKeepFile(name string) bool {
 	return path.Base(name) == keepFile
@@ -158,14 +158,9 @@ func (bs *Buckets) CreatedAt(ctx context.Context, name string) (time.Time, error
 	return obj.LastModified(), nil
 }
 
-// meta returns the storage holding per-bucket state. The fs backend keeps
-// bucketMetaDir for object sidecars and refuses every spelling of it, so there
-// it takes SubSidecar; elsewhere the name is an ordinary prefix.
-func (bs *Buckets) meta(ctx context.Context) (s2.Storage, error) {
-	if sub, ok := fs.SubSidecar(bs.strg); ok {
-		return sub, nil
-	}
-	return bs.strg.Sub(ctx, bucketMetaDir)
+// state returns the storage holding per-bucket state.
+func (bs *Buckets) state(ctx context.Context) (s2.Storage, error) {
+	return bs.strg.Sub(ctx, bucketStateDir)
 }
 
 // Generation returns the bucket's multipart generation, recording one when missing.
@@ -173,7 +168,7 @@ func (bs *Buckets) Generation(ctx context.Context, name string) (int64, error) {
 	if !isBucketName(name) {
 		return 0, &ErrBucketNotFound{Name: name}
 	}
-	strg, err := bs.meta(ctx)
+	strg, err := bs.state(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -227,7 +222,7 @@ func (bs *Buckets) Create(ctx context.Context, name string) error {
 		}
 	}
 	// A new generation first, so a failed marker write cannot leave a stale one behind.
-	meta, err := bs.meta(ctx)
+	meta, err := bs.state(ctx)
 	if err != nil {
 		return err
 	}
@@ -250,7 +245,7 @@ func (bs *Buckets) Delete(ctx context.Context, name string) error {
 	if err := bs.strg.DeleteRecursive(ctx, name+"/"); err != nil {
 		return err
 	}
-	meta, err := bs.meta(ctx)
+	meta, err := bs.state(ctx)
 	if err != nil {
 		return err
 	}

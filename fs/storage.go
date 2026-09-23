@@ -81,8 +81,10 @@ func (s *storage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
 }
 
 // SubSidecar scopes strg to the directory holding object sidecars, which Sub
-// refuses like any other spelling of it. It is how s2's own code reaches the
-// state it keeps beside the objects; ok is false for any other storage.
+// refuses like any other spelling of it; ok is false for any other storage.
+//
+// Deprecated: it reaches past the name contract and only an osfs or memfs
+// storage itself, never a wrapper, satisfies it. Removed in v1.0.0.
 func SubSidecar(strg s2.Storage) (sub s2.Storage, ok bool) {
 	s, is := strg.(*storage)
 	if !is {
@@ -255,9 +257,9 @@ func (s *storage) listRecursive(prefix, after string, limit int) (s2.ListResult,
 		// descend and report the sidecars as objects. A regular file by that
 		// name is not an object either, and listFlat skips it too; SkipDir on
 		// one would skip the rest of the directory holding it.
-		// Not the walk root: a Sub of the metadata directory is how code that
-		// keeps its own state there reaches it, and memfs reports that root's
-		// name as ".meta" where osfs reports ".".
+		// Not the walk root: this storage may itself be scoped to that
+		// directory, and memfs reports that root's name as ".meta" where
+		// osfs reports ".".
 		if name != "." && isMetaDir(d.Name()) {
 			if d.IsDir() {
 				return fs.SkipDir

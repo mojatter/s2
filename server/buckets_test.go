@@ -299,7 +299,7 @@ func (s *BucketsTestSuite) TestGeneration() {
 		{
 			caseName: "re-creating keeps it",
 			prepare: func(ctx context.Context, root string, bs *Buckets) {
-				s.Require().NoError(os.Chtimes(filepath.Join(root, bucketMetaDir, "photos"), hourAgo, hourAgo))
+				s.Require().NoError(os.Chtimes(filepath.Join(root, bucketStateDir, "photos"), hourAgo, hourAgo))
 				s.Require().NoError(bs.Create(ctx, "photos"))
 			},
 			want: func(got int64) { s.Equal(hourAgo.UnixNano(), got) },
@@ -307,7 +307,7 @@ func (s *BucketsTestSuite) TestGeneration() {
 		{
 			caseName: "writing .keep keeps it",
 			prepare: func(ctx context.Context, root string, bs *Buckets) {
-				s.Require().NoError(os.Chtimes(filepath.Join(root, bucketMetaDir, "photos"), hourAgo, hourAgo))
+				s.Require().NoError(os.Chtimes(filepath.Join(root, bucketStateDir, "photos"), hourAgo, hourAgo))
 				sub, err := bs.strg.Sub(ctx, "photos")
 				s.Require().NoError(err)
 				s.Require().NoError(sub.Put(ctx, s2.NewObjectBytes(keepFile, []byte("x"))))
@@ -317,7 +317,7 @@ func (s *BucketsTestSuite) TestGeneration() {
 		{
 			caseName: "deleting and creating again moves it",
 			prepare: func(ctx context.Context, root string, bs *Buckets) {
-				s.Require().NoError(os.Chtimes(filepath.Join(root, bucketMetaDir, "photos"), hourAgo, hourAgo))
+				s.Require().NoError(os.Chtimes(filepath.Join(root, bucketStateDir, "photos"), hourAgo, hourAgo))
 				s.Require().NoError(bs.Delete(ctx, "photos"))
 				s.Require().NoError(bs.Create(ctx, "photos"))
 			},
@@ -326,7 +326,7 @@ func (s *BucketsTestSuite) TestGeneration() {
 		{
 			caseName: "creating replaces one the bucket's directory outlived",
 			prepare: func(ctx context.Context, root string, bs *Buckets) {
-				s.Require().NoError(os.Chtimes(filepath.Join(root, bucketMetaDir, "photos"), hourAgo, hourAgo))
+				s.Require().NoError(os.Chtimes(filepath.Join(root, bucketStateDir, "photos"), hourAgo, hourAgo))
 				s.Require().NoError(os.RemoveAll(filepath.Join(root, "photos")))
 				s.Require().NoError(bs.Create(ctx, "photos"))
 			},
@@ -390,7 +390,7 @@ func (s *BucketsTestSuite) TestBucketNameIsOnePathElement() {
 	// Nothing was recorded for it either. A listing, not Exists: a
 	// generation is stored as a file, so statting a name under one fails for
 	// a reason that has nothing to do with the guard.
-	meta, err := s.buckets.meta(ctx)
+	meta, err := s.buckets.state(ctx)
 	s.Require().NoError(err)
 	res, err := meta.List(ctx, s2.ListOptions{Recursive: true})
 	s.Require().NoError(err)
@@ -404,7 +404,7 @@ func (s *BucketsTestSuite) TestDeleteRemovesGeneration() {
 	s.Require().NoError(s.buckets.Create(ctx, "photos"))
 	s.Require().NoError(s.buckets.Delete(ctx, "photos"))
 
-	meta, err := s.buckets.meta(ctx)
+	meta, err := s.buckets.state(ctx)
 	s.Require().NoError(err)
 	exists, err := meta.Exists(ctx, "photos")
 	s.Require().NoError(err)
@@ -516,4 +516,69 @@ func (s *BucketsTestSuite) TestHiddenEntryIsNotABucket() {
 	ok, err := s.buckets.strg.Exists(ctx, multipartDir+"/deadbeef/00001")
 	s.Require().NoError(err)
 	s.True(ok)
+}
+
+// wrappedStorage is what a library user registers with RegisterNewStorageFunc:
+// a decorator holding the s2.Storage interface, not a backend's concrete type.
+type wrappedStorage struct {
+	s2.Storage
+}
+
+func (w wrappedStorage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
+	sub, err := w.Storage.Sub(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return wrappedStorage{sub}, nil
+}
+
+// Buckets speaks s2.Storage and nothing else, so a decorator around any
+// backend serves it.
+func (s *BucketsTestSuite) TestBucketsOverAWrappedStorage() {
+	testCases := []struct {
+		caseName string
+		typ      s2.Type
+	}{
+		{caseName: "osfs", typ: s2.TypeOSFS},
+		{caseName: "memfs", typ: s2.TypeMemFS},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			base, err := s2.NewStorage(ctx, s2.Config{Type: tc.typ, Root: s.T().TempDir()})
+			s.Require().NoError(err)
+			bs := &Buckets{strg: wrappedStorage{base}}
+
+			s.Require().NoError(bs.Create(ctx, "photos"))
+			gen, err := bs.Generation(ctx, "photos")
+			s.Require().NoError(err)
+			s.NotZero(gen)
+
+			names, err := bs.Names(ctx)
+			s.Require().NoError(err)
+			s.Equal([]string{"photos"}, names)
+
+			s.Require().NoError(bs.Delete(ctx, "photos"))
+			names, err = bs.Names(ctx)
+			s.Require().NoError(err)
+			s.Empty(names)
+		})
+	}
+}
+
+// Per-bucket state is s2-server's own and lives beside the buckets, not in a
+// directory a backend keeps for itself.
+func (s *BucketsTestSuite) TestStateLivesBesideTheBuckets() {
+	ctx := context.Background()
+	name := bucketStateDir + "/photos"
+	s.Require().NoError(s.buckets.Create(ctx, "photos"))
+
+	exists, err := s.buckets.strg.Exists(ctx, name)
+	s.Require().NoError(err)
+	s.True(exists)
+
+	s.Require().NoError(s.buckets.Delete(ctx, "photos"))
+	exists, err = s.buckets.strg.Exists(ctx, name)
+	s.Require().NoError(err)
+	s.False(exists)
 }
