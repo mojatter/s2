@@ -226,6 +226,17 @@ func (s *ObjectsTestSuite) TestHandleObjects() {
 			wantCode:   http.StatusBadRequest,
 		},
 		{
+			// The folder link names an object, not a directory. It selects no
+			// key, so the folder is empty rather than a broken link.
+			caseName:     "a folder that names an object is empty",
+			setup:        func() { s.createBucket("fold"); s.putObject("fold", "a.txt", "data") },
+			bucketName:   "fold",
+			url:          "/buckets/fold?prefix=a.txt",
+			htmx:         true,
+			wantCode:     http.StatusOK,
+			wantContains: []string{"This folder is empty"},
+		},
+		{
 			caseName:     "search with no matches shows empty state",
 			setup:        func() { s.createBucket("srchem"); s.putObject("srchem", "readme.txt", "data") },
 			bucketName:   "srchem",

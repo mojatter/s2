@@ -189,6 +189,23 @@ func pastSubtree(dir, after string) bool {
 	return after >= sub && !strings.HasPrefix(after, sub)
 }
 
+// belowObject reports whether dir is an object or lies under one, which is why
+// reading it as a directory failed. The walk bottoms out at the storage root.
+func belowObject(fsys fs.FS, dir string) bool {
+	for dir != "." {
+		info, err := fs.Stat(fsys, dir)
+		switch {
+		case err == nil:
+			return !info.IsDir()
+		case errors.Is(err, fs.ErrNotExist):
+			// Deleted since the read failed: nothing to select either way.
+			return true
+		}
+		dir = path.Dir(dir)
+	}
+	return false
+}
+
 func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, error) {
 	// Normalize prefix into a directory path acceptable to fs.ReadDir.
 	// S3 callers commonly pass a trailing slash (e.g. "dir/"), which fs.ValidPath rejects.
@@ -198,8 +215,9 @@ func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, erro
 	}
 	entries, err := fs.ReadDir(s.fsys, dir)
 	if err != nil {
-		// A non-existent prefix is not an error in S3 semantics; return an empty result.
-		if errors.Is(err, fs.ErrNotExist) {
+		// A prefix that selects nothing is not an error in S3 semantics: it
+		// may name no entry at all, or an object, which holds no key below it.
+		if errors.Is(err, fs.ErrNotExist) || belowObject(s.fsys, dir) {
 			return s2.ListResult{}, nil
 		}
 		return s2.ListResult{}, fmt.Errorf("failed to read dir: %w", err)

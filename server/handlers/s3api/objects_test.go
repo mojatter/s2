@@ -2691,6 +2691,9 @@ func (s *ObjectsTestSuite) TestListTakesAnyS3Prefix() {
 		{caseName: "a reserved element", query: "prefix=.meta", wantKeys: 0},
 		{caseName: "a reserved directory", query: "prefix=.meta%2F", wantKeys: 0},
 		{caseName: "a reserved element below", query: "prefix=images%2F.meta", wantKeys: 0},
+		// The directory portion names an object, which holds no key below it.
+		{caseName: "an object read as a directory", query: "prefix=.hidden.txt%2F&delimiter=/", wantKeys: 0},
+		{caseName: "an object read as a directory, below", query: "prefix=images%2Fa.png%2F&delimiter=/", wantKeys: 0},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
