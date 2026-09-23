@@ -122,6 +122,8 @@ $S2_SERVER_ROOT/
     └── photo.jpg
 ```
 
+Before v0.18.2 the per-bucket state directory was `.meta/`. A root written by an older s2-server keeps its multipart generations if that directory is renamed to `.buckets/` before the new version starts for the first time; see the [v0.18.2 release notes](https://github.com/mojatter/s2/releases/tag/v0.18.2) for the details.
+
 You can **seed a bucket by bind-mounting a host directory** — handy for serving git-tracked static assets without uploading them manually.
 
 ```yaml
