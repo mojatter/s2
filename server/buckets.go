@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mojatter/s2"
@@ -48,7 +49,8 @@ func (e *ErrBucketNotFound) Error() string {
 // Buckets manages buckets; their contents are always written through Sub, never the root storage.
 type Buckets struct {
 	strg         s2.Storage
-	reservedName string // bucket name that collides with cfg.HealthPath; "" if none
+	reservedName string     // bucket name that collides with cfg.HealthPath; "" if none
+	stateMu      sync.Mutex // serializes the lazy write of a generation marker
 }
 
 func newBuckets(ctx context.Context, cfg *Config) (*Buckets, error) {
@@ -174,15 +176,28 @@ func (bs *Buckets) Generation(ctx context.Context, name string) (int64, error) {
 	}
 	obj, err := strg.Get(ctx, name)
 	if isNotExist(err) {
-		if err := strg.Put(ctx, s2.NewObjectBytes(name, []byte{})); err != nil {
-			return 0, err
-		}
-		obj, err = strg.Get(ctx, name)
+		obj, err = bs.recordGeneration(ctx, strg, name)
 	}
 	if err != nil {
 		return 0, err
 	}
 	return obj.LastModified().UnixNano(), nil
+}
+
+// recordGeneration marks name unless a concurrent caller got there first: an
+// upgrade leaves every bucket unmarked, so the first traffic after one races.
+func (bs *Buckets) recordGeneration(ctx context.Context, strg s2.Storage, name string) (s2.Object, error) {
+	bs.stateMu.Lock()
+	defer bs.stateMu.Unlock()
+
+	obj, err := strg.Get(ctx, name)
+	if !isNotExist(err) {
+		return obj, err
+	}
+	if err := strg.Put(ctx, s2.NewObjectBytes(name, []byte{})); err != nil {
+		return nil, err
+	}
+	return strg.Get(ctx, name)
 }
 
 // Exists reports whether a bucket directory exists under the storage

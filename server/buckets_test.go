@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -581,4 +582,121 @@ func (s *BucketsTestSuite) TestStateLivesBesideTheBuckets() {
 	exists, err = s.buckets.strg.Exists(ctx, name)
 	s.Require().NoError(err)
 	s.False(exists)
+}
+
+// getHook is shared by every hookedStorage a Sub produces.
+type getHook struct {
+	misses   atomic.Int64
+	parkOn   int64  // the miss of name to park on: 1 is Generation's own Get,
+	onMiss   func() // 2 the re-check inside recordGeneration, under the lock
+	putNamed atomic.Int64
+	name     string
+}
+
+// hookedStorage parks the first caller that finds name missing, so a second
+// caller can finish while it waits.
+type hookedStorage struct {
+	s2.Storage
+	hook *getHook
+}
+
+func (h hookedStorage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
+	sub, err := h.Storage.Sub(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return hookedStorage{sub, h.hook}, nil
+}
+
+func (h hookedStorage) Get(ctx context.Context, name string) (s2.Object, error) {
+	obj, err := h.Storage.Get(ctx, name)
+	// Counted, not sync.Once: Do holds a mutex for the whole call, which would
+	// park the second caller here too.
+	if name == h.hook.name && isNotExist(err) && h.hook.misses.Add(1) == h.hook.parkOn {
+		h.hook.onMiss()
+	}
+	return obj, err
+}
+
+func (h hookedStorage) Put(ctx context.Context, obj s2.Object) error {
+	if obj.Name() == h.hook.name {
+		h.hook.putNamed.Add(1)
+	}
+	return h.Storage.Put(ctx, obj)
+}
+
+// A bucket an upgrade left without a marker is recorded once, however many
+// callers find it missing at the same time: the value handed to the first
+// must be the one that stays. Parked on its own Get, the second caller runs
+// to completion and the re-check must see it; parked on that re-check, which
+// runs under the lock, the second caller must not get in at all.
+func (s *BucketsTestSuite) TestGenerationIsRecordedOnce() {
+	testCases := []struct {
+		caseName   string
+		parkOn     int64
+		wantSecond bool // whether the second caller finishes while the first is parked
+	}{
+		{caseName: "the re-check sees a marker written meanwhile", parkOn: 1, wantSecond: true},
+		{caseName: "the lock keeps a second writer out", parkOn: 2, wantSecond: false},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			base, err := s2.NewStorage(ctx, s2.Config{Type: s2.TypeMemFS})
+			s.Require().NoError(err)
+
+			parked, release := make(chan struct{}), make(chan struct{})
+			hook := &getHook{name: "photos", parkOn: tc.parkOn, onMiss: func() {
+				close(parked)
+				<-release
+			}}
+			bs := &Buckets{strg: hookedStorage{base, hook}}
+			// The upgraded shape: the bucket exists, its marker does not.
+			sub, err := bs.strg.Sub(ctx, "photos")
+			s.Require().NoError(err)
+			s.Require().NoError(sub.Put(ctx, s2.NewObjectBytes(keepFile, []byte{})))
+
+			var first, second int64
+			firstDone := make(chan error, 1)
+			go func() {
+				gen, err := bs.Generation(ctx, "photos")
+				first = gen
+				firstDone <- err
+			}()
+			<-parked
+
+			secondDone := make(chan error, 1)
+			go func() {
+				gen, err := bs.Generation(ctx, "photos")
+				second = gen
+				secondDone <- err
+			}()
+			if tc.wantSecond {
+				select {
+				case err := <-secondDone:
+					s.Require().NoError(err)
+				case <-time.After(10 * time.Second):
+					s.FailNow("the second caller never finished")
+				}
+			} else {
+				select {
+				case <-secondDone:
+					s.FailNow("the second caller wrote while the first held the lock")
+				case <-time.After(200 * time.Millisecond):
+				}
+			}
+
+			close(release)
+			s.Require().NoError(<-firstDone)
+			if !tc.wantSecond {
+				s.Require().NoError(<-secondDone)
+			}
+
+			third, err := bs.Generation(ctx, "photos")
+			s.Require().NoError(err)
+			s.Equal(int64(1), hook.putNamed.Load(), "the marker must be written once")
+			s.Equal(first, second, "both callers must take the recorded generation")
+			s.Equal(first, third)
+		})
+	}
 }
