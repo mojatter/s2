@@ -3,8 +3,10 @@ package console
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 
+	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/server"
 	"github.com/mojatter/s2/server/middleware"
 )
@@ -30,11 +32,25 @@ func handleCreateBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := s.Buckets.Create(r.Context(), name); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeBucketError(w, err)
 		return
 	}
 
 	renderBucketList(r.Context(), s, w)
+}
+
+// writeBucketError answers with the status the error deserves: htmx swaps on
+// none of them, so a name the server refuses must not read as its own fault.
+func writeBucketError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	var notFound *server.ErrBucketNotFound
+	switch {
+	case errors.Is(err, server.ErrReservedBucketName), errors.Is(err, s2.ErrInvalidName):
+		status = http.StatusBadRequest
+	case errors.As(err, &notFound):
+		status = http.StatusNotFound
+	}
+	http.Error(w, err.Error(), status)
 }
 
 func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request) {
@@ -44,7 +60,7 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := s.Buckets.Delete(r.Context(), name); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeBucketError(w, err)
 		return
 	}
 

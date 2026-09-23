@@ -29,3 +29,12 @@ var ErrUnknownType = errors.New("s2: unknown storage type")
 // failed. The write happened; only UploadResult.ETag is missing. The read-back's
 // own error is wrapped alongside, so errors.Is still finds ErrNotExist under it.
 var ErrUnknownETag = errors.New("s2: object stored but its etag is unknown")
+
+// ErrInvalidName is returned for a name or prefix a storage refuses: one that
+// would resolve to something other than it spells, as "../other" does, or one
+// the backend keeps for its own state. Detect with errors.Is:
+//
+//	if errors.Is(err, s2.ErrInvalidName) {
+//	    // reject the caller's name
+//	}
+var ErrInvalidName = errors.New("s2: invalid name")

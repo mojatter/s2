@@ -50,7 +50,17 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 	bucketName := r.PathValue("bucket")
 	key := r.PathValue("key")
 
-	if _, err := s.Buckets.Get(ctx, bucketName); err != nil {
+	strg, err := s.Buckets.Get(ctx, bucketName)
+	if err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+	// The key is not written until Complete, so ask the backend now whether it
+	// would take it, rather than after the client has uploaded every part.
+	// Only a refused name stops us; a stat that fails for any other reason is
+	// the write's problem, not the initiate's.
+	if _, err := strg.Exists(ctx, key); errors.Is(err, s2.ErrInvalidName) {
 		code, msg, status := s2ErrorToS3Error(err)
 		writeError(w, r, code, msg, status)
 		return

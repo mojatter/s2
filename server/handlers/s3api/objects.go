@@ -2,6 +2,7 @@ package s3api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -115,6 +116,11 @@ func renderPrefix(prefix, delimiter string) string {
 	return prefix + delimiter
 }
 
+// refusedCursor reports a start-after the storage will not take as a name.
+func refusedCursor(cursor string) error {
+	return fmt.Errorf("%w: start-after %s", s2.ErrInvalidName, cursor)
+}
+
 // pastRange reports whether name sorts beyond every key the basename filter
 // can still match.
 func pastRange(name, rangeEnd string) bool {
@@ -135,6 +141,24 @@ func listObjects(ctx context.Context, strg s2.Storage, p listObjectsParams) (obj
 	// directory semantics. Split the prefix at the last "/" so we list the
 	// directory portion and filter the entries by the remaining basename.
 	listDir, baseFilter := splitS3Prefix(p.prefix)
+	// A directory portion the storage would refuse as a prefix cannot begin
+	// any name it holds -- no stored key carries a "..", "." or empty element
+	// -- so the answer is the empty page rather than its refusal.
+	if s2.ValidatePrefix(listDir) != nil {
+		return nil, nil, "", nil
+	}
+	// The cursor is a key, not a filter: it names where a previous page
+	// stopped, and no page ever ended on a name the storage would refuse. One
+	// that is not a name at all is the caller's error, not an empty listing.
+	if s2.ValidatePrefix(p.startAfter) != nil {
+		return nil, nil, "", refusedCursor(p.startAfter)
+	}
+
+	// A recursive List does string-prefix matching of its own, so an S3
+	// prefix ("im" matching "images/a.png") pushes down as-is -- as long as
+	// the storage takes it. One it refuses stays on the directory portion,
+	// and baseFilter does the rest.
+	pushPrefix := p.delimiter == "" && s2.ValidatePrefix(p.prefix) == nil
 
 	after := p.continuationToken
 	seen := make(map[string]struct{})
@@ -147,12 +171,37 @@ func listObjects(ctx context.Context, strg s2.Storage, p listObjectsParams) (obj
 			Limit:      max(1, p.maxKeys-visible),
 			Recursive:  p.delimiter == "",
 		}
-		if opts.Recursive {
-			// List already does string-prefix matching, so an arbitrary S3
-			// prefix (e.g. "im" matching "images/a.png") works as-is.
+		if pushPrefix {
 			opts.Prefix = p.prefix
 		}
 		res, err := strg.List(ctx, opts)
+		if errors.Is(err, s2.ErrInvalidName) && pushPrefix {
+			// A backend reserves names of its own, which ValidatePrefix
+			// cannot know about. Blame the prefix before the cursor: falling
+			// back to the directory portion loses nothing, since baseFilter
+			// keeps the keys beginning with the rest -- ".meta" must still
+			// find ".metadata.json" -- where a cursor compared here costs the
+			// scan up to it. Cleared rather than retried per page.
+			pushPrefix = false
+			opts.Prefix = listDir
+			res, err = strg.List(ctx, opts)
+		}
+		if errors.Is(err, s2.ErrInvalidName) && opts.StartAfter != "" {
+			// A cursor the storage reserves is refused like any other, but
+			// the same error would come from the directory portion. Ask once
+			// without the cursor to tell the two apart; the page that answers
+			// is not the one the caller asked for, so it is discarded.
+			probe := opts
+			probe.StartAfter = ""
+			if _, perr := strg.List(ctx, probe); perr == nil {
+				return nil, nil, "", refusedCursor(p.startAfter)
+			}
+		}
+		if errors.Is(err, s2.ErrInvalidName) {
+			// Then the directory portion itself is refused, so it holds no
+			// object the prefix could match.
+			return objs, prefixes, "", nil
+		}
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -496,6 +545,17 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 	}
 	srcBucket := copySource[:slashIdx]
 	srcKey := copySource[slashIdx+1:]
+	// The header is not a URL path, so the mux's traversal check never saw it.
+	// An empty srcBucket would resolve to the root holding every bucket, and
+	// the policy check below would run against a bucket named "".
+	if err := s2.ValidateName(srcBucket); err != nil {
+		writeError(w, r, "InvalidArgument", "Invalid x-amz-copy-source", http.StatusBadRequest)
+		return
+	}
+	if err := s2.ValidateName(srcKey); err != nil {
+		writeError(w, r, "InvalidArgument", "Invalid x-amz-copy-source", http.StatusBadRequest)
+		return
+	}
 
 	// S3Action only authorized the destination (dstBucket/dstKey) against
 	// s3:PutObject up front -- the source is a distinct resource that must

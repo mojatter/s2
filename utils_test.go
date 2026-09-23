@@ -1,6 +1,7 @@
 package s2
 
 import (
+	"errors"
 	"math"
 	"testing"
 )
@@ -127,6 +128,84 @@ func TestRelName(t *testing.T) {
 		t.Run(tc.caseName, func(t *testing.T) {
 			if got := RelName(tc.prefix, tc.name); got != tc.want {
 				t.Errorf("RelName(%q, %q) = %q, want %q", tc.prefix, tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateName(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		input    string
+		wantErr  bool
+	}{
+		{"plain", "a.txt", false},
+		{"nested", "a/b.txt", false},
+		// A trailing "/" names nothing: path.Join folds it away.
+		{"trailing slash", "a/b/", true},
+		{"dot inside a name", "a..b", false},
+		{"leading dots in a name", "..a", false},
+		{"a dotfile", ".keep", false},
+		{"empty", "", true},
+		{"dot", ".", true},
+		{"parent", "..", true},
+		{"escapes", "../other/secret.txt", true},
+		{"escapes with a trailing slash", "../other/", true},
+		{"escapes after cleaning", "a/../../other", true},
+		{"cleans to the root", "a/..", true},
+		{"rooted escape", "/../other/secret.txt", true},
+		{"rooted escape with extra slashes", "//../other/", true},
+		{"rooted", "/a.txt", true},
+		// These resolve to a different name than they spell, which is how a
+		// policy on the spelled name is evaded.
+		{"dot element", "./private/secret.txt", true},
+		{"dot element inside", "a/./b", true},
+		{"empty element", "a//b", true},
+		{"only slashes", "//", true},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			err := ValidateName(tc.input)
+			if tc.wantErr {
+				if !errors.Is(err, ErrInvalidName) {
+					t.Errorf("ValidateName(%q) = %v, want ErrInvalidName", tc.input, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("ValidateName(%q) = %v, want nil", tc.input, err)
+			}
+		})
+	}
+}
+
+func TestValidatePrefix(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		input    string
+		wantErr  bool
+	}{
+		{"unset selects everything", "", false},
+		{"a name", "a/b.txt", false},
+		{"a directory", "a/b/", false},
+		{"the root itself", ".", true},
+		{"the root with a slash", "./", true},
+		{"escapes", "../other", true},
+		{"escapes with a slash", "../other/", true},
+		{"resolves elsewhere", "./a", true},
+		{"two trailing slashes", "a//", true},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			err := ValidatePrefix(tc.input)
+			if tc.wantErr {
+				if !errors.Is(err, ErrInvalidName) {
+					t.Errorf("ValidatePrefix(%q) = %v, want ErrInvalidName", tc.input, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("ValidatePrefix(%q) = %v, want nil", tc.input, err)
 			}
 		})
 	}

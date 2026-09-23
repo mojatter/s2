@@ -76,6 +76,9 @@ type SignedURLOptions struct {
 //
 // Errors that report a missing object wrap [ErrNotExist]; detect them with
 // errors.Is(err, s2.ErrNotExist).
+//
+// Every method takes names exactly as stored -- see [ValidateName] and
+// [ValidatePrefix] -- and wraps [ErrInvalidName] for anything else.
 type Storage interface {
 	// Type returns the type of the storage.
 	Type() Type
