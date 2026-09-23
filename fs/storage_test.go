@@ -703,6 +703,39 @@ func (s *StorageTestSuite) TestDeleteRecursive() {
 	}
 }
 
+// Emptying a Sub takes its sidecars with it: they live inside it, so nothing
+// of the deleted names is left for the next caller of that prefix.
+func (s *StorageTestSuite) TestDeleteRecursiveDropsSidecars() {
+	testCases := []struct {
+		caseName string
+		newFS    func() fs.FS
+		typ      s2.Type
+	}{
+		{caseName: "osfs", newFS: func() fs.FS { return osfs.DirFS(s.T().TempDir()) }, typ: s2.TypeOSFS},
+		{caseName: "memfs", newFS: func() fs.FS { return memfs.New() }, typ: s2.TypeMemFS},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			fsys := tc.newFS()
+			root := &storage{fsys: fsys, typ: tc.typ}
+			sub, err := root.Sub(ctx, "up")
+			s.Require().NoError(err)
+			s.Require().NoError(sub.Put(ctx, s2.NewObjectBytes("1", []byte("a"))))
+			s.Require().NoError(sub.Put(ctx, s2.NewObjectBytes("2", []byte("b"))))
+			_, err = fs.Stat(fsys, path.Join("up", metaPath("1")))
+			s.Require().NoError(err)
+
+			s.Require().NoError(sub.DeleteRecursive(ctx, ""))
+
+			for _, name := range []string{"1", metaPath("1"), "2", metaPath("2")} {
+				_, err := fs.Stat(fsys, path.Join("up", name))
+				s.ErrorIsf(err, fs.ErrNotExist, "up/%s", name)
+			}
+		})
+	}
+}
+
 // A missing root is a no-op, as Delete is on a missing name.
 func (s *StorageTestSuite) TestDeleteRecursiveMissingRoot() {
 	testCases := []struct {
@@ -774,9 +807,9 @@ func (s *StorageTestSuite) TestSub() {
 		})
 	}
 
-	// The metadata directory is closed to Sub as it is to object names, and
-	// SubSidecar is how s2's own code reaches it. The walk root is that
-	// directory, and memfs reports its name as ".meta".
+	// The metadata directory is closed to Sub as it is to object names; the
+	// package reaches it through sub, which does not validate. The walk root
+	// is that directory, and memfs reports its name as ".meta".
 	s.Run("the metadata directory", func() {
 		ctx := context.Background()
 		root := &storage{fsys: memfs.New(), typ: s2.TypeMemFS}
@@ -787,8 +820,8 @@ func (s *StorageTestSuite) TestSub() {
 		_, err = root.Sub(ctx, "docs/.meta/")
 		s.Require().ErrorIs(err, s2.ErrInvalidName)
 
-		meta, ok := SubSidecar(root)
-		s.Require().True(ok)
+		meta, err := root.sub(metaDir)
+		s.Require().NoError(err)
 		s.Require().NoError(meta.Put(ctx, s2.NewObjectBytes("bucket1", []byte{})))
 
 		for _, recursive := range []bool{true, false} {

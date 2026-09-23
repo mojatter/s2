@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/mojatter/s2"
-	s2fs "github.com/mojatter/s2/fs"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -599,14 +598,9 @@ func (s *MultipartStoreTestSuite) TestRemove() {
 
 			s.Require().NoError(ms.Remove(ctx, "id1"))
 
-			// fs keeps metadata in .meta sidecars; they must go with the upload.
-			meta, ok := s2fs.SubSidecar(ms.Storage())
-			s.Require().True(ok)
-			for _, strg := range []s2.Storage{ms.Storage(), meta} {
-				exists, err := strg.Exists(ctx, "id1")
-				s.Require().NoError(err)
-				s.False(exists, "id1 should have been removed")
-			}
+			exists, err := ms.Storage().Exists(ctx, "id1")
+			s.Require().NoError(err)
+			s.False(exists, "id1 should have been removed")
 			_, _, err = ms.Metadata(ctx, "id2", "photos", "b.jpg", 0)
 			s.NoError(err, "a sibling upload must survive")
 		})
