@@ -7,9 +7,12 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/mojatter/s2"
@@ -34,6 +37,20 @@ func (e *errReadDirFS) ReadDir(name string) ([]fs.DirEntry, error) {
 
 func (e *errReadDirFS) Open(name string) (fs.File, error) {
 	return e.FS.Open(name)
+}
+
+// goneStatFS answers ErrNotExist for one path's Stat while ReadDir still sees
+// the tree, standing in for an object deleted between the two calls.
+type goneStatFS struct {
+	fs.FS
+	gonePath string
+}
+
+func (g *goneStatFS) Stat(name string) (fs.FileInfo, error) {
+	if name == g.gonePath {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrNotExist}
+	}
+	return fs.Stat(g.FS, name)
 }
 
 type StorageTestSuite struct {
@@ -714,6 +731,95 @@ func (s *StorageTestSuite) TestDeleteRecursive() {
 			}
 		})
 	}
+}
+
+// A prefix naming an object selects no key, as on every other backend: the
+// listing is empty, not an error.
+func (s *StorageTestSuite) TestListWhenThePrefixNamesAnObject() {
+	testCases := []struct {
+		caseName string
+		newFS    func() fs.FS
+		typ      s2.Type
+		prefix   string
+	}{
+		{caseName: "osfs", newFS: func() fs.FS { return osfs.DirFS(s.T().TempDir()) }, typ: s2.TypeOSFS, prefix: "a.txt"},
+		{caseName: "osfs trailing slash", newFS: func() fs.FS { return osfs.DirFS(s.T().TempDir()) }, typ: s2.TypeOSFS, prefix: "a.txt/"},
+		{caseName: "osfs below the object", newFS: func() fs.FS { return osfs.DirFS(s.T().TempDir()) }, typ: s2.TypeOSFS, prefix: "a.txt/sub"},
+		{caseName: "memfs", newFS: func() fs.FS { return memfs.New() }, typ: s2.TypeMemFS, prefix: "a.txt"},
+		{caseName: "memfs trailing slash", newFS: func() fs.FS { return memfs.New() }, typ: s2.TypeMemFS, prefix: "a.txt/"},
+		{caseName: "memfs below the object", newFS: func() fs.FS { return memfs.New() }, typ: s2.TypeMemFS, prefix: "a.txt/sub"},
+		// NewStorageFS takes any fs.FS, and one that is not backed by a
+		// syscall reports something else: fstest.MapFS says "not implemented".
+		{caseName: "mapfs", newFS: func() fs.FS { return fstest.MapFS{"a.txt": {Data: []byte("a")}} }, typ: s2.TypeMemFS, prefix: "a.txt"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			fsys := tc.newFS()
+			strg := NewStorageFS(s2.Config{Type: tc.typ}, fsys)
+			if _, ok := fsys.(fstest.MapFS); !ok {
+				s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"))))
+			}
+
+			res, err := strg.List(ctx, s2.ListOptions{Prefix: tc.prefix})
+			s.Require().NoError(err)
+			s.Empty(res.Objects)
+			s.Empty(res.CommonPrefixes)
+		})
+	}
+}
+
+// A root that is not a directory is a misconfiguration, not an empty bucket:
+// both listing paths must still say so.
+func (s *StorageTestSuite) TestListSaysSoWhenTheRootIsNotADirectory() {
+	testCases := []struct {
+		caseName string
+		newStrg  func(dir, file string) s2.Storage
+	}{
+		// What a typo in S2_SERVER_ROOT produces.
+		{
+			caseName: "a DirFS of a file",
+			newStrg: func(_, file string) s2.Storage {
+				return NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(file))
+			},
+		},
+		{
+			caseName: "a Sub of an object",
+			newStrg: func(dir, _ string) s2.Storage {
+				root := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(dir))
+				sub, err := root.Sub(context.Background(), "notes")
+				s.Require().NoError(err)
+				return sub
+			},
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			dir := s.T().TempDir()
+			file := filepath.Join(dir, "notes")
+			s.Require().NoError(os.WriteFile(file, []byte("x"), 0o600))
+			strg := tc.newStrg(dir, file)
+
+			for _, recursive := range []bool{false, true} {
+				_, err := strg.List(context.Background(), s2.ListOptions{Recursive: recursive})
+				s.Require().Errorf(err, "recursive=%v", recursive)
+			}
+		})
+	}
+}
+
+// An object deleted between the failed ReadDir and the walk leaves nothing to
+// select either way, so the listing is empty rather than the raw walk error.
+func (s *StorageTestSuite) TestListWhenTheObjectVanishesMidWalk() {
+	dir := s.T().TempDir()
+	base := &storage{fsys: osfs.DirFS(dir), typ: s2.TypeOSFS}
+	ctx := context.Background()
+	s.Require().NoError(base.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"))))
+	strg := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, &goneStatFS{FS: osfs.DirFS(dir), gonePath: "a.txt"})
+
+	res, err := strg.List(ctx, s2.ListOptions{Prefix: "a.txt/sub"})
+	s.Require().NoError(err)
+	s.Empty(res.Objects)
 }
 
 // Emptying a Sub takes its sidecars with it: they live inside it, so nothing
