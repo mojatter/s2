@@ -17,6 +17,7 @@ import (
 
 	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/s2test"
+	"github.com/mojatter/wfs"
 	"github.com/mojatter/wfs/memfs"
 	"github.com/mojatter/wfs/osfs"
 	"github.com/stretchr/testify/suite"
@@ -1092,6 +1093,117 @@ func (s *StorageTestSuite) TestMove() {
 	s.Require().NoError(err)
 	defer rc.Close()
 	body, _ := io.ReadAll(rc)
+	s.Equal("a", string(body))
+}
+
+func (s *StorageTestSuite) TestMoveNestedDst() {
+	newOSFS := func() fs.FS { return osfs.New(s.T().TempDir()) }
+	newMemFS := func() fs.FS { return memfs.New() }
+	testCases := []struct {
+		caseName string
+		fsys     func() fs.FS
+		withMeta bool
+		staleDst bool
+	}{
+		{caseName: "osfs with sidecar", fsys: newOSFS, withMeta: true},
+		{caseName: "osfs without sidecar", fsys: newOSFS},
+		{caseName: "osfs without sidecar over stale dst", fsys: newOSFS, staleDst: true},
+		{caseName: "osfs with sidecar over stale dst", fsys: newOSFS, withMeta: true, staleDst: true},
+		{caseName: "memfs with sidecar", fsys: newMemFS, withMeta: true},
+		{caseName: "memfs without sidecar", fsys: newMemFS},
+		{caseName: "memfs without sidecar over stale dst", fsys: newMemFS, staleDst: true},
+		{caseName: "memfs with sidecar over stale dst", fsys: newMemFS, withMeta: true, staleDst: true},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			fsys := tc.fsys()
+			strg := &storage{fsys: fsys}
+			ctx := context.Background()
+			src, dst := "a.txt", "dir/sub/a.txt"
+			if tc.staleDst {
+				s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes(dst, []byte("old"), s2.WithContentType("application/octet-stream"))))
+			}
+			if tc.withMeta {
+				s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes(src, []byte("a"), s2.WithContentType("text/plain"))))
+			} else {
+				_, err := wfs.WriteFile(fsys, src, []byte("a"), fs.ModePerm)
+				s.Require().NoError(err)
+			}
+
+			s.Require().NoError(strg.Move(ctx, src, dst))
+
+			got, err := strg.Get(ctx, dst)
+			s.Require().NoError(err)
+			rc, err := got.Open()
+			s.Require().NoError(err)
+			body, err := io.ReadAll(rc)
+			_ = rc.Close()
+			s.Require().NoError(err)
+			s.Equal("a", string(body))
+			if tc.withMeta {
+				s.Equal("text/plain", got.ContentType())
+			} else {
+				// A stale dst sidecar must not survive a move from a source without one.
+				s.Empty(got.ContentType())
+				_, err = fs.Stat(fsys, metaPath(dst))
+				s.ErrorIs(err, fs.ErrNotExist)
+			}
+			ok, err := strg.Exists(ctx, src)
+			s.Require().NoError(err)
+			s.False(ok)
+			_, err = fs.Stat(fsys, metaPath(src))
+			s.ErrorIs(err, fs.ErrNotExist)
+		})
+	}
+}
+
+// renameOnlyFS renames but cannot create directories.
+type renameOnlyFS struct {
+	fs.FS
+	mem *memfs.MemFS
+}
+
+func (r *renameOnlyFS) Rename(oldpath, newpath string) error {
+	return r.mem.Rename(oldpath, newpath)
+}
+
+// Moving into an existing directory must not need WriteFileFS.
+func (s *StorageTestSuite) TestMoveRenameOnlyFS() {
+	mem := memfs.New()
+	ctx := context.Background()
+	memStrg := &storage{fsys: mem}
+	s.Require().NoError(memStrg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"), s2.WithContentType("text/plain"))))
+	s.Require().NoError(memStrg.Put(ctx, s2.NewObjectBytes("dir/b.txt", []byte("b"), s2.WithContentType("text/plain"))))
+	strg := &storage{fsys: &renameOnlyFS{FS: mem, mem: mem}}
+
+	s.Require().NoError(strg.Move(ctx, "a.txt", "dir/a.txt"))
+
+	got, err := strg.Get(ctx, "dir/a.txt")
+	s.Require().NoError(err)
+	s.Equal("text/plain", got.ContentType())
+}
+
+// A parent that cannot be created must fail the Move before anything is renamed.
+func (s *StorageTestSuite) TestMoveBlockedParentLeavesSrc() {
+	mem := memfs.New()
+	strg := &storage{fsys: mem}
+	ctx := context.Background()
+	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"), s2.WithContentType("text/plain"))))
+	// A file where the sidecar's parent directory must go.
+	_, err := mem.WriteFile(metaPath("new"), []byte("{}"), fs.ModePerm)
+	s.Require().NoError(err)
+
+	s.Require().Error(strg.Move(ctx, "a.txt", "new/a.txt"))
+
+	got, err := strg.Get(ctx, "a.txt")
+	s.Require().NoError(err)
+	s.Equal("text/plain", got.ContentType())
+	rc, err := got.Open()
+	s.Require().NoError(err)
+	defer rc.Close()
+
+	body, err := io.ReadAll(rc)
+	s.Require().NoError(err)
 	s.Equal("a", string(body))
 }
 

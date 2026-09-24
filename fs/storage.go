@@ -456,17 +456,29 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 		if _, err := s.Get(ctx, src); err != nil {
 			return err
 		}
+		srcMeta, dstMeta := metaPath(src), metaPath(dst)
+		_, err := fs.Stat(s.fsys, srcMeta)
+		hasMeta := err == nil
+		if !hasMeta && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("failed to stat metadata for %q: %w", src, err)
+		}
+		// Create the parents first so a missing or blocked one fails before anything moves.
+		if err := s.mkdirParent(dst); err != nil {
+			return err
+		}
+		if hasMeta {
+			if err := s.mkdirParent(dstMeta); err != nil {
+				return err
+			}
+		}
 		if err := wfs.Rename(s.fsys, src, dst); err != nil {
 			return fmt.Errorf("failed to rename %q to %q: %w", src, dst, err)
 		}
 		// Move the sidecar too; a source without one must not inherit dst's.
-		srcMeta, dstMeta := metaPath(src), metaPath(dst)
-		if _, err := fs.Stat(s.fsys, srcMeta); err == nil {
+		if hasMeta {
 			if err := wfs.Rename(s.fsys, srcMeta, dstMeta); err != nil {
 				return fmt.Errorf("failed to rename metadata for %q: %w", src, err)
 			}
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("failed to stat metadata for %q: %w", src, err)
 		} else if err := wfs.RemoveFile(s.fsys, dstMeta); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("failed to remove metadata for %q: %w", dst, err)
 		}
@@ -476,6 +488,19 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 		return err
 	}
 	return s.Delete(ctx, src)
+}
+
+// mkdirParent creates name's parent directory, which Rename does not.
+func (s *storage) mkdirParent(name string) error {
+	dir := path.Dir(name)
+	// Skip MkdirAll when the parent exists so a RenameFS without WriteFileFS still moves.
+	if info, err := fs.Stat(s.fsys, dir); err == nil && info.IsDir() {
+		return nil
+	}
+	if err := wfs.MkdirAll(s.fsys, dir, fs.ModePerm); err != nil {
+		return fmt.Errorf("failed to create directory for %q: %w", name, err)
+	}
+	return nil
 }
 
 func (s *storage) Delete(ctx context.Context, name string) error {

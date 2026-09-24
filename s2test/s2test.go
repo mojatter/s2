@@ -596,6 +596,30 @@ func TestStorageCopyMove(ctx context.Context, strg s2.Storage) error {
 		}
 	}
 
+	// Move must accept any destination Put accepts, including one under a new prefix.
+	nested := "s2test-copymove/nested/moved.txt"
+	if err := s2.Move(ctx, strg, moved, nested); err != nil {
+		errorf("Move(%q, %q) failed: %v", moved, nested, err)
+	} else {
+		if ok, err := strg.Exists(ctx, moved); err != nil || ok {
+			errorf("Exists(%q) after Move = %v, %v, want false, nil", moved, ok, err)
+		}
+		if got, err := strg.Get(ctx, nested); err != nil {
+			errorf("Get(%q) after Move failed: %v", nested, err)
+		} else if rc, err := got.Open(); err != nil {
+			errorf("Open(%q) after Move failed: %v", nested, err)
+		} else {
+			b, _ := io.ReadAll(rc)
+			_ = rc.Close()
+			if string(b) != string(body) {
+				errorf("Move body at %q = %q, want %q", nested, string(b), string(body))
+			}
+		}
+	}
+	if err := strg.DeleteRecursive(ctx, "s2test-copymove/"); err != nil {
+		errorf("DeleteRecursive(%q) failed: %v", "s2test-copymove/", err)
+	}
+
 	// Copy/Move of a missing source must report ErrNotExist.
 	missing := "s2test-copymove-missing.txt"
 	if err := strg.Copy(ctx, missing, "s2test-copymove-missing-dst.txt"); !errors.Is(err, s2.ErrNotExist) {
