@@ -80,8 +80,7 @@ func (s *storage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
 	return s.sub(prefix)
 }
 
-// SubSidecar scopes strg to the directory holding object sidecars, which Sub
-// refuses like any other spelling of it; ok is false for any other storage.
+// SubSidecar scopes strg to its root .meta, holding top-level objects' metadata files; ok is false otherwise.
 //
 // Deprecated: it reaches past the name contract and only an osfs or memfs
 // storage itself, never a wrapper, satisfies it. Removed in v1.0.0.
@@ -142,9 +141,7 @@ func validatePrefix(prefix string) error {
 }
 
 // rejectMetaDir rejects a name holding the metadata directory as any element.
-// Any, not just the first: a Sub writes its own sidecars beside the names it
-// scopes, and both listings hide the directory at every depth, so a name
-// reaching through one would be stored and read but never listed.
+// Any, not just the first: every directory keeps its metadata files in one, hidden from both listings.
 func rejectMetaDir(name string) error {
 	for elem := range strings.SplitSeq(name, "/") {
 		if isMetaDir(elem) {
@@ -380,6 +377,9 @@ func (s *storage) Upload(_ context.Context, obj s2.Object, _ s2.UploadOptions) (
 	}
 	defer func() { _ = rc.Close() }()
 
+	if err := s.prepareMeta(obj.Name()); err != nil {
+		return s2.UploadResult{}, err
+	}
 	h := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
 	if err := atomicWrite(s.fsys, obj.Name(), io.TeeReader(rc, h)); err != nil {
 		return s2.UploadResult{}, err
@@ -401,6 +401,7 @@ func (s *storage) saveMetaForNewBody(name string, m meta) error {
 	if err != nil {
 		// A stale sidecar would describe the previous body; without one the ETag falls back to the synthetic form.
 		_ = wfs.RemoveFile(s.fsys, metaPath(name))
+		removeLegacyMeta(s.fsys, name)
 	}
 	return err
 }
@@ -412,6 +413,9 @@ func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Meta
 	}
 	obj, err := s.get(name)
 	if err != nil {
+		return err
+	}
+	if err := s.prepareMeta(name); err != nil {
 		return err
 	}
 	m := obj.m
@@ -435,6 +439,9 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 	}
 	defer func() { _ = rc.Close() }()
 
+	if err := s.prepareMeta(dst); err != nil {
+		return err
+	}
 	h := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
 	if err := atomicWrite(s.fsys, dst, io.TeeReader(rc, h)); err != nil {
 		return err
@@ -456,18 +463,17 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 		if _, err := s.Get(ctx, src); err != nil {
 			return err
 		}
-		srcMeta, dstMeta := metaPath(src), metaPath(dst)
-		_, err := fs.Stat(s.fsys, srcMeta)
-		hasMeta := err == nil
-		if !hasMeta && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("failed to stat metadata for %q: %w", src, err)
+		srcMeta, hasMeta, err := s.findMeta(src)
+		if err != nil {
+			return err
 		}
+		dstMeta := metaPath(dst)
 		// Create the parents first so a missing or blocked one fails before anything moves.
 		if err := s.mkdirParent(dst); err != nil {
 			return err
 		}
 		if hasMeta {
-			if err := s.mkdirParent(dstMeta); err != nil {
+			if err := s.prepareMeta(dst); err != nil {
 				return err
 			}
 		}
@@ -479,15 +485,69 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 			if err := wfs.Rename(s.fsys, srcMeta, dstMeta); err != nil {
 				return fmt.Errorf("failed to rename metadata for %q: %w", src, err)
 			}
-		} else if err := wfs.RemoveFile(s.fsys, dstMeta); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("failed to remove metadata for %q: %w", dst, err)
+			if srcMeta != metaPath(src) {
+				pruneEmptyDirs(s.fsys, path.Dir(srcMeta), metaDir)
+			}
+		} else if info, err := fs.Stat(s.fsys, dstMeta); err == nil && !info.IsDir() {
+			// Only a file: a directory there is no metadata file and can stay.
+			if err := wfs.RemoveFile(s.fsys, dstMeta); err != nil && !isMissingMeta(err) {
+				return fmt.Errorf("failed to remove metadata for %q: %w", dst, err)
+			}
 		}
+		removeLegacyMeta(s.fsys, src)
+		removeLegacyMeta(s.fsys, dst)
 		return nil
 	}
 	if err := s.Copy(ctx, src, dst); err != nil {
 		return err
 	}
 	return s.Delete(ctx, src)
+}
+
+// prepareMeta makes room for name's metadata file before its body is written, so a blocked one leaves the object untouched.
+func (s *storage) prepareMeta(name string) error {
+	p := metaPath(name)
+	if info, err := fs.Stat(s.fsys, path.Dir(p)); err == nil && !info.IsDir() {
+		return fmt.Errorf("%w: %q needs %s as a directory, but it is a file, a key stored before v0.18.1; remove it to write this object", ErrMetaBlocked, name, path.Dir(p))
+	}
+	if err := s.mkdirParent(p); err != nil {
+		return err
+	}
+	// A leftover directory of empty ones gives way; one holding files s2 keeps blocks.
+	if info, err := fs.Stat(s.fsys, p); err == nil && info.IsDir() && removeEmptyTree(s.fsys, p) != nil {
+		return fmt.Errorf("%w: %q needs %s, a directory an older s2 left; remove it to write this object", ErrMetaBlocked, name, p)
+	}
+	return nil
+}
+
+// removeEmptyTree removes dir and the empty directories under it, deepest first; a file anywhere keeps it.
+func removeEmptyTree(fsys fs.FS, dir string) error {
+	entries, err := fs.ReadDir(fsys, dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			return fs.ErrExist
+		}
+		if err := removeEmptyTree(fsys, path.Join(dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return wfs.RemoveFile(fsys, dir)
+}
+
+// findMeta locates name's metadata file, falling back to the legacy location as loadMeta does.
+func (s *storage) findMeta(name string) (string, bool, error) {
+	f, p, err := openMeta(s.fsys, name)
+	if isMissingMeta(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("failed to open metadata for %q: %w", name, err)
+	}
+	_ = f.Close()
+	return p, true, nil
 }
 
 // mkdirParent creates name's parent directory, which Rename does not.
@@ -513,6 +573,7 @@ func (s *storage) Delete(ctx context.Context, name string) error {
 func (s *storage) delete(name string) error {
 	// Ignore metadata deletion errors (file may not have metadata)
 	_ = wfs.RemoveFile(s.fsys, metaPath(name))
+	removeLegacyMeta(s.fsys, name)
 	if err := wfs.RemoveFile(s.fsys, name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("failed to delete %q: %w", name, err)
 	}
@@ -533,14 +594,8 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 			}
 			return err
 		}
-		// A ".meta" directory holds other objects' sidecars rather than
-		// objects, at any depth: a Sub writes its own beside the names it
-		// scopes. A prefix that merely starts its name -- ".met" -- must not
-		// reach it, so it goes only when the directory holding it does. The
-		// base name, because SkipDir on a file would skip the rest of the
-		// directory holding that file. Not the walk root: this storage may
-		// itself be a Sub of one, and memfs reports that root's name as
-		// ".meta" where osfs reports ".".
+		// A .meta holds metadata files at any depth, so it goes with its directory, never by a prefix like ".met".
+		// By base name, as SkipDir on a file skips its siblings; not the walk root, which memfs names ".meta" in a Sub of one.
 		if d.IsDir() && name != "." && isMetaDir(d.Name()) {
 			if prefix == "" || strings.HasPrefix(path.Dir(name)+"/", prefix) {
 				dirs = append(dirs, name)

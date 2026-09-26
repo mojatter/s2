@@ -3,6 +3,7 @@ package fs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -981,13 +983,13 @@ func (s *StorageTestSuite) TestExists() {
 	}
 }
 
-// errMetaRenameMemFS is a writable memfs that fails to rename into .meta/.
+// errMetaRenameMemFS is a writable memfs that fails to rename into any .meta.
 type errMetaRenameMemFS struct {
 	*memfs.MemFS
 }
 
 func (e *errMetaRenameMemFS) Rename(oldpath, newpath string) error {
-	if strings.HasPrefix(newpath, ".meta/") {
+	if slices.Contains(strings.Split(newpath, "/"), metaDir) {
 		return &fs.PathError{Op: "rename", Path: newpath, Err: fs.ErrPermission}
 	}
 	return e.MemFS.Rename(oldpath, newpath)
@@ -997,18 +999,44 @@ func (e *errMetaRenameMemFS) Rename(oldpath, newpath string) error {
 func (s *StorageTestSuite) TestSidecarWriteFails() {
 	testCases := []struct {
 		caseName string
-		write    func(ctx context.Context, strg *storage) error
+		name     string
+		legacy   bool
+		write    func(ctx context.Context, strg *storage, name string) error
 	}{
 		{
 			caseName: "put over an object",
-			write: func(ctx context.Context, strg *storage) error {
-				return strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("new body")))
+			name:     "a.txt",
+			write: func(ctx context.Context, strg *storage, name string) error {
+				return strg.Put(ctx, s2.NewObjectBytes(name, []byte("new body")))
 			},
 		},
 		{
 			caseName: "copy over an object",
-			write: func(ctx context.Context, strg *storage) error {
-				return strg.Copy(ctx, "src.txt", "a.txt")
+			name:     "a.txt",
+			write: func(ctx context.Context, strg *storage, name string) error {
+				return strg.Copy(ctx, "src.txt", name)
+			},
+		},
+		{
+			caseName: "put over a nested object",
+			name:     "docs/a.txt",
+			write: func(ctx context.Context, strg *storage, name string) error {
+				return strg.Put(ctx, s2.NewObjectBytes(name, []byte("new body")))
+			},
+		},
+		{
+			caseName: "copy over a nested object",
+			name:     "docs/a.txt",
+			write: func(ctx context.Context, strg *storage, name string) error {
+				return strg.Copy(ctx, "src.txt", name)
+			},
+		},
+		{
+			caseName: "put over a nested object with a legacy metadata file",
+			name:     "docs/a.txt",
+			legacy:   true,
+			write: func(ctx context.Context, strg *storage, name string) error {
+				return strg.Put(ctx, s2.NewObjectBytes(name, []byte("new body")))
 			},
 		},
 	}
@@ -1017,13 +1045,21 @@ func (s *StorageTestSuite) TestSidecarWriteFails() {
 			ctx := context.Background()
 			mem := memfs.New()
 			seed := NewStorageFS(s2.Config{}, mem)
-			s.Require().NoError(seed.Put(ctx, s2.NewObjectBytes("a.txt", []byte("old"), s2.WithContentType("text/plain"))))
+			s.Require().NoError(seed.Put(ctx, s2.NewObjectBytes(tc.name, []byte("old"), s2.WithContentType("text/plain"))))
+			if tc.legacy {
+				// Where v0.19.1 kept it, with the body's MD5, so only its removal makes the ETag synthetic.
+				data, err := fs.ReadFile(mem, metaPath(tc.name))
+				s.Require().NoError(err)
+				_, err = mem.WriteFile(path.Join(metaDir, tc.name), data, fs.ModePerm)
+				s.Require().NoError(err)
+				s.Require().NoError(mem.RemoveFile(metaPath(tc.name)))
+			}
 			s.Require().NoError(seed.Put(ctx, s2.NewObjectBytes("src.txt", []byte("new body"), s2.WithContentType("text/csv"))))
 			strg := &storage{fsys: &errMetaRenameMemFS{mem}}
 
-			s.ErrorIs(tc.write(ctx, strg), fs.ErrPermission)
+			s.ErrorIs(tc.write(ctx, strg, tc.name), fs.ErrPermission)
 
-			got, err := strg.Get(ctx, "a.txt")
+			got, err := strg.Get(ctx, tc.name)
 			s.Require().NoError(err)
 			s.Empty(got.ContentType())
 			s.Contains(got.ETag(), "-", "synthetic ETag, not the old body's MD5")
@@ -1190,7 +1226,7 @@ func (s *StorageTestSuite) TestMoveBlockedParentLeavesSrc() {
 	ctx := context.Background()
 	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"), s2.WithContentType("text/plain"))))
 	// A file where the sidecar's parent directory must go.
-	_, err := mem.WriteFile(metaPath("new"), []byte("{}"), fs.ModePerm)
+	_, err := mem.WriteFile(path.Dir(metaPath("new/a.txt")), []byte("{}"), fs.ModePerm)
 	s.Require().NoError(err)
 
 	s.Require().Error(strg.Move(ctx, "a.txt", "new/a.txt"))
@@ -1451,8 +1487,8 @@ func (s *StorageTestSuite) TestMetaDirIsNotAnObjectName() {
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			// Nested too: a Sub writes its sidecars beside the names it
-			// scopes, and neither listing would ever show the name.
+			// Nested too: every directory keeps its metadata files in one, and
+			// neither listing would ever show the name.
 			for _, name := range []string{".meta/a.txt", "docs/.meta/a.txt", "a/.meta"} {
 				s.ErrorIsf(tc.call(name), s2.ErrInvalidName, "name %q", name)
 			}
@@ -1521,4 +1557,391 @@ func (s *StorageTestSuite) TestMetaDirIsNotAnObjectName() {
 	s.Require().NoError(err)
 	s.Equal("text/plain", obj.ContentType())
 	s.Equal(s2.Metadata{"k": "v"}, obj.Metadata())
+}
+
+// Every view of a directory finds the same metadata file, whichever one wrote it (#291).
+func (s *StorageTestSuite) TestMetaSharedAcrossViews() {
+	ctx := context.Background()
+	testCases := []struct {
+		caseName   string
+		writerPath string
+		writerName string
+		readerPath string
+		readerName string
+	}{
+		{caseName: "sub writes, root reads", writerPath: "photos", writerName: "a.txt", readerPath: "", readerName: "photos/a.txt"},
+		{caseName: "root writes, sub reads", writerPath: "", writerName: "photos/a.txt", readerPath: "photos", readerName: "a.txt"},
+		{caseName: "nested sub writes, sub reads", writerPath: "b/photos", writerName: "a.txt", readerPath: "b", readerName: "photos/a.txt"},
+		{caseName: "sub writes, nested sub reads", writerPath: "b", writerName: "photos/a.txt", readerPath: "b/photos", readerName: "a.txt"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			root := NewStorageFS(s2.Config{}, memfs.New())
+			view := func(p string) s2.Storage {
+				if p == "" {
+					return root
+				}
+				sub, err := root.Sub(ctx, p)
+				s.Require().NoError(err)
+				return sub
+			}
+			s.Require().NoError(view(tc.writerPath).Put(ctx, s2.NewObjectBytes(tc.writerName, []byte("body"),
+				s2.WithContentType("text/plain"), s2.WithMetadata(s2.Metadata{"k": "v"}))))
+			want, err := view(tc.writerPath).Get(ctx, tc.writerName)
+			s.Require().NoError(err)
+
+			got, err := view(tc.readerPath).Get(ctx, tc.readerName)
+			s.Require().NoError(err)
+			s.Equal("text/plain", got.ContentType())
+			s.Equal(s2.Metadata{"k": "v"}, got.Metadata())
+			s.Equal(want.ETag(), got.ETag())
+			s.NotContains(got.ETag(), "-", "the stored MD5, not the synthetic form")
+		})
+	}
+}
+
+// A metadata file at the pre-v0.20.0 location is read, and the next write moves it without leaving a directory behind.
+func (s *StorageTestSuite) TestMetaLegacyLocation() {
+	ctx := context.Background()
+	const legacyJSON = `{"etag":"\"legacy\"","content_type":"text/plain","metadata":{"k":"v"}}`
+	testCases := []struct {
+		caseName string
+		write    func(strg s2.Storage) error
+		// name is where the object lives afterwards; empty when it is gone.
+		name      string
+		wantCT    string
+		wantMeta  s2.Metadata
+		wantETagF func(etag string) bool
+		// keepsLegacy is set when nothing is written, so the legacy directory stays.
+		keepsLegacy bool
+	}{
+		{
+			caseName:    "read only",
+			write:       func(s2.Storage) error { return nil },
+			name:        "photos/a.txt",
+			wantCT:      "text/plain",
+			wantMeta:    s2.Metadata{"k": "v"},
+			wantETagF:   func(etag string) bool { return etag == `"legacy"` },
+			keepsLegacy: true,
+		},
+		{
+			caseName: "put metadata",
+			write: func(strg s2.Storage) error {
+				return strg.PutMetadata(ctx, "photos/a.txt", s2.Metadata{"k": "w"})
+			},
+			name:      "photos/a.txt",
+			wantCT:    "text/plain",
+			wantMeta:  s2.Metadata{"k": "w"},
+			wantETagF: func(etag string) bool { return etag == `"legacy"` },
+		},
+		{
+			caseName: "put",
+			write: func(strg s2.Storage) error {
+				return strg.Put(ctx, s2.NewObjectBytes("photos/a.txt", []byte("new"), s2.WithContentType("text/csv")))
+			},
+			name:      "photos/a.txt",
+			wantCT:    "text/csv",
+			wantMeta:  s2.Metadata{},
+			wantETagF: func(etag string) bool { return etag != `"legacy"` && !strings.Contains(etag, "-") },
+		},
+		{
+			caseName: "move",
+			write: func(strg s2.Storage) error {
+				return s2.Move(ctx, strg, "photos/a.txt", "docs/b.txt")
+			},
+			name:      "docs/b.txt",
+			wantCT:    "text/plain",
+			wantMeta:  s2.Metadata{"k": "v"},
+			wantETagF: func(etag string) bool { return etag == `"legacy"` },
+		},
+		{
+			caseName: "delete",
+			write: func(strg s2.Storage) error {
+				return strg.Delete(ctx, "photos/a.txt")
+			},
+		},
+		{
+			caseName: "delete recursive",
+			write: func(strg s2.Storage) error {
+				return strg.DeleteRecursive(ctx, "photos/")
+			},
+		},
+	}
+	fsyses := []struct {
+		caseName string
+		newFS    func() fs.FS
+	}{
+		{caseName: "memfs", newFS: func() fs.FS { return memfs.New() }},
+		{caseName: "osfs", newFS: func() fs.FS { return osfs.DirFS(s.T().TempDir()) }},
+	}
+	for _, fc := range fsyses {
+		for _, tc := range testCases {
+			s.Run(fc.caseName+"/"+tc.caseName, func() {
+				fsys := fc.newFS()
+				for name, body := range map[string]string{"photos/a.txt": "body", ".meta/photos/a.txt": legacyJSON} {
+					_, err := wfs.WriteFile(fsys, name, []byte(body), fs.ModePerm)
+					s.Require().NoError(err)
+				}
+				strg := NewStorageFS(s2.Config{}, fsys)
+
+				s.Require().NoError(tc.write(strg))
+
+				if tc.name != "" {
+					got, err := strg.Get(ctx, tc.name)
+					s.Require().NoError(err)
+					s.Equal(tc.wantCT, got.ContentType())
+					s.Equal(tc.wantMeta, got.Metadata())
+					s.True(tc.wantETagF(got.ETag()), "etag %s", got.ETag())
+				}
+				if tc.keepsLegacy {
+					return
+				}
+				_, err := fs.Stat(fsys, ".meta/photos")
+				s.ErrorIs(err, fs.ErrNotExist, "the legacy directory is pruned")
+			})
+		}
+	}
+}
+
+// Deleting a directory takes its metadata files along.
+func (s *StorageTestSuite) TestMetaDeleteRecursiveLeavesNothing() {
+	ctx := context.Background()
+	fsys := memfs.New()
+	strg := NewStorageFS(s2.Config{}, fsys)
+	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("photos/a.txt", []byte("body"), s2.WithContentType("text/plain"))))
+
+	s.Require().NoError(strg.DeleteRecursive(ctx, "photos/"))
+
+	var left []string
+	s.Require().NoError(fs.WalkDir(fsys, ".", func(name string, _ fs.DirEntry, err error) error {
+		if name != "." {
+			left = append(left, name)
+		}
+		return err
+	}))
+	s.Empty(left)
+}
+
+// The review scenarios for #291: a file named .meta beside objects, and legacy metadata files another view wrote, which need MigrateMeta.
+func (s *StorageTestSuite) TestMetaLegacyEdgeCases() {
+	ctx := context.Background()
+	// wantBlocked accepts only ErrMetaBlocked, worded without the host path.
+	wantBlocked := func(err error) error {
+		if !errors.Is(err, ErrMetaBlocked) {
+			return fmt.Errorf("want ErrMetaBlocked, got %v", err)
+		}
+		if strings.Contains(err.Error(), filepath.Clean(os.TempDir())) {
+			return fmt.Errorf("host path in %q", err)
+		}
+		return nil
+	}
+	const legacyJSON = `{"etag":"\"legacy\"","content_type":"text/plain","metadata":{"k":"v"}}`
+	testCases := []struct {
+		caseName string
+		seed     map[string]string
+		act      func(root s2.Storage) error
+		check    func(fsys fs.FS, root s2.Storage)
+	}{
+		{
+			caseName: "a file named .meta does not hide its neighbours",
+			seed:     map[string]string{"photos/.meta": "x", "photos/a.txt": "body", ".meta/photos/a.txt": legacyJSON},
+			act:      func(s2.Storage) error { return nil },
+			check: func(_ fs.FS, root s2.Storage) {
+				got, err := root.Get(ctx, "photos/a.txt")
+				s.Require().NoError(err)
+				s.Equal("text/plain", got.ContentType())
+			},
+		},
+		{
+			caseName: "a file named .meta and no legacy metadata file",
+			seed:     map[string]string{"photos/.meta": "x", "photos/a.txt": "body"},
+			act:      func(s2.Storage) error { return nil },
+			check: func(_ fs.FS, root s2.Storage) {
+				got, err := root.Get(ctx, "photos/a.txt")
+				s.Require().NoError(err)
+				s.Empty(got.ContentType())
+			},
+		},
+		{
+			caseName: "a directory where the new metadata file goes",
+			seed:     map[string]string{"X/.meta/sub/k": legacyJSON, "X/sub": "body", ".meta/X/sub": legacyJSON},
+			act:      func(s2.Storage) error { return nil },
+			check: func(_ fs.FS, root s2.Storage) {
+				got, err := root.Get(ctx, "X/sub")
+				s.Require().NoError(err)
+				s.Equal("text/plain", got.ContentType(), "read from the legacy location")
+			},
+		},
+		{
+			caseName: "a file at the new location that is not a metadata file names itself in the error",
+			seed:     map[string]string{"img/logo.png": "png", "img/.meta/logo.png": "\x89PNG", ".meta/img/logo.png": legacyJSON},
+			act:      func(s2.Storage) error { return nil },
+			check: func(_ fs.FS, root s2.Storage) {
+				_, err := root.Get(ctx, "img/logo.png")
+				s.Require().Error(err)
+				s.Contains(err.Error(), `failed to decode metadata file "img/.meta/logo.png"`)
+				s.NotContains(err.Error(), filepath.Clean(os.TempDir()))
+			},
+		},
+		{
+			caseName: "moving onto a name whose metadata location is a full directory",
+			seed:     map[string]string{"src.txt": "body", ".meta/dst/x": "kept"},
+			act:      func(root s2.Storage) error { return s2.Move(ctx, root, "src.txt", "dst") },
+			check: func(fsys fs.FS, root s2.Storage) {
+				_, err := root.Get(ctx, "dst")
+				s.Require().NoError(err)
+				_, err = fs.Stat(fsys, "src.txt")
+				s.ErrorIs(err, fs.ErrNotExist)
+			},
+		},
+		{
+			caseName: "put metadata over an empty leftover directory",
+			seed:     map[string]string{"name": "body", ".meta/name/": ""},
+			act:      func(root s2.Storage) error { return root.PutMetadata(ctx, "name", s2.Metadata{"k": "v"}) },
+			check: func(_ fs.FS, root s2.Storage) {
+				got, err := root.Get(ctx, "name")
+				s.Require().NoError(err)
+				s.Equal(s2.Metadata{"k": "v"}, got.Metadata())
+			},
+		},
+		{
+			caseName: "a top-level put over empty directories a v0.19 delete left",
+			seed:     map[string]string{".meta/sub/deeper/": ""},
+			act: func(root s2.Storage) error {
+				return root.Put(ctx, s2.NewObjectBytes("sub", []byte("file"), s2.WithContentType("text/csv")))
+			},
+			check: func(_ fs.FS, root s2.Storage) {
+				got, err := root.Get(ctx, "sub")
+				s.Require().NoError(err)
+				s.Equal("text/csv", got.ContentType())
+			},
+		},
+		{
+			caseName: "moving into a folder holding a file named .meta",
+			seed:     map[string]string{"a.txt": "body", "photos/.meta": "key"},
+			act:      func(root s2.Storage) error { return s2.Move(ctx, root, "a.txt", "photos/b.txt") },
+			check: func(_ fs.FS, root s2.Storage) {
+				_, err := root.Get(ctx, "photos/b.txt")
+				s.Require().NoError(err)
+			},
+		},
+		{
+			caseName: "a put into a folder holding a file named .meta changes nothing",
+			seed:     map[string]string{"photos/a.txt": "old", "photos/.meta": "key", ".meta/photos/a.txt": legacyJSON},
+			act: func(root s2.Storage) error {
+				return wantBlocked(root.Put(ctx, s2.NewObjectBytes("photos/a.txt", []byte("new"))))
+			},
+			check: func(fsys fs.FS, root s2.Storage) {
+				body, err := fs.ReadFile(fsys, "photos/a.txt")
+				s.Require().NoError(err)
+				s.Equal("old", string(body))
+				got, err := root.Get(ctx, "photos/a.txt")
+				s.Require().NoError(err)
+				s.Equal("text/plain", got.ContentType())
+			},
+		},
+		{
+			caseName: "a copy into a folder holding a file named .meta changes nothing",
+			seed:     map[string]string{"src.txt": "new", "photos/a.txt": "old", "photos/.meta": "key", ".meta/photos/a.txt": legacyJSON},
+			act: func(root s2.Storage) error {
+				return wantBlocked(root.Copy(ctx, "src.txt", "photos/a.txt"))
+			},
+			check: func(fsys fs.FS, root s2.Storage) {
+				body, err := fs.ReadFile(fsys, "photos/a.txt")
+				s.Require().NoError(err)
+				s.Equal("old", string(body))
+				got, err := root.Get(ctx, "photos/a.txt")
+				s.Require().NoError(err)
+				s.Equal("text/plain", got.ContentType())
+			},
+		},
+		{
+			caseName: "moving an object with a metadata file into a folder holding a file named .meta changes nothing",
+			seed:     map[string]string{"a.txt": "body", ".meta/a.txt": legacyJSON, "photos/.meta": "key"},
+			act:      func(root s2.Storage) error { return wantBlocked(s2.Move(ctx, root, "a.txt", "photos/b.txt")) },
+			check: func(fsys fs.FS, root s2.Storage) {
+				got, err := root.Get(ctx, "a.txt")
+				s.Require().NoError(err)
+				s.Equal("text/plain", got.ContentType())
+				_, err = fs.Stat(fsys, "photos/b.txt")
+				s.ErrorIs(err, fs.ErrNotExist)
+			},
+		},
+		{
+			caseName: "a top-level put named like a kept legacy directory changes nothing",
+			seed:     map[string]string{".meta/photos/old.txt": legacyJSON},
+			act: func(root s2.Storage) error {
+				return wantBlocked(root.Put(ctx, s2.NewObjectBytes("photos", []byte("new"))))
+			},
+			check: func(fsys fs.FS, _ s2.Storage) {
+				_, err := fs.Stat(fsys, "photos")
+				s.ErrorIs(err, fs.ErrNotExist, "no body written")
+			},
+		},
+		{
+			caseName: "moving onto an object whose metadata file a sub wrote",
+			seed:     map[string]string{"b/x.txt": "new", "b/photos/a.txt": "old", "b/.meta/photos/a.txt": legacyJSON},
+			act: func(root s2.Storage) error {
+				if _, err := MigrateMeta(ctx, root); err != nil {
+					return err
+				}
+				return s2.Move(ctx, root, "b/x.txt", "b/photos/a.txt")
+			},
+			check: func(fsys fs.FS, root s2.Storage) {
+				sub, err := root.Sub(ctx, "b")
+				s.Require().NoError(err)
+				got, err := sub.Get(ctx, "photos/a.txt")
+				s.Require().NoError(err)
+				s.Empty(got.ContentType(), "the moved body has no metadata file")
+				s.NotEqual(`"legacy"`, got.ETag())
+				_, err = fs.Stat(fsys, "b/.meta/photos")
+				s.ErrorIs(err, fs.ErrNotExist)
+			},
+		},
+		{
+			caseName: "a folder deleted through the root, then an object of its name",
+			seed:     map[string]string{"X/sub/k": "body", "X/.meta/sub/k": legacyJSON},
+			act: func(root s2.Storage) error {
+				if _, err := MigrateMeta(ctx, root); err != nil {
+					return err
+				}
+				if err := root.DeleteRecursive(ctx, "X/sub/"); err != nil {
+					return err
+				}
+				return root.Put(ctx, s2.NewObjectBytes("X/sub", []byte("file"), s2.WithContentType("text/csv")))
+			},
+			check: func(_ fs.FS, root s2.Storage) {
+				got, err := root.Get(ctx, "X/sub")
+				s.Require().NoError(err)
+				s.Equal("text/csv", got.ContentType())
+			},
+		},
+	}
+	fsyses := []struct {
+		caseName string
+		newFS    func() fs.FS
+	}{
+		{caseName: "memfs", newFS: func() fs.FS { return memfs.New() }},
+		{caseName: "osfs", newFS: func() fs.FS { return osfs.DirFS(s.T().TempDir()) }},
+	}
+	for _, fc := range fsyses {
+		for _, tc := range testCases {
+			s.Run(fc.caseName+"/"+tc.caseName, func() {
+				fsys := fc.newFS()
+				// A name ending in "/" is a directory to create.
+				for name, body := range tc.seed {
+					if dir, ok := strings.CutSuffix(name, "/"); ok {
+						s.Require().NoError(wfs.MkdirAll(fsys, dir, fs.ModePerm))
+						continue
+					}
+					_, err := wfs.WriteFile(fsys, name, []byte(body), fs.ModePerm)
+					s.Require().NoError(err)
+				}
+				root := NewStorageFS(s2.Config{}, fsys)
+
+				s.Require().NoError(tc.act(root))
+				tc.check(fsys, root)
+			})
+		}
+	}
 }
