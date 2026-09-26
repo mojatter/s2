@@ -391,18 +391,9 @@ func S3Action(r *http.Request, bucket, key string) (action, resource string) {
 		return ActionListBucket, bucketARN(bucket)
 	}
 
-	// key == "" is ambiguous on its own for PUT/DELETE: "PUT /{bucket}"
-	// (truly bucket-level, no key wildcard in that pattern) and
-	// "PUT /{bucket}/" (matches "/{bucket}/{key...}" with an empty key)
-	// both populate PathValue("key") as "". Go's ServeMux always prefers
-	// the more specific "/{bucket}/{key...}" pattern once there's a
-	// trailing slash, so a trailing-slash request is actually dispatched
-	// to the object handler (handlePutObject/handleDeleteObject, neither
-	// of which delegates to a bucket-level handler for an empty key) --
-	// checking it as a bucket-level action here would authorize a
-	// different operation than the one that actually runs. Only a path
-	// with no trailing slash is genuinely bucket-level for these methods.
-	if key == "" && !strings.HasSuffix(r.URL.Path, "/") {
+	// PUT/DELETE with an empty key is CreateBucket/DeleteBucket with or without a trailing slash;
+	// handlePutObject and handleDeleteObject delegate "/{bucket}/" to the bucket handlers.
+	if key == "" {
 		switch r.Method {
 		case http.MethodPut:
 			return ActionCreateBucket, bucketARN(bucket)

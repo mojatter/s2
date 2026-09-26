@@ -527,19 +527,14 @@ func TestS3Action(t *testing.T) {
 			wantResource: "arn:aws:s3:::mybucket",
 		},
 		{
-			// A trailing slash matches Go ServeMux's "/{bucket}/{key...}"
-			// pattern with an empty key (handleDeleteObject), not the
-			// bucket-level "/{bucket}" pattern (handleDeleteBucket) --
-			// even though PathValue("key") is "" either way. Classifying
-			// this as DeleteBucket would authorize a different operation
-			// than the one that actually runs.
-			caseName:     "delete with trailing slash routes to object handler, not bucket handler",
+			// handleDeleteObject delegates an empty key to handleDeleteBucket, as aws-sdk-go-v2 sends with smithy-go 1.28.2.
+			caseName:     "delete with trailing slash is DeleteBucket",
 			method:       http.MethodDelete,
 			url:          "/mybucket/",
 			bucket:       "mybucket",
 			key:          "",
-			wantAction:   "s3:DeleteObject",
-			wantResource: "arn:aws:s3:::mybucket/",
+			wantAction:   "s3:DeleteBucket",
+			wantResource: "arn:aws:s3:::mybucket",
 		},
 		{
 			// Unlike DELETE/PUT, handleGetObject delegates key=="" back to
@@ -574,13 +569,13 @@ func TestS3Action(t *testing.T) {
 			wantResource: "arn:aws:s3:::mybucket",
 		},
 		{
-			caseName:     "put with trailing slash routes to object handler, not bucket handler",
+			caseName:     "put with trailing slash is CreateBucket",
 			method:       http.MethodPut,
 			url:          "/mybucket/",
 			bucket:       "mybucket",
 			key:          "",
-			wantAction:   "s3:PutObject",
-			wantResource: "arn:aws:s3:::mybucket/",
+			wantAction:   "s3:CreateBucket",
+			wantResource: "arn:aws:s3:::mybucket",
 		},
 		{
 			caseName:     "get bucket location",
