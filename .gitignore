@@ -35,3 +35,6 @@ bin/
 
 # default data directory
 data/
+
+# go.work checksums; the go command regenerates it on demand
+/go.work.sum
