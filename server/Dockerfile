@@ -1,7 +1,5 @@
 FROM golang:1.26-alpine AS builder
-# Source is COPYed rather than bind-mounted so that GOWORK=on (see below)
-# can freely rewrite go.work.sum inside the image layer without ever
-# touching the host checkout.
+# COPY, not a read-only bind mount: a GOWORK build may need to write go.work.sum.
 COPY . /app
 WORKDIR /app/cmd/s2-server
 # DefaultRoot is overridden via -ldflags so the Docker image defaults to

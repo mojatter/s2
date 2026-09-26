@@ -21,3 +21,6 @@ bin/
 data/
 
 .DS_Store
+
+# go.work checksums; the go command regenerates it on demand
+go.work.sum
