@@ -111,11 +111,12 @@ $S2_SERVER_ROOT/
 ├── assets/                 # each top-level dir is a bucket
 │   ├── .keep               # bucket marker (tracks creation time)
 │   ├── .meta/
-│   │   └── css/
-│   │       └── style.css   # JSON sidecar for css/style.css (etag, content_type, metadata)
+│   │   └── logo.png        # JSON metadata file for logo.png (etag, content_type, metadata)
 │   ├── logo.png
 │   └── css/
 │       ├── .keep
+│       ├── .meta/
+│       │   └── style.css   # metadata file for css/style.css, beside it
 │       └── style.css
 └── uploads/
     ├── .keep

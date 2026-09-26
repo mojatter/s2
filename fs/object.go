@@ -10,10 +10,13 @@ import (
 	"io"
 	"io/fs"
 	"path"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mojatter/s2"
+	"github.com/mojatter/wfs"
 )
 
 type object struct {
@@ -132,18 +135,87 @@ type meta struct {
 	Metadata    s2.Metadata `json:"metadata"`
 }
 
+// metaPath is the metadata file of name, in a .meta beside it, so every view of a directory finds the same one.
 func metaPath(name string) string {
-	return path.Join(".meta", name)
+	dir, base := path.Split(name)
+	return path.Join(dir, metaDir, base)
+}
+
+// legacyMetaPath is where v0.19.x kept a nested name's metadata file: under this storage's own .meta.
+func legacyMetaPath(name string) (string, bool) {
+	if !strings.Contains(name, "/") {
+		return "", false
+	}
+	return path.Join(metaDir, name), true
+}
+
+// metaCandidates lists where a read looks for name's metadata file: beside it, then the legacy location.
+func metaCandidates(name string) []string {
+	if legacy, ok := legacyMetaPath(name); ok {
+		return []string{metaPath(name), legacy}
+	}
+	return []string{metaPath(name)}
+}
+
+// isMissingMeta reports whether err means no metadata file is there; ENOTDIR when a file holds the .meta name.
+func isMissingMeta(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+}
+
+// removeLegacyMeta drops name's legacy metadata file and the directories it leaves empty.
+func removeLegacyMeta(fsys fs.FS, name string) {
+	legacy, ok := legacyMetaPath(name)
+	if !ok {
+		return
+	}
+	if wfs.RemoveFile(fsys, legacy) == nil {
+		// A leftover .meta/photos would block a later object "photos".
+		pruneEmptyDirs(fsys, path.Dir(legacy), metaDir)
+	}
+}
+
+// pruneEmptyDirs removes dir and its empty parents up to, not including, stop.
+func pruneEmptyDirs(fsys fs.FS, dir, stop string) {
+	for ; dir != stop && dir != "."; dir = path.Dir(dir) {
+		if info, err := fs.Stat(fsys, dir); err != nil || !info.IsDir() {
+			return
+		}
+		if err := wfs.RemoveFile(fsys, dir); err != nil {
+			return
+		}
+	}
 }
 
 func quotedMD5(h hash.Hash) string {
 	return `"` + hex.EncodeToString(h.Sum(nil)) + `"`
 }
 
+// openMeta opens name's metadata file and reports its path; a directory at a candidate counts as none.
+func openMeta(fsys fs.FS, name string) (fs.File, string, error) {
+	for _, p := range metaCandidates(name) {
+		f, err := fsys.Open(p)
+		if isMissingMeta(err) {
+			continue
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		info, err := f.Stat()
+		if err == nil && !info.IsDir() {
+			return f, p, nil
+		}
+		_ = f.Close()
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	return nil, "", fs.ErrNotExist
+}
+
 func loadMeta(fsys fs.FS, name string) (meta, error) {
-	f, err := fsys.Open(metaPath(name))
+	f, p, err := openMeta(fsys, name)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if isMissingMeta(err) {
 			return meta{}, nil
 		}
 		return meta{}, fmt.Errorf("failed to open meta file: %w", err)
@@ -154,24 +226,28 @@ func loadMeta(fsys fs.FS, name string) (meta, error) {
 	if err != nil {
 		return meta{}, fmt.Errorf("failed to read meta file: %w", err)
 	}
-	return parseMeta(data)
+	m, err := parseMeta(data)
+	if err != nil {
+		return meta{}, fmt.Errorf("failed to decode metadata file %q: %w", p, err)
+	}
+	return m, nil
 }
 
 // parseMeta decodes a sidecar; one without a "metadata" object is the legacy flat map.
 func parseMeta(data []byte) (meta, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return meta{}, fmt.Errorf("failed to decode meta file: %w", err)
+		return meta{}, err
 	}
 	var m meta
 	if md, ok := raw["metadata"]; ok && bytes.HasPrefix(bytes.TrimSpace(md), []byte("{")) {
 		if err := json.Unmarshal(data, &m); err != nil {
-			return meta{}, fmt.Errorf("failed to decode meta file: %w", err)
+			return meta{}, err
 		}
 		return m, nil
 	}
 	if err := json.Unmarshal(data, &m.Metadata); err != nil {
-		return meta{}, fmt.Errorf("failed to decode meta file: %w", err)
+		return meta{}, err
 	}
 	m.ETag = m.Metadata[legacyETagKey]
 	if ct := m.Metadata[legacyContentTypeKey]; ct != legacyDefaultContentType {
@@ -190,5 +266,9 @@ func saveMeta(fsys fs.FS, name string, m meta) error {
 	if err := json.NewEncoder(&buf).Encode(m); err != nil {
 		return fmt.Errorf("failed to encode meta file: %w", err)
 	}
-	return atomicWrite(fsys, metaPath(name), &buf)
+	if err := atomicWrite(fsys, metaPath(name), &buf); err != nil {
+		return err
+	}
+	removeLegacyMeta(fsys, name)
+	return nil
 }
