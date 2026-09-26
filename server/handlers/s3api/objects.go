@@ -457,6 +457,11 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, obj s2.Object, r
 }
 
 func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	// A trailing-slash CreateBucket ("PUT /my-bucket/") routes here with an empty key.
+	if r.PathValue("key") == "" {
+		handleCreateBucket(s, w, r)
+		return
+	}
 	// UploadPart: PUT /{bucket}/{key}?partNumber=N&uploadId=X
 	if r.URL.Query().Get("uploadId") != "" {
 		handleUploadPart(s, w, r)
@@ -624,6 +629,12 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
 	key := r.PathValue("key")
+
+	// A trailing-slash DeleteBucket ("DELETE /my-bucket/") routes here with an empty key.
+	if key == "" {
+		handleDeleteBucket(s, w, r)
+		return
+	}
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {

@@ -145,15 +145,23 @@ func (s *BucketsTestSuite) TestListBuckets() {
 
 func (s *BucketsTestSuite) TestCreateBucket() {
 	testCases := []struct {
-		caseName    string
-		bucket      string
-		wantStatus  int
-		wantErrCode string
+		caseName string
+		bucket   string
+		// trailingSlash sends "PUT /<bucket>/", which routes to handlePutObject with an empty key.
+		trailingSlash bool
+		wantStatus    int
+		wantErrCode   string
 	}{
 		{
 			caseName:   "success",
 			bucket:     "new-bucket",
 			wantStatus: http.StatusOK,
+		},
+		{
+			caseName:      "trailing slash",
+			bucket:        "slash-bucket",
+			trailingSlash: true,
+			wantStatus:    http.StatusOK,
 		},
 		{
 			// DefaultConfig.HealthPath = "/healthz" reserves the bucket name "healthz".
@@ -167,10 +175,18 @@ func (s *BucketsTestSuite) TestCreateBucket() {
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			req := httptest.NewRequest("PUT", "/"+tc.bucket, nil)
-			req.SetPathValue("bucket", tc.bucket)
 			w := httptest.NewRecorder()
-			handleCreateBucket(s.server, w, req)
+			var req *http.Request
+			if tc.trailingSlash {
+				req = httptest.NewRequest("PUT", "/"+tc.bucket+"/", nil)
+				req.SetPathValue("bucket", tc.bucket)
+				req.SetPathValue("key", "")
+				handlePutObject(s.server, w, req)
+			} else {
+				req = httptest.NewRequest("PUT", "/"+tc.bucket, nil)
+				req.SetPathValue("bucket", tc.bucket)
+				handleCreateBucket(s.server, w, req)
+			}
 
 			s.Equal(tc.wantStatus, w.Code)
 			if tc.wantErrCode == "" {
@@ -200,6 +216,22 @@ func (s *BucketsTestSuite) TestDeleteBucket() {
 		s.Equal(http.StatusNoContent, w.Code)
 
 		exists, err := s.server.Buckets.Exists(req.Context(), "to-delete")
+		s.Require().NoError(err)
+		s.False(exists)
+	})
+
+	s.Run("trailing slash", func() {
+		s.createBucket("slash-delete")
+
+		req := httptest.NewRequest("DELETE", "/slash-delete/", nil)
+		req.SetPathValue("bucket", "slash-delete")
+		req.SetPathValue("key", "")
+		w := httptest.NewRecorder()
+		handleDeleteObject(s.server, w, req)
+
+		s.Equal(http.StatusNoContent, w.Code)
+
+		exists, err := s.server.Buckets.Exists(req.Context(), "slash-delete")
 		s.Require().NoError(err)
 		s.False(exists)
 	})
