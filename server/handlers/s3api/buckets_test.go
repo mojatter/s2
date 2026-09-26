@@ -1,6 +1,7 @@
 package s3api
 
 import (
+	"context"
 	"encoding/xml"
 	"net/http"
 	"net/http/httptest"
@@ -215,6 +216,21 @@ func (s *BucketsTestSuite) TestDeleteBucket() {
 		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
 		s.Equal("NoSuchBucket", errResp.Code)
 	})
+}
+
+// TestTrailingSlashBucket goes through the router, which sends "PUT /b/" and "DELETE /b/" to the object handlers.
+func (s *BucketsTestSuite) TestTrailingSlashBucket() {
+	resp := s.roundTrip(s.server, http.MethodPut, "/slash-bucket/")
+	s.Equal(http.StatusOK, resp.StatusCode)
+	exists, err := s.server.Buckets.Exists(context.Background(), "slash-bucket")
+	s.Require().NoError(err)
+	s.True(exists)
+
+	resp = s.roundTrip(s.server, http.MethodDelete, "/slash-bucket/")
+	s.Equal(http.StatusNoContent, resp.StatusCode)
+	exists, err = s.server.Buckets.Exists(context.Background(), "slash-bucket")
+	s.Require().NoError(err)
+	s.False(exists)
 }
 
 // --- GetBucketLocation ---
