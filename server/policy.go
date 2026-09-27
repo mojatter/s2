@@ -358,10 +358,7 @@ func S3Action(r *http.Request, bucket, key string) (action, resource string) {
 	// handleObjectPOST in server/handlers/s3api/multipart.go). Both forms
 	// reach handleDeleteObjects, whose affected keys are only known once
 	// the body is decoded; handleDeleteObjects checks each key via
-	// AllowedS3Action instead. Handling this before the trailing-slash
-	// check below means both URL forms defer identically, rather than the
-	// trailing-slash form falling through to the object-level switch and
-	// being checked as s3:PutObject on the wrong (empty-key) resource.
+	// AllowedS3Action instead, so both URL forms defer identically.
 	if key == "" && r.Method == http.MethodPost {
 		return actionDeferred, ""
 	}
@@ -372,12 +369,7 @@ func S3Action(r *http.Request, bucket, key string) (action, resource string) {
 	// key=="" straight back to handleBucketGET/handleHeadBucket regardless
 	// of the trailing slash (see the comment on handleGetObject in
 	// server/handlers/s3api/objects.go) -- it always runs ListObjectsV2,
-	// GetBucketLocation, or HeadBucket, never a GetObject read. Handling
-	// this before the trailing-slash check below means both URL forms are
-	// checked against the same bucket-level resource, rather than the
-	// trailing-slash form falling through to the object-level switch and
-	// being checked as s3:GetObject on the wrong (empty-key) resource --
-	// which would let a GetObject-only grant enumerate the whole bucket.
+	// GetBucketLocation, or HeadBucket, never a GetObject read, so both forms are checked on the bucket.
 	if key == "" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		if r.Method == http.MethodHead {
 			return ActionListBucket, bucketARN(bucket)
@@ -391,18 +383,8 @@ func S3Action(r *http.Request, bucket, key string) (action, resource string) {
 		return ActionListBucket, bucketARN(bucket)
 	}
 
-	// key == "" is ambiguous on its own for PUT/DELETE: "PUT /{bucket}"
-	// (truly bucket-level, no key wildcard in that pattern) and
-	// "PUT /{bucket}/" (matches "/{bucket}/{key...}" with an empty key)
-	// both populate PathValue("key") as "". Go's ServeMux always prefers
-	// the more specific "/{bucket}/{key...}" pattern once there's a
-	// trailing slash, so a trailing-slash request is actually dispatched
-	// to the object handler (handlePutObject/handleDeleteObject, neither
-	// of which delegates to a bucket-level handler for an empty key) --
-	// checking it as a bucket-level action here would authorize a
-	// different operation than the one that actually runs. Only a path
-	// with no trailing slash is genuinely bucket-level for these methods.
-	if key == "" && !strings.HasSuffix(r.URL.Path, "/") {
+	// PUT/DELETE with an empty key is CreateBucket/DeleteBucket; the object handlers delegate "/{bucket}/".
+	if key == "" {
 		switch r.Method {
 		case http.MethodPut:
 			return ActionCreateBucket, bucketARN(bucket)
