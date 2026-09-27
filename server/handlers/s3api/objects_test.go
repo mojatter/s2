@@ -1771,6 +1771,59 @@ func (s *ObjectsTestSuite) TestDeleteObject() {
 	})
 }
 
+// TestObjectSubresource checks that an object request naming a subresource neither overwrites nor deletes the object.
+func (s *ObjectsTestSuite) TestObjectSubresource() {
+	const bucket = "obj-sub"
+	testCases := []struct {
+		caseName   string
+		method     string
+		key        string
+		query      string
+		wantStatus int
+		// wantBody is the object's body afterwards; empty means the object is gone.
+		wantBody string
+	}{
+		{caseName: "DeleteObjectTagging", method: http.MethodDelete, key: "del-tag", query: "?tagging", wantStatus: http.StatusNotImplemented, wantBody: "body"},
+		{caseName: "DeleteObjectTagging as aws-sdk-go-v2 sends it", method: http.MethodDelete, key: "del-tag-sdk", query: "?tagging&x-id=DeleteObjectTagging", wantStatus: http.StatusNotImplemented, wantBody: "body"},
+		{caseName: "PutObjectTagging", method: http.MethodPut, key: "put-tag", query: "?tagging", wantStatus: http.StatusNotImplemented, wantBody: "body"},
+		{caseName: "PutObjectAcl", method: http.MethodPut, key: "put-acl", query: "?acl", wantStatus: http.StatusNotImplemented, wantBody: "body"},
+		{caseName: "PutObject with the SDK operation hint", method: http.MethodPut, key: "put-xid", query: "?x-id=PutObject", wantStatus: http.StatusOK, wantBody: "<Tagging/>"},
+		{caseName: "DeleteObject with the SDK operation hint", method: http.MethodDelete, key: "del-xid", query: "?x-id=DeleteObject", wantStatus: http.StatusNoContent},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			s.putObject(bucket, tc.key, "body")
+			req := httptest.NewRequest(tc.method, "/"+bucket+"/"+tc.key+tc.query, strings.NewReader("<Tagging/>"))
+			w := httptest.NewRecorder()
+			s.server.S3Handler().ServeHTTP(w, req)
+
+			s.Equal(tc.wantStatus, w.Code)
+			if tc.wantStatus == http.StatusNotImplemented {
+				var errResp ErrorResponse
+				s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+				s.Equal("NotImplemented", errResp.Code)
+			}
+			strg, err := s.server.Buckets.Get(ctx, bucket)
+			s.Require().NoError(err)
+			ok, err := strg.Exists(ctx, tc.key)
+			s.Require().NoError(err)
+			s.Equal(tc.wantBody != "", ok)
+			if ok {
+				obj, err := strg.Get(ctx, tc.key)
+				s.Require().NoError(err)
+				rc, err := obj.Open()
+				s.Require().NoError(err)
+				defer func() { _ = rc.Close() }()
+
+				data, err := io.ReadAll(rc)
+				s.Require().NoError(err)
+				s.Equal(tc.wantBody, string(data))
+			}
+		})
+	}
+}
+
 // --- DeleteObjects ---
 
 func (s *ObjectsTestSuite) TestDeleteObjects() {

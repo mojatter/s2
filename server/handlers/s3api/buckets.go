@@ -2,7 +2,6 @@ package s3api
 
 import (
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/mojatter/s2/server"
@@ -51,13 +50,7 @@ func HandleListBuckets(s *server.Server, w http.ResponseWriter, r *http.Request)
 
 // namesBucketSubresource reports whether r asks for something other than the bucket itself; s2 implements no bucket subresource.
 func namesBucketSubresource(r *http.Request) bool {
-	for k := range r.URL.Query() {
-		// x-id is the SDK's operation hint; X-Amz-* carries a presigned URL's signature.
-		if !strings.EqualFold(k, "x-id") && !strings.HasPrefix(strings.ToLower(k), "x-amz-") {
-			return true
-		}
-	}
-	return r.Header.Get("x-amz-copy-source") != ""
+	return namesSubresource(r) || r.Header.Get("x-amz-copy-source") != ""
 }
 
 func handleCreateBucket(s *server.Server, w http.ResponseWriter, r *http.Request) {
