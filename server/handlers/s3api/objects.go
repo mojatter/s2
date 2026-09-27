@@ -462,6 +462,10 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		handleCreateBucket(s, w, r)
 		return
 	}
+	if namesSubresource(r, "uploadId", "partNumber") {
+		writeError(w, r, "NotImplemented", "This operation is not implemented", http.StatusNotImplemented)
+		return
+	}
 	// UploadPart: PUT /{bucket}/{key}?partNumber=N&uploadId=X
 	if r.URL.Query().Get("uploadId") != "" {
 		handleUploadPart(s, w, r)
@@ -633,6 +637,10 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 	// A trailing-slash DeleteBucket ("DELETE /my-bucket/") routes here with an empty key.
 	if key == "" {
 		handleDeleteBucket(s, w, r)
+		return
+	}
+	if namesSubresource(r, "uploadId") {
+		writeError(w, r, "NotImplemented", "This operation is not implemented", http.StatusNotImplemented)
 		return
 	}
 

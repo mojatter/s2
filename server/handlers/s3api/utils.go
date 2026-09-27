@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -48,6 +49,17 @@ func decodeXMLBody(w http.ResponseWriter, r *http.Request, v any) bool {
 
 func writeXML(w http.ResponseWriter, status int, v interface{}) {
 	server.WriteXML(w, status, v)
+}
+
+// namesSubresource reports whether r's query holds a key other than allowed; s2 implements no other subresource.
+func namesSubresource(r *http.Request, allowed ...string) bool {
+	for k := range r.URL.Query() {
+		// x-id is the SDK's operation hint; X-Amz-* carries a presigned URL's signature.
+		if !slices.Contains(allowed, k) && !strings.EqualFold(k, "x-id") && !strings.HasPrefix(strings.ToLower(k), "x-amz-") {
+			return true
+		}
+	}
+	return false
 }
 
 func writeError(w http.ResponseWriter, r *http.Request, code string, message string, status int) {

@@ -48,7 +48,16 @@ func HandleListBuckets(s *server.Server, w http.ResponseWriter, r *http.Request)
 	writeXML(w, http.StatusOK, result)
 }
 
+// namesBucketSubresource reports whether r asks for something other than the bucket itself; s2 implements no bucket subresource.
+func namesBucketSubresource(r *http.Request) bool {
+	return namesSubresource(r) || r.Header.Get("x-amz-copy-source") != ""
+}
+
 func handleCreateBucket(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	if namesBucketSubresource(r) {
+		writeError(w, r, "NotImplemented", "This operation is not implemented", http.StatusNotImplemented)
+		return
+	}
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
 
@@ -62,6 +71,10 @@ func handleCreateBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 }
 
 func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	if namesBucketSubresource(r) {
+		writeError(w, r, "NotImplemented", "This operation is not implemented", http.StatusNotImplemented)
+		return
+	}
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
 
