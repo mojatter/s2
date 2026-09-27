@@ -466,13 +466,13 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, "NotImplemented", "This operation is not implemented", http.StatusNotImplemented)
 		return
 	}
-	// UploadPart: PUT /{bucket}/{key}?partNumber=N&uploadId=X
-	if r.URL.Query().Get("uploadId") != "" {
+	// UploadPart: PUT /{bucket}/{key}?partNumber=N&uploadId=X; an empty one fails there rather than overwriting key.
+	if q := r.URL.Query(); q.Has("uploadId") || q.Has("partNumber") {
 		handleUploadPart(s, w, r)
 		return
 	}
 	// If x-amz-copy-source is present, this is a CopyObject request
-	if copySource := r.Header.Get("x-amz-copy-source"); copySource != "" {
+	if copySource := r.Header.Get(copySourceHeader); copySource != "" {
 		handleCopyObject(s, w, r, copySource)
 		return
 	}
@@ -522,6 +522,9 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 }
 
 const metaHeaderPrefix = "X-Amz-Meta-"
+
+// copySourceHeader names the object a CopyObject or UploadPartCopy request copies from.
+const copySourceHeader = "X-Amz-Copy-Source"
 
 // reservedETagKey marks an object a pre-v0.18 s2-server wrote on s3/gcs roots, so clients cannot set it until v1.0 (#247).
 const reservedETagKey = "s2-etag"
@@ -651,8 +654,8 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// AbortMultipartUpload: DELETE /{bucket}/{key}?uploadId=X
-	if r.URL.Query().Get("uploadId") != "" {
+	// AbortMultipartUpload: DELETE /{bucket}/{key}?uploadId=X; an empty one fails there rather than deleting key.
+	if r.URL.Query().Has("uploadId") {
 		handleAbortMultipartUpload(s, w, r)
 		return
 	}

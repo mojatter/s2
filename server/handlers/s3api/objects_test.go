@@ -1779,6 +1779,7 @@ func (s *ObjectsTestSuite) TestObjectSubresource() {
 		method     string
 		key        string
 		query      string
+		copySource string
 		wantStatus int
 		// wantBody is the object's body afterwards; empty means the object is gone.
 		wantBody string
@@ -1787,6 +1788,10 @@ func (s *ObjectsTestSuite) TestObjectSubresource() {
 		{caseName: "DeleteObjectTagging as aws-sdk-go-v2 sends it", method: http.MethodDelete, key: "del-tag-sdk", query: "?tagging&x-id=DeleteObjectTagging", wantStatus: http.StatusNotImplemented, wantBody: "body"},
 		{caseName: "PutObjectTagging", method: http.MethodPut, key: "put-tag", query: "?tagging", wantStatus: http.StatusNotImplemented, wantBody: "body"},
 		{caseName: "PutObjectAcl", method: http.MethodPut, key: "put-acl", query: "?acl", wantStatus: http.StatusNotImplemented, wantBody: "body"},
+		{caseName: "UploadPart with an empty upload ID", method: http.MethodPut, key: "put-empty-upload", query: "?uploadId=&partNumber=1", wantStatus: http.StatusBadRequest, wantBody: "body"},
+		{caseName: "UploadPart without an upload ID", method: http.MethodPut, key: "put-no-upload", query: "?partNumber=1", wantStatus: http.StatusBadRequest, wantBody: "body"},
+		{caseName: "UploadPartCopy without an upload ID", method: http.MethodPut, key: "put-copy-no-upload", query: "?partNumber=1", copySource: "/obj-sub/src", wantStatus: http.StatusNotImplemented, wantBody: "body"},
+		{caseName: "abort with an empty upload ID", method: http.MethodDelete, key: "del-empty-upload", query: "?uploadId=", wantStatus: http.StatusBadRequest, wantBody: "body"},
 		{caseName: "PutObject with the SDK operation hint", method: http.MethodPut, key: "put-xid", query: "?x-id=PutObject", wantStatus: http.StatusOK, wantBody: "<Tagging/>"},
 		{caseName: "DeleteObject with the SDK operation hint", method: http.MethodDelete, key: "del-xid", query: "?x-id=DeleteObject", wantStatus: http.StatusNoContent},
 	}
@@ -1795,6 +1800,9 @@ func (s *ObjectsTestSuite) TestObjectSubresource() {
 			ctx := context.Background()
 			s.putObject(bucket, tc.key, "body")
 			req := httptest.NewRequest(tc.method, "/"+bucket+"/"+tc.key+tc.query, strings.NewReader("<Tagging/>"))
+			if tc.copySource != "" {
+				req.Header.Set(copySourceHeader, tc.copySource)
+			}
 			w := httptest.NewRecorder()
 			s.server.S3Handler().ServeHTTP(w, req)
 

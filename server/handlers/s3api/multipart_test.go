@@ -708,6 +708,25 @@ func (s *MultipartTestSuite) TestUploadPartRacingAbort() {
 	s.False(exists, "the late part must not outlive the abort")
 }
 
+// UploadPartCopy is refused rather than stored as the empty part its body would give.
+func (s *MultipartTestSuite) TestUploadPartCopy() {
+	s.createBucket("mp-copy")
+	uploadID := s.initiateUpload("mp-copy", "file.bin", nil)
+
+	req := httptest.NewRequest("PUT", "/mp-copy/file.bin?partNumber=1&uploadId="+url.QueryEscape(uploadID), nil)
+	req.Header.Set("x-amz-copy-source", "/mp-copy/src.bin")
+	w := httptest.NewRecorder()
+	s.server.S3Handler().ServeHTTP(w, req)
+
+	s.Equal(http.StatusNotImplemented, w.Code)
+	var errResp ErrorResponse
+	s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+	s.Equal("NotImplemented", errResp.Code)
+	lw, parts := s.listParts("mp-copy", "file.bin", uploadID, "")
+	s.Require().Equal(http.StatusOK, lw.Code)
+	s.Empty(parts.Parts)
+}
+
 // A part that exists but cannot be read is the server's fault, not the client's.
 func (s *MultipartTestSuite) TestCompleteMultipartUploadPartReadFailure() {
 	s.createBucket("mp-eio")

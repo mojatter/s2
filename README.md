@@ -592,6 +592,7 @@ S2 aims to cover the parts of the S3 API that matter for local development and l
 - **Bucket ACLs, S3 bucket-policy JSON on individual buckets** — Not implemented. S2 does support multiple principals with IAM-style `Policy` documents scoped by bucket/key/action (see [docs/users-policy.md](docs/users-policy.md)), but there is no per-bucket ACL or bucket-attached policy document as AWS has; access control is entirely principal-side.
 - **Replication, lifecycle rules, object lock** — Not implemented.
 - **Subresources** — `PUT` and `DELETE` naming a subresource such as `?tagging`, `?acl`, `?policy` or `?versioning`, on a bucket or an object, answer `501 NotImplemented` rather than touching it; so does `DELETE` with `?versionId`, since s2 keeps no versions.
+- **UploadPartCopy** — `PUT /{bucket}/{key}?partNumber&uploadId` with `x-amz-copy-source` answers `501 NotImplemented`; CopyObject copies whole objects.
 
 If your use case needs any of the above, S2 is probably not the right tool — consider AWS S3, Ceph RGW, or SeaweedFS.
 
