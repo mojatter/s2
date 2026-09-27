@@ -29,10 +29,10 @@ func ParseRoot(root string) (name, prefix string) {
 type Type string
 
 const (
-	TypeOSFS  Type = "osfs"
-	TypeMemFS Type = "memfs"
-	TypeS3    Type = "s3"
-	TypeGCS   Type = "gcs"
+	TypeOSFS   Type = "osfs"
+	TypeMemFS  Type = "memfs"
+	TypeS3     Type = "s3"
+	TypeGCS    Type = "gcs"
 	TypeAzblob Type = "azblob"
 )
 

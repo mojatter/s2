@@ -268,7 +268,7 @@ func (s *IntegrationSuite) TestListObjects() {
 		Delimiter: aws.String("/"),
 	})
 	s.Require().NoError(err)
-	s.Len(out.Contents, 1) // root.txt
+	s.Len(out.Contents, 1)       // root.txt
 	s.Len(out.CommonPrefixes, 2) // docs/, photos/
 
 	// With prefix
