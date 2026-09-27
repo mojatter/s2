@@ -591,6 +591,7 @@ S2 aims to cover the parts of the S3 API that matter for local development and l
 - **Server-side encryption (SSE-S3 / SSE-KMS / SSE-C)** — Not implemented. Use full-disk encryption at the OS level if needed.
 - **Bucket ACLs, S3 bucket-policy JSON on individual buckets** — Not implemented. S2 does support multiple principals with IAM-style `Policy` documents scoped by bucket/key/action (see [docs/users-policy.md](docs/users-policy.md)), but there is no per-bucket ACL or bucket-attached policy document as AWS has; access control is entirely principal-side.
 - **Replication, lifecycle rules, object lock** — Not implemented.
+- **Bucket subresources** — `PUT` and `DELETE` on `/{bucket}?tagging`, `?policy`, `?versioning`, `?lifecycle` and the like answer `501 NotImplemented` rather than touching the bucket.
 
 If your use case needs any of the above, S2 is probably not the right tool — consider AWS S3, Ceph RGW, or SeaweedFS.
 
