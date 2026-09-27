@@ -522,6 +522,8 @@ s2-server -f config.json
 | GET | `/{bucket}/{key...}?uploadId` | ListParts |
 | GET, HEAD | `/healthz` | Health check (configurable via `S2_SERVER_HEALTH_PATH`) |
 
+`DeleteBucket` refuses a bucket that still holds objects with `409 BucketNotEmpty`; `.keep` markers, which S3 listings hide (the bucket marker and console folders), do not count, and unfinished multipart uploads do not block it. The console's delete removes the contents.
+
 Custom metadata is supported via `x-amz-meta-*` headers on PutObject/CopyObject and returned on GetObject/HeadObject. `Content-Type` and `ETag` are not metadata: they are attributes the backend owns, described in [docs/backends.md](docs/backends.md#content-type-and-etag).
 
 ## Benchmarks

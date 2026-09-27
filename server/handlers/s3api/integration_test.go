@@ -108,7 +108,23 @@ func (s *IntegrationSuite) TestDeleteBucket() {
 		Bucket: aws.String("del-bucket"),
 	})
 	s.Require().NoError(err)
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String("del-bucket"),
+		Key:    aws.String("k"),
+		Body:   strings.NewReader("body"),
+	})
+	s.Require().NoError(err)
 
+	_, err = s.client.DeleteBucket(ctx, &s3.DeleteBucketInput{
+		Bucket: aws.String("del-bucket"),
+	})
+	s.ErrorContains(err, "BucketNotEmpty")
+
+	_, err = s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String("del-bucket"),
+		Key:    aws.String("k"),
+	})
+	s.Require().NoError(err)
 	_, err = s.client.DeleteBucket(ctx, &s3.DeleteBucketInput{
 		Bucket: aws.String("del-bucket"),
 	})
