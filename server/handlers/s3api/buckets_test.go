@@ -3,13 +3,16 @@ package s3api
 import (
 	"context"
 	"encoding/xml"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/server"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -295,6 +298,68 @@ func (s *BucketsTestSuite) TestBucketSubresource() {
 	}
 }
 
+// TestDeleteBucketNotEmpty checks that DeleteBucket refuses a bucket holding an object an S3 client can see.
+func (s *BucketsTestSuite) TestDeleteBucketNotEmpty() {
+	testCases := []struct {
+		caseName string
+		bucket   string
+		// keys go into the bucket first; one ending in "/" is a console folder.
+		keys          []string
+		dropMarker    bool
+		trailingSlash bool
+		wantStatus    int
+	}{
+		{caseName: "empty", bucket: "nb-empty", wantStatus: http.StatusNoContent},
+		{caseName: "one object", bucket: "nb-one", keys: []string{"k"}, wantStatus: http.StatusConflict},
+		{caseName: "nested object", bucket: "nb-nested", keys: []string{"dir/sub/k"}, wantStatus: http.StatusConflict},
+		{caseName: "console folders only", bucket: "nb-folders", keys: []string{"dir/", "dir/sub/"}, wantStatus: http.StatusNoContent},
+		{caseName: "a .keep written under a folder key", bucket: "nb-userkeep", keys: []string{"docs/.keep"}, wantStatus: http.StatusNoContent},
+		{caseName: "object without the bucket marker", bucket: "nb-nomarker", keys: []string{"k"}, dropMarker: true, wantStatus: http.StatusConflict},
+		{caseName: "trailing slash", bucket: "nb-slash", keys: []string{"k"}, trailingSlash: true, wantStatus: http.StatusConflict},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			s.createBucket(tc.bucket)
+			strg, err := s.server.Buckets.Get(ctx, tc.bucket)
+			s.Require().NoError(err)
+			for _, key := range tc.keys {
+				if folder, ok := strings.CutSuffix(key, "/"); ok {
+					s.Require().NoError(s.server.Buckets.CreateFolder(ctx, tc.bucket, folder))
+				} else {
+					s.putObject(tc.bucket, key, "body")
+				}
+			}
+			if tc.dropMarker {
+				s.Require().NoError(strg.Delete(ctx, ".keep"))
+			}
+			target := "/" + tc.bucket
+			if tc.trailingSlash {
+				target += "/"
+			}
+			w := httptest.NewRecorder()
+			s.server.S3Handler().ServeHTTP(w, httptest.NewRequest(http.MethodDelete, target, nil))
+
+			s.Equal(tc.wantStatus, w.Code)
+			exists, err := s.server.Buckets.Exists(ctx, tc.bucket)
+			s.Require().NoError(err)
+			if tc.wantStatus == http.StatusNoContent {
+				s.False(exists)
+				return
+			}
+			var errResp ErrorResponse
+			s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+			s.Equal("BucketNotEmpty", errResp.Code)
+			s.True(exists)
+			for _, key := range tc.keys {
+				ok, err := strg.Exists(ctx, key)
+				s.Require().NoError(err)
+				s.True(ok, "%s survives", key)
+			}
+		})
+	}
+}
+
 // --- GetBucketLocation ---
 
 func (s *BucketsTestSuite) TestGetBucketLocation() {
@@ -407,4 +472,33 @@ func TestNamesBucketSubresource(t *testing.T) {
 			assert.Equal(t, tc.want, namesBucketSubresource(httptest.NewRequest(http.MethodDelete, tc.target, nil)))
 		})
 	}
+}
+
+// TestDeleteBucketNotEmptyPaged finds an object past a first page of .keep markers alone, on memfs as 1001 folders are slow on disk.
+func TestDeleteBucketNotEmptyPaged(t *testing.T) {
+	ctx := context.Background()
+	cfg := server.DefaultConfig()
+	cfg.Type = s2.TypeMemFS
+	srv, err := server.NewServer(ctx, cfg)
+	require.NoError(t, err)
+	require.NoError(t, srv.Buckets.Create(ctx, "paged"))
+	for i := range maxObjectKeys + 1 {
+		require.NoError(t, srv.Buckets.CreateFolder(ctx, "paged", fmt.Sprintf("f%05d", i)))
+	}
+	strg, err := srv.Buckets.Get(ctx, "paged")
+	require.NoError(t, err)
+	// "zzz/k" sorts after every folder, so only the second page holds it.
+	require.NoError(t, strg.Put(ctx, s2.NewObjectBytes("zzz/k", []byte("body"))))
+
+	del := func() int {
+		w := httptest.NewRecorder()
+		srv.S3Handler().ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/paged", nil))
+		return w.Code
+	}
+	require.Equal(t, http.StatusConflict, del())
+	require.NoError(t, strg.Delete(ctx, "zzz/k"))
+	require.Equal(t, http.StatusNoContent, del())
+	exists, err := srv.Buckets.Exists(ctx, "paged")
+	require.NoError(t, err)
+	require.False(t, exists)
 }

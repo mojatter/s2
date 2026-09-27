@@ -1,9 +1,12 @@
 package s3api
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/server"
 	"github.com/mojatter/s2/server/middleware"
 )
@@ -88,6 +91,17 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 		writeError(w, r, "NoSuchBucket", "The specified bucket does not exist", http.StatusNotFound)
 		return
 	}
+	// The check and the delete are not atomic; an object put in between goes with the bucket.
+	holds, err := bucketHoldsObjects(ctx, s, bucketName)
+	if err != nil {
+		code, msg, status := s2ErrorToS3Error(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
+	if holds {
+		writeError(w, r, "BucketNotEmpty", "The bucket you tried to delete is not empty", http.StatusConflict)
+		return
+	}
 
 	if err := s.Buckets.Delete(ctx, bucketName); err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
@@ -96,6 +110,31 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// bucketHoldsObjects reports whether the bucket holds an object an S3 client can see; .keep markers do not count.
+func bucketHoldsObjects(ctx context.Context, s *server.Server, name string) (bool, error) {
+	strg, err := s.Buckets.Get(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	opts := s2.ListOptions{Recursive: true, Limit: maxObjectKeys}
+	for {
+		res, err := strg.List(ctx, opts)
+		if err != nil {
+			return false, err
+		}
+		if len(server.FilterKeep(res.Objects)) > 0 {
+			return true, nil
+		}
+		if res.NextAfter == "" {
+			return false, nil
+		}
+		if res.NextAfter == opts.After {
+			return false, fmt.Errorf("storage returned a list token that does not advance: %q", opts.After)
+		}
+		opts.After = res.NextAfter
+	}
 }
 
 func handleHeadBucket(s *server.Server, w http.ResponseWriter, r *http.Request) {
