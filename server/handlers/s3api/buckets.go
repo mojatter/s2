@@ -50,7 +50,7 @@ func HandleListBuckets(s *server.Server, w http.ResponseWriter, r *http.Request)
 
 // namesBucketSubresource reports whether r asks for something other than the bucket itself; s2 implements no bucket subresource.
 func namesBucketSubresource(r *http.Request) bool {
-	return namesSubresource(r) || r.Header.Get("x-amz-copy-source") != ""
+	return namesSubresource(r) || r.Header.Get(copySourceHeader) != ""
 }
 
 func handleCreateBucket(s *server.Server, w http.ResponseWriter, r *http.Request) {

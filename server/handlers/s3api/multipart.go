@@ -90,6 +90,11 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 }
 
 func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	// UploadPartCopy sends no body, so storing one would leave an empty part.
+	if r.Header.Get(copySourceHeader) != "" {
+		writeError(w, r, "NotImplemented", "This operation is not implemented", http.StatusNotImplemented)
+		return
+	}
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
 	key := r.PathValue("key")
