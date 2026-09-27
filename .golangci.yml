@@ -28,6 +28,11 @@ linters:
           - errcheck
           - gosec
 
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
