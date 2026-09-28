@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 
@@ -702,6 +703,40 @@ func TestStorageDelete(ctx context.Context, strg s2.Storage) error {
 		errorf("DeleteRecursive(%q) removed %q, which only shares the prefix", "s2test-dir/", sibling)
 	}
 	_ = strg.Delete(ctx, sibling)
+
+	// A prefix goes away with its last object, by Delete or by Move, as on S3.
+	parent := "s2test-delprefix"
+	for _, f := range []string{"keep.txt", "gone/a.txt", "gone/sub/b.txt", "kept/c.txt", "kept/sub/d.txt"} {
+		if err := strg.Put(ctx, s2.NewObjectBytes(parent+"/"+f, []byte("x"))); err != nil {
+			return fmt.Errorf("Put(%q) failed: %w", parent+"/"+f, err)
+		}
+	}
+	checkPrefixes := func(step string, want ...string) {
+		res, err := strg.List(ctx, s2.ListOptions{Prefix: parent})
+		if err != nil {
+			errorf("List(prefix=%q) %s failed: %v", parent, step, err)
+			return
+		}
+		// fs reports a prefix without its trailing slash.
+		got := make([]string, len(res.CommonPrefixes))
+		for i, p := range res.CommonPrefixes {
+			got[i] = strings.TrimSuffix(p, "/")
+		}
+		if !slices.Equal(got, want) {
+			errorf("List(prefix=%q) %s: prefixes %q, want %q", parent, step, res.CommonPrefixes, want)
+		}
+	}
+	for _, f := range []string{"gone/a.txt", "gone/sub/b.txt", "kept/sub/d.txt"} {
+		if err := strg.Delete(ctx, parent+"/"+f); err != nil {
+			errorf("Delete(%q) failed: %v", parent+"/"+f, err)
+		}
+	}
+	checkPrefixes("after Delete", parent+"/kept")
+	if err := s2.Move(ctx, strg, parent+"/kept/c.txt", parent+"/moved.txt"); err != nil {
+		errorf("Move(%q) failed: %v", parent+"/kept/c.txt", err)
+	}
+	checkPrefixes("after Move")
+	_ = strg.DeleteRecursive(ctx, parent+"/")
 
 	if len(errs) > 0 {
 		return fmt.Errorf("TestStorageDelete found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))

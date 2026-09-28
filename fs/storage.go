@@ -232,6 +232,9 @@ func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, erro
 			continue
 		}
 		info, err := entry.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // deleted since ReadDir
+		}
 		if err != nil {
 			return s2.ListResult{}, fmt.Errorf("failed to get info: %w", err)
 		}
@@ -265,6 +268,10 @@ func (s *storage) listRecursive(prefix, after string, limit int) (s2.ListResult,
 	var objs []s2.Object
 	err := fs.WalkDir(s.fsys, ".", func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// A directory deleted since its parent was read, or a pruned root, holds nothing to list.
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
 		// Ahead of the cursor: a cursor that sorts inside ".meta" -- the
@@ -288,6 +295,9 @@ func (s *storage) listRecursive(prefix, after string, limit int) (s2.ListResult,
 			return nil
 		}
 		info, err := d.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // deleted since its directory was read
+		}
 		if err != nil {
 			return fmt.Errorf("failed to get info: %w", err)
 		}
@@ -496,6 +506,7 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 		}
 		removeLegacyMeta(s.fsys, src)
 		removeLegacyMeta(s.fsys, dst)
+		pruneEmptyParents(s.fsys, src)
 		return nil
 	}
 	if err := s.Copy(ctx, src, dst); err != nil {
@@ -567,7 +578,11 @@ func (s *storage) Delete(ctx context.Context, name string) error {
 	if err := validateName(name); err != nil {
 		return err
 	}
-	return s.delete(name)
+	if err := s.delete(name); err != nil {
+		return err
+	}
+	pruneEmptyParents(s.fsys, name)
+	return nil
 }
 
 func (s *storage) delete(name string) error {
@@ -621,6 +636,7 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 			return fmt.Errorf("failed to remove dir %q: %w", dir, err)
 		}
 	}
+	pruneEmptyParents(s.fsys, dirName)
 	return nil
 }
 

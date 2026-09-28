@@ -205,6 +205,17 @@ run_test "ListDirAndPartialFilename" sh -c '
   [ "$out" = "images/a.png" ]
 '
 
+# A prefix goes away with its last object, as on S3 (#310)
+run_test "ListOmitsEmptiedPrefix" sh -c '
+  EP="'"$ENDPOINT"'"
+  echo -n "a" | aws s3 --endpoint-url "$EP" cp - s3://test-bucket/FOLDER/a.txt
+  echo -n "b" | aws s3 --endpoint-url "$EP" cp - s3://test-bucket/FOLDER/sub/b.txt
+  aws s3 --endpoint-url "$EP" ls s3://test-bucket/ | grep -q "PRE FOLDER/" &&
+  aws s3 --endpoint-url "$EP" rm s3://test-bucket/FOLDER/ --recursive &&
+  out=$(aws s3 --endpoint-url "$EP" ls s3://test-bucket/) &&
+  ! echo "$out" | grep -q "PRE FOLDER/"
+'
+
 # Metadata operations
 run_test "PutObjectWithMetadata" sh -c '
   EP="'"$ENDPOINT"'"
