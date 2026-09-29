@@ -419,6 +419,8 @@ func (s *StorageTestSuite) TestS2TestList() {
 
 	err = s2test.TestStorageList(ctx, strg, "cc", "cc/c1.txt", "cc/c2.txt")
 	s.Require().NoError(err)
+
+	s.Require().NoError(s2test.TestStorageListDefaultPage(ctx, strg))
 }
 
 // TestListStartAfter covers the emulated start-after: the backend pages from

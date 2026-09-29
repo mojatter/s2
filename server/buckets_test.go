@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mojatter/s2"
+	"github.com/mojatter/s2/s2test"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -110,6 +111,23 @@ func (s *BucketsTestSuite) TestCreateAndNames() {
 	s.Len(names, 2)
 	s.Contains(names, "alpha")
 	s.Contains(names, "beta")
+}
+
+// Names follows NextAfter, so a root holding more buckets than one backend page lists them all.
+func (s *BucketsTestSuite) TestNamesPages() {
+	pages := map[string]s2.ListResult{
+		"":   {CommonPrefixes: []string{"alpha", bucketStateDir}, NextAfter: "p2"},
+		"p2": {CommonPrefixes: []string{"beta"}},
+	}
+	bs := &Buckets{strg: &s2test.StorageDelegator{
+		ListFunc: func(_ context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+			return pages[opts.After], nil
+		},
+	}}
+
+	names, err := bs.Names(context.Background())
+	s.Require().NoError(err)
+	s.Equal([]string{"alpha", "beta"}, names)
 }
 
 func (s *BucketsTestSuite) TestExists() {

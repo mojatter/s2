@@ -375,6 +375,8 @@ func (s *StorageTestSuite) TestS2TestList() {
 
 	err = s2test.TestStorageList(ctx, strg, "cc", "cc/c1.txt", "cc/c2.txt")
 	s.Require().NoError(err)
+
+	s.Require().NoError(s2test.TestStorageListDefaultPage(ctx, strg))
 }
 
 // TestListCursorMapping pins which ListObjectsV2 parameter each cursor field

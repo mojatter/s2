@@ -312,6 +312,51 @@ func TestSearchPagesTheFolder(t *testing.T) {
 	require.Contains(t, w.Body.String(), ".hit.txt")
 }
 
+// TestListTruncatedNotice checks the console says so when a listing stops at a backend page, rather than cutting it silently.
+func TestListTruncatedNotice(t *testing.T) {
+	testCases := []struct {
+		caseName   string
+		key        string
+		count      int
+		url        string
+		wantNotice string
+	}{
+		{caseName: "small folder", key: "k%04d", count: 10, url: "/buckets/b"},
+		{caseName: "folder past one page", key: "k%04d", count: 1001, url: "/buckets/b", wantNotice: "there may be more entries."},
+		{caseName: "search past one page", key: "k%04d", count: 1001, url: "/buckets/b?search=k", wantNotice: "more objects may match."},
+		// A term the storage refuses as a prefix scans the folder, up to maxSearchFetches pages.
+		{caseName: "refused term past the scan", key: ".d%05d", count: maxSearchFetches*1000 + 1, url: "/buckets/b?search=.", wantNotice: "more objects may match."},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			ctx := context.Background()
+			cfg := server.DefaultConfig()
+			cfg.Type = s2.TypeMemFS
+			srv, err := server.NewServer(ctx, cfg)
+			require.NoError(t, err)
+			require.NoError(t, srv.Buckets.Create(ctx, "b"))
+			strg, err := srv.Buckets.Get(ctx, "b")
+			require.NoError(t, err)
+			for i := range tc.count {
+				require.NoError(t, strg.Put(ctx, s2.NewObjectBytes(fmt.Sprintf(tc.key, i), []byte("x"))))
+			}
+
+			req := httptest.NewRequest("GET", tc.url, nil)
+			req.SetPathValue("name", "b")
+			req.Header.Set("HX-Request", "true")
+			w := httptest.NewRecorder()
+			handleObjects(srv, w, req)
+
+			require.Equal(t, http.StatusOK, w.Code)
+			if tc.wantNotice == "" {
+				require.NotContains(t, w.Body.String(), "list-truncated")
+				return
+			}
+			require.Contains(t, w.Body.String(), tc.wantNotice)
+		})
+	}
+}
+
 // --- POST /buckets/{name}/folders ---
 
 func (s *ObjectsTestSuite) TestHandleCreateFolder() {

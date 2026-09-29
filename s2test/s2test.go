@@ -317,6 +317,38 @@ func TestStorageListPaging(ctx context.Context, strg s2.Storage) error {
 	return TestStorageListRecursive(ctx, sub, "a.txt", "b.txt", "c.txt", "d.txt", "sub/e.txt")
 }
 
+// TestStorageListDefaultPage validates that a zero Limit returns a page with a NextAfter when more entries follow, never a silent cut.
+func TestStorageListDefaultPage(ctx context.Context, strg s2.Storage) error {
+	const dir, n = "s2test-defaultpage", 1001
+	defer func() { _ = strg.DeleteRecursive(ctx, dir+"/") }()
+
+	for i := range n {
+		name := fmt.Sprintf("%s/k%04d", dir, i)
+		if err := strg.Put(ctx, s2.NewObjectBytes(name, []byte("x"))); err != nil {
+			return fmt.Errorf("Put(%q) failed: %w", name, err)
+		}
+	}
+
+	for _, recursive := range []bool{false, true} {
+		got := 0
+		for after := ""; ; {
+			res, err := strg.List(ctx, s2.ListOptions{Prefix: dir + "/", After: after, Recursive: recursive})
+			if err != nil {
+				return fmt.Errorf("List(prefix=%q, recursive=%v) failed: %w", dir+"/", recursive, err)
+			}
+			got += len(res.Objects)
+			if res.NextAfter == "" {
+				break
+			}
+			after = res.NextAfter
+		}
+		if got != n {
+			return fmt.Errorf("List(prefix=%q, recursive=%v) with zero Limit reached %d objects through NextAfter, want %d", dir+"/", recursive, got, n)
+		}
+	}
+	return nil
+}
+
 // TestStorageGetPut validates that Put writes an object and Get reads it back with its metadata, Content-Type and ETag.
 func TestStorageGetPut(ctx context.Context, strg s2.Storage, opts ...Option) error {
 	o := newOptions(opts)
