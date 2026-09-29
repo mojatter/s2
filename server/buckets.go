@@ -131,6 +131,9 @@ func (bs *Buckets) Names(ctx context.Context) ([]string, error) {
 		if res.NextAfter == "" {
 			return names, nil
 		}
+		if res.NextAfter == after {
+			return nil, fmt.Errorf("storage returned a list token that does not advance: %q", after)
+		}
 		after = res.NextAfter
 	}
 }

@@ -340,6 +340,9 @@ func TestStorageListDefaultPage(ctx context.Context, strg s2.Storage) error {
 			if res.NextAfter == "" {
 				break
 			}
+			if res.NextAfter == after {
+				return fmt.Errorf("List(prefix=%q, recursive=%v) returned a NextAfter that does not advance: %q", dir+"/", recursive, after)
+			}
 			after = res.NextAfter
 		}
 		if got != n {

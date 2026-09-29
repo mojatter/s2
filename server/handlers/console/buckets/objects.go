@@ -324,12 +324,15 @@ func searchFolder(ctx context.Context, strg s2.Storage, folder, listPrefix strin
 		if n := len(res.Objects); n > 0 && pastSearchRange(res.Objects[n-1].Name(), listPrefix) {
 			return out, nil
 		}
-		if res.NextAfter == "" || res.NextAfter == after {
+		if res.NextAfter == "" {
 			return out, nil
+		}
+		if res.NextAfter == after {
+			break
 		}
 		after = res.NextAfter
 	}
-	// Out of fetches with keys left: say so, as a single page does.
+	// Keys left unread: say so, as a single page does.
 	out.NextAfter = after
 	return out, nil
 }

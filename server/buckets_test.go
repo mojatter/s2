@@ -113,21 +113,48 @@ func (s *BucketsTestSuite) TestCreateAndNames() {
 	s.Contains(names, "beta")
 }
 
-// Names follows NextAfter, so a root holding more buckets than one backend page lists them all.
+// Names follows NextAfter across pages and fails instead of looping when the token does not advance.
 func (s *BucketsTestSuite) TestNamesPages() {
-	pages := map[string]s2.ListResult{
-		"":   {CommonPrefixes: []string{"alpha", bucketStateDir}, NextAfter: "p2"},
-		"p2": {CommonPrefixes: []string{"beta"}},
-	}
-	bs := &Buckets{strg: &s2test.StorageDelegator{
-		ListFunc: func(_ context.Context, opts s2.ListOptions) (s2.ListResult, error) {
-			return pages[opts.After], nil
+	testCases := []struct {
+		caseName string
+		pages    map[string]s2.ListResult
+		want     []string
+		wantErr  string
+	}{
+		{
+			caseName: "two pages",
+			pages: map[string]s2.ListResult{
+				"":   {CommonPrefixes: []string{"alpha", bucketStateDir}, NextAfter: "p2"},
+				"p2": {CommonPrefixes: []string{"beta"}},
+			},
+			want: []string{"alpha", "beta"},
 		},
-	}}
+		{
+			caseName: "stuck token",
+			pages: map[string]s2.ListResult{
+				"":   {CommonPrefixes: []string{"alpha"}, NextAfter: "p2"},
+				"p2": {CommonPrefixes: []string{"alpha"}, NextAfter: "p2"},
+			},
+			wantErr: "does not advance",
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			bs := &Buckets{strg: &s2test.StorageDelegator{
+				ListFunc: func(_ context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+					return tc.pages[opts.After], nil
+				},
+			}}
 
-	names, err := bs.Names(context.Background())
-	s.Require().NoError(err)
-	s.Equal([]string{"alpha", "beta"}, names)
+			names, err := bs.Names(context.Background())
+			if tc.wantErr != "" {
+				s.ErrorContains(err, tc.wantErr)
+				return
+			}
+			s.Require().NoError(err)
+			s.Equal(tc.want, names)
+		})
+	}
 }
 
 func (s *BucketsTestSuite) TestExists() {
