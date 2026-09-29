@@ -950,6 +950,10 @@ func (s *StorageTestSuite) TestListSaysSoWhenTheRootIsNotADirectory() {
 				_, err := strg.List(context.Background(), s2.ListOptions{Recursive: recursive})
 				s.Require().Errorf(err, "recursive=%v", recursive)
 			}
+			// Reads stay errors too, not a missing key.
+			_, err := strg.Get(context.Background(), "x")
+			s.Require().Error(err)
+			s.NotErrorIs(err, s2.ErrNotExist)
 		})
 	}
 }
@@ -2135,4 +2139,83 @@ func (s *StorageTestSuite) TestMetaLegacyEdgeCases() {
 			})
 		}
 	}
+}
+
+// A path the tree cannot hold reads as no key and is refused as a write, worded without the host path.
+func (s *StorageTestSuite) TestTreeConstraints() {
+	ctx := context.Background()
+	exists := func(strg s2.Storage, name string) error {
+		ok, err := strg.Exists(ctx, name)
+		if err == nil && ok {
+			return errors.New("exists")
+		}
+		return err
+	}
+	testCases := []struct {
+		caseName string
+		act      func(strg s2.Storage) error
+		wantErr  error
+	}{
+		{caseName: "get below an object", act: func(strg s2.Storage) error { _, err := strg.Get(ctx, "a.txt/sub"); return err }, wantErr: s2.ErrNotExist},
+		{caseName: "get deeper below an object", act: func(strg s2.Storage) error { _, err := strg.Get(ctx, "dir/x.txt/sub/y"); return err }, wantErr: s2.ErrNotExist},
+		{caseName: "exists below an object", act: func(strg s2.Storage) error { return exists(strg, "a.txt/sub") }},
+		{caseName: "put metadata below an object", act: func(strg s2.Storage) error { return strg.PutMetadata(ctx, "a.txt/sub", nil) }, wantErr: s2.ErrNotExist},
+		{caseName: "delete below an object", act: func(strg s2.Storage) error { return strg.Delete(ctx, "a.txt/sub") }},
+		{caseName: "copy from below an object", act: func(strg s2.Storage) error { return strg.Copy(ctx, "a.txt/sub", "b.txt") }, wantErr: s2.ErrNotExist},
+		{caseName: "put below an object", act: func(strg s2.Storage) error { return strg.Put(ctx, s2.NewObjectBytes("a.txt/sub", []byte("x"))) }, wantErr: s2.ErrInvalidName},
+		{caseName: "put deeper below an object", act: func(strg s2.Storage) error { return strg.Put(ctx, s2.NewObjectBytes("dir/x.txt/sub/y", []byte("x"))) }, wantErr: s2.ErrInvalidName},
+		{caseName: "put over a directory", act: func(strg s2.Storage) error { return strg.Put(ctx, s2.NewObjectBytes("dir", []byte("x"))) }, wantErr: s2.ErrInvalidName},
+		{caseName: "copy over a directory", act: func(strg s2.Storage) error { return strg.Copy(ctx, "a.txt", "dir") }, wantErr: s2.ErrInvalidName},
+		{caseName: "copy below an object", act: func(strg s2.Storage) error { return strg.Copy(ctx, "dir/x.txt", "a.txt/sub") }, wantErr: s2.ErrInvalidName},
+		{caseName: "move over a directory", act: func(strg s2.Storage) error { return s2.Move(ctx, strg, "a.txt", "dir") }, wantErr: s2.ErrInvalidName},
+		{caseName: "move below an object", act: func(strg s2.Storage) error { return s2.Move(ctx, strg, "dir/x.txt", "a.txt/sub") }, wantErr: s2.ErrInvalidName},
+	}
+	fsyses := []struct {
+		caseName string
+		newFS    func() fs.FS
+	}{
+		{caseName: "memfs", newFS: func() fs.FS { return memfs.New() }},
+		{caseName: "osfs", newFS: func() fs.FS { return osfs.DirFS(s.T().TempDir()) }},
+	}
+	for _, fc := range fsyses {
+		for _, tc := range testCases {
+			s.Run(fc.caseName+"/"+tc.caseName, func() {
+				strg := NewStorageFS(s2.Config{}, fc.newFS())
+				for _, name := range []string{"a.txt", "dir/x.txt"} {
+					s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes(name, []byte("x"))))
+				}
+
+				err := tc.act(strg)
+				if tc.wantErr == nil {
+					s.Require().NoError(err)
+				} else {
+					s.Require().ErrorIs(err, tc.wantErr)
+					s.NotContains(err.Error(), filepath.Clean(os.TempDir()))
+				}
+				for _, name := range []string{"a.txt", "dir/x.txt"} {
+					_, err := strg.Get(ctx, name)
+					s.NoErrorf(err, "%s after the refused call", name)
+				}
+			})
+		}
+	}
+}
+
+// A delete the tree refuses for another reason, such as permissions, stays an error.
+func (s *StorageTestSuite) TestDeleteKeepsPermissionErrors() {
+	if os.Getuid() == 0 {
+		s.T().Skip("root ignores directory permissions")
+	}
+	ctx := context.Background()
+	root := s.T().TempDir()
+	strg := NewStorageFS(s2.Config{}, osfs.DirFS(root))
+	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("dir/x.txt", []byte("x"))))
+	dir := filepath.Join(root, "dir")
+	s.Require().NoError(os.Chmod(dir, 0o555))
+	s.T().Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	err := strg.Delete(ctx, "dir/x.txt")
+	s.Require().ErrorIs(err, fs.ErrPermission)
+	_, err = strg.Get(ctx, "dir/x.txt")
+	s.NoError(err)
 }

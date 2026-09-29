@@ -1734,6 +1734,45 @@ func (s *ObjectsTestSuite) TestCopyObject() {
 	})
 }
 
+// --- Tree constraints ---
+
+// A key the fs tree cannot hold answers as S3 would for a read, and 400 rather than 500 for a write.
+func (s *ObjectsTestSuite) TestTreeConstraintStatus() {
+	s.putObject("tree", "a.txt", "a")
+	s.putObject("tree", "dir/x.txt", "x")
+	ts := httptest.NewServer(s.server.S3Handler())
+	defer ts.Close()
+
+	testCases := []struct {
+		caseName   string
+		method     string
+		target     string
+		copySource string
+		wantStatus int
+	}{
+		{caseName: "get below an object", method: "GET", target: "/tree/a.txt/sub", wantStatus: http.StatusNotFound},
+		{caseName: "head below an object", method: "HEAD", target: "/tree/a.txt/sub", wantStatus: http.StatusNotFound},
+		{caseName: "delete below an object", method: "DELETE", target: "/tree/a.txt/sub", wantStatus: http.StatusNoContent},
+		{caseName: "put below an object", method: "PUT", target: "/tree/a.txt/sub", wantStatus: http.StatusBadRequest},
+		{caseName: "put over a directory", method: "PUT", target: "/tree/dir", wantStatus: http.StatusBadRequest},
+		{caseName: "copy over a directory", method: "PUT", target: "/tree/dir", copySource: "/tree/a.txt", wantStatus: http.StatusBadRequest},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			req, err := http.NewRequest(tc.method, ts.URL+tc.target, strings.NewReader(""))
+			s.Require().NoError(err)
+			if tc.copySource != "" {
+				req.Header.Set("x-amz-copy-source", tc.copySource)
+			}
+			resp, err := ts.Client().Do(req)
+			s.Require().NoError(err)
+			defer func() { _ = resp.Body.Close() }()
+
+			s.Equal(tc.wantStatus, resp.StatusCode)
+		})
+	}
+}
+
 // --- DeleteObject ---
 
 func (s *ObjectsTestSuite) TestDeleteObject() {
