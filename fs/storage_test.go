@@ -56,6 +56,41 @@ func (g *goneStatFS) Stat(name string) (fs.FileInfo, error) {
 	return fs.Stat(g.FS, name)
 }
 
+// vanishFS lists a file and a directory in every ReadDir that are gone by the time they are read.
+type vanishFS struct {
+	fs.FS
+}
+
+func (v *vanishFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	if path.Base(name) == "gone-dir" {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fs.ErrNotExist}
+	}
+	entries, err := fs.ReadDir(v.FS, name)
+	if err != nil {
+		return nil, err
+	}
+	entries = append(entries, goneEntry{name: "gone-dir", dir: true}, goneEntry{name: "gone.txt"})
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	return entries, nil
+}
+
+type goneEntry struct {
+	name string
+	dir  bool
+}
+
+func (e goneEntry) Name() string { return e.name }
+func (e goneEntry) IsDir() bool  { return e.dir }
+func (e goneEntry) Type() fs.FileMode {
+	if e.dir {
+		return fs.ModeDir
+	}
+	return 0
+}
+func (e goneEntry) Info() (fs.FileInfo, error) {
+	return nil, &fs.PathError{Op: "lstat", Path: e.name, Err: fs.ErrNotExist}
+}
+
 type StorageTestSuite struct {
 	suite.Suite
 }
@@ -699,6 +734,112 @@ func (s *StorageTestSuite) TestDelete() {
 	}
 }
 
+// Removing an object prunes the directories it leaves empty, with their .meta, and nothing else.
+func (s *StorageTestSuite) TestDeletePrunesEmptyDirs() {
+	ctx := context.Background()
+	testCases := []struct {
+		caseName string
+		puts     []string
+		// raws are files made around the storage, such as by an older s2.
+		raws     []string
+		remove   func(strg s2.Storage) error
+		wantLeft []string
+	}{
+		{
+			caseName: "last object",
+			puts:     []string{"a/b/c.txt"},
+			remove:   func(strg s2.Storage) error { return strg.Delete(ctx, "a/b/c.txt") },
+		},
+		{
+			caseName: "a sibling keeps the parent",
+			puts:     []string{"a/x.txt", "a/b/c.txt"},
+			remove:   func(strg s2.Storage) error { return strg.Delete(ctx, "a/b/c.txt") },
+			wantLeft: []string{"a", "a/.meta", "a/.meta/x.txt", "a/x.txt"},
+		},
+		{
+			caseName: "a folder marker keeps the folder",
+			puts:     []string{"a/.keep", "a/b/c.txt"},
+			remove:   func(strg s2.Storage) error { return strg.Delete(ctx, "a/b/c.txt") },
+			wantLeft: []string{"a", "a/.keep", "a/.meta", "a/.meta/.keep"},
+		},
+		{
+			caseName: "a .meta file is a key, not a directory to prune",
+			puts:     []string{"a/b/c.txt"},
+			raws:     []string{"a/.meta"},
+			remove:   func(strg s2.Storage) error { return strg.Delete(ctx, "a/b/c.txt") },
+			wantLeft: []string{"a", "a/.meta"},
+		},
+		{
+			caseName: "missing key",
+			raws:     []string{"a/x.txt"},
+			remove:   func(strg s2.Storage) error { return strg.Delete(ctx, "a/b/c.txt") },
+			wantLeft: []string{"a", "a/x.txt"},
+		},
+		{
+			caseName: "delete recursive",
+			puts:     []string{"a/b/c.txt", "a/b/d/e.txt"},
+			remove:   func(strg s2.Storage) error { return strg.DeleteRecursive(ctx, "a/b/") },
+		},
+		{
+			caseName: "delete recursive keeps a non-empty parent",
+			puts:     []string{"a/x.txt", "a/b/c.txt"},
+			remove:   func(strg s2.Storage) error { return strg.DeleteRecursive(ctx, "a/b/") },
+			wantLeft: []string{"a", "a/.meta", "a/.meta/x.txt", "a/x.txt"},
+		},
+		{
+			caseName: "through a Sub, its root stays",
+			puts:     []string{"a/b/c.txt"},
+			remove: func(strg s2.Storage) error {
+				sub, err := strg.Sub(ctx, "a")
+				if err != nil {
+					return err
+				}
+				return sub.Delete(ctx, "b/c.txt")
+			},
+			wantLeft: []string{"a"},
+		},
+		{
+			caseName: "move",
+			puts:     []string{"a/b/c.txt"},
+			remove:   func(strg s2.Storage) error { return s2.Move(ctx, strg, "a/b/c.txt", "d.txt") },
+			wantLeft: []string{".meta", ".meta/d.txt", "d.txt"},
+		},
+	}
+	fsyses := []struct {
+		caseName string
+		newFS    func() fs.FS
+	}{
+		{caseName: "memfs", newFS: func() fs.FS { return memfs.New() }},
+		{caseName: "osfs", newFS: func() fs.FS { return osfs.DirFS(s.T().TempDir()) }},
+	}
+	for _, fc := range fsyses {
+		for _, tc := range testCases {
+			s.Run(fc.caseName+"/"+tc.caseName, func() {
+				fsys := fc.newFS()
+				strg := NewStorageFS(s2.Config{}, fsys)
+				for _, name := range tc.puts {
+					s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes(name, []byte("x"))))
+				}
+				for _, name := range tc.raws {
+					_, err := wfs.WriteFile(fsys, name, []byte("x"), fs.ModePerm)
+					s.Require().NoError(err)
+				}
+
+				s.Require().NoError(tc.remove(strg))
+
+				var left []string
+				s.Require().NoError(fs.WalkDir(fsys, ".", func(name string, _ fs.DirEntry, err error) error {
+					if name != "." {
+						left = append(left, name)
+					}
+					return err
+				}))
+				s.Equal(tc.wantLeft, left)
+			})
+		}
+	}
+}
+
 func (s *StorageTestSuite) TestDeleteRecursive() {
 	testCases := []struct {
 		caseName string
@@ -823,6 +964,54 @@ func (s *StorageTestSuite) TestListWhenTheObjectVanishesMidWalk() {
 	res, err := strg.List(ctx, s2.ListOptions{Prefix: "a.txt/sub"})
 	s.Require().NoError(err)
 	s.Empty(res.Objects)
+}
+
+// An entry deleted after its directory was read is skipped, as a concurrent Delete prunes directories.
+func (s *StorageTestSuite) TestListSkipsVanishedEntries() {
+	ctx := context.Background()
+	testCases := []struct {
+		caseName string
+		opts     s2.ListOptions
+		want     []string
+	}{
+		{caseName: "flat", opts: s2.ListOptions{Prefix: "a/"}, want: []string{"a/x.txt"}},
+		{caseName: "recursive", opts: s2.ListOptions{Recursive: true}, want: []string{"a/b/y.txt", "a/x.txt"}},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			fsys := memfs.New()
+			base := NewStorageFS(s2.Config{}, fsys)
+			for _, name := range []string{"a/x.txt", "a/b/y.txt"} {
+				s.Require().NoError(base.Put(ctx, s2.NewObjectBytes(name, []byte("x"))))
+			}
+			strg := NewStorageFS(s2.Config{}, &vanishFS{FS: fsys})
+
+			res, err := strg.List(ctx, tc.opts)
+			s.Require().NoError(err)
+			var got []string
+			for _, obj := range res.Objects {
+				got = append(got, obj.Name())
+			}
+			s.Equal(tc.want, got)
+		})
+	}
+}
+
+// A Sub whose root a Delete through its parent pruned lists as empty, recursive as well as flat.
+func (s *StorageTestSuite) TestListOfPrunedSubRoot() {
+	ctx := context.Background()
+	for _, fsys := range []fs.FS{memfs.New(), osfs.DirFS(s.T().TempDir())} {
+		root := NewStorageFS(s2.Config{}, fsys)
+		sub, err := root.Sub(ctx, "users/42/")
+		s.Require().NoError(err)
+		s.Require().NoError(root.Put(ctx, s2.NewObjectBytes("users/42/x.txt", []byte("x"))))
+		s.Require().NoError(root.Delete(ctx, "users/42/x.txt"))
+		for _, recursive := range []bool{false, true} {
+			res, err := sub.List(ctx, s2.ListOptions{Recursive: recursive})
+			s.NoError(err)
+			s.Empty(res.Objects)
+		}
+	}
 }
 
 // Emptying a Sub takes its sidecars with it: they live inside it, so nothing
