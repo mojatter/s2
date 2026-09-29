@@ -130,6 +130,13 @@ func (s *BucketsTestSuite) TestNamesPages() {
 			want: []string{"alpha", "beta"},
 		},
 		{
+			caseName: "trailing slash, as s3, gcs and azblob list",
+			pages: map[string]s2.ListResult{
+				"": {CommonPrefixes: []string{"alpha/", bucketStateDir + "/"}},
+			},
+			want: []string{"alpha"},
+		},
+		{
 			caseName: "stuck token",
 			pages: map[string]s2.ListResult{
 				"":   {CommonPrefixes: []string{"alpha"}, NextAfter: "p2"},

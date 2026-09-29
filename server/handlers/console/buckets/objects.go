@@ -60,7 +60,10 @@ func objectsData(ctx context.Context, s *server.Server, bucket, prefix, search s
 			return nil, err
 		}
 		objs = server.FilterKeep(res.Objects)
-		prefixes = res.CommonPrefixes
+		// Cloud backends end a common prefix in "/" (#315); the template adds its own.
+		for _, p := range res.CommonPrefixes {
+			prefixes = append(prefixes, strings.TrimSuffix(p, "/"))
+		}
 		truncated = res.NextAfter != ""
 	}
 
