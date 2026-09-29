@@ -151,15 +151,22 @@ func (s *StorageTestSuite) TestType() {
 }
 
 func (s *StorageTestSuite) testMemFS() fs.FS {
+	return s.fillTestFS(memfs.New())
+}
+
+func (s *StorageTestSuite) testOSFS() fs.FS {
+	return s.fillTestFS(osfs.DirFS(s.T().TempDir()))
+}
+
+func (s *StorageTestSuite) fillTestFS(fsys fs.FS) fs.FS {
 	files := map[string][]byte{
 		"a.txt":     []byte("a"),
 		"b.txt":     []byte("b"),
 		"cc/c1.txt": []byte("c1"),
 		"cc/c2.txt": []byte("c2"),
 	}
-	fsys := memfs.New()
 	for name, b := range files {
-		_, err := fsys.WriteFile(name, b, fs.ModePerm)
+		_, err := wfs.WriteFile(fsys, name, b, fs.ModePerm)
 		s.Require().NoError(err)
 	}
 	return fsys
@@ -857,6 +864,20 @@ func (s *StorageTestSuite) TestDeleteRecursive() {
 			ctx:      context.Background(),
 			prefix:   "c",
 			wantLeft: []string{"a.txt", "b.txt"},
+		},
+		{
+			caseName: "memfs object named like the prefix",
+			strg:     &storage{fsys: s.testMemFS()},
+			ctx:      context.Background(),
+			prefix:   "a.txt/",
+			wantLeft: []string{"a.txt", "b.txt", "cc/c1.txt", "cc/c2.txt"},
+		},
+		{
+			caseName: "osfs object named like the prefix",
+			strg:     &storage{fsys: s.testOSFS()},
+			ctx:      context.Background(),
+			prefix:   "a.txt/",
+			wantLeft: []string{"a.txt", "b.txt", "cc/c1.txt", "cc/c2.txt"},
 		},
 	}
 	for _, tc := range testCases {

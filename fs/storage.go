@@ -643,7 +643,7 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 			}
 			return fs.SkipDir
 		}
-		if prefix != "" && !strings.HasPrefix(name, prefix) && name != dirName {
+		if prefix != "" && !strings.HasPrefix(name, prefix) && (name != dirName || !d.IsDir()) {
 			return nil
 		}
 		if d.IsDir() {

@@ -739,6 +739,19 @@ func TestStorageDelete(ctx context.Context, strg s2.Storage) error {
 	}
 	_ = strg.Delete(ctx, sibling)
 
+	// A trailing-slash prefix does not select the object named without it.
+	object := "s2test-delobj"
+	if err := strg.Put(ctx, s2.NewObjectBytes(object, []byte("x"))); err != nil {
+		return fmt.Errorf("Put(%q) failed: %w", object, err)
+	}
+	if err := strg.DeleteRecursive(ctx, object+"/"); err != nil {
+		errorf("DeleteRecursive(%q) failed: %v", object+"/", err)
+	}
+	if ok, _ := strg.Exists(ctx, object); !ok {
+		errorf("DeleteRecursive(%q) removed the object %q", object+"/", object)
+	}
+	_ = strg.Delete(ctx, object)
+
 	// A prefix goes away with its last object, by Delete or by Move, as on S3.
 	parent := "s2test-delprefix"
 	for _, f := range []string{"keep.txt", "gone/a.txt", "gone/sub/b.txt", "kept/c.txt", "kept/sub/d.txt"} {
