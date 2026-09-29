@@ -187,7 +187,7 @@ func pastSubtree(dir, after string) bool {
 }
 
 // belowObject reports whether dir is an object or lies under one, which is why
-// reading it as a directory failed. The walk bottoms out at the storage root.
+// reading it failed. The walk bottoms out at the storage root.
 func belowObject(fsys fs.FS, dir string) bool {
 	for dir != "." {
 		info, err := fs.Stat(fsys, dir)
@@ -203,6 +203,23 @@ func belowObject(fsys fs.FS, dir string) bool {
 	return false
 }
 
+// noKey reports whether err, from reading under dir, means the tree holds no key there.
+func (s *storage) noKey(dir string, err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || belowObject(s.fsys, dir)
+}
+
+// checkTree refuses a write the tree cannot hold: a key cannot be both an object and a directory, nor sit under an object.
+func (s *storage) checkTree(name string) error {
+	info, err := fs.Stat(s.fsys, name)
+	switch {
+	case err == nil && info.IsDir():
+		return fmt.Errorf("%w: %s is a directory", s2.ErrInvalidName, name)
+	case err != nil && !errors.Is(err, fs.ErrNotExist) && belowObject(s.fsys, path.Dir(name)):
+		return fmt.Errorf("%w: %s lies under an object", s2.ErrInvalidName, name)
+	}
+	return nil
+}
+
 func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, error) {
 	// Normalize prefix into a directory path acceptable to fs.ReadDir.
 	// S3 callers commonly pass a trailing slash (e.g. "dir/"), which fs.ValidPath rejects.
@@ -214,7 +231,7 @@ func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, erro
 	if err != nil {
 		// A prefix that selects nothing is not an error in S3 semantics: it
 		// may name no entry at all, or an object, which holds no key below it.
-		if errors.Is(err, fs.ErrNotExist) || belowObject(s.fsys, dir) {
+		if s.noKey(dir, err) {
 			return s2.ListResult{}, nil
 		}
 		return s2.ListResult{}, fmt.Errorf("failed to read dir: %w", err)
@@ -333,7 +350,7 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 func (s *storage) get(name string) (*object, error) {
 	info, err := fs.Stat(s.fsys, name)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if s.noKey(path.Dir(name), err) {
 			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, name)
 		}
 		return nil, fmt.Errorf("failed to stat: %w", err)
@@ -361,7 +378,7 @@ func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
 	}
 	_, err := fs.Stat(s.fsys, name)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if s.noKey(path.Dir(name), err) {
 			return false, nil
 		}
 		return false, fmt.Errorf("failed to stat: %w", err)
@@ -379,6 +396,9 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 // Upload implements s2.Uploader. The ETag is the body MD5 this call computes.
 func (s *storage) Upload(_ context.Context, obj s2.Object, _ s2.UploadOptions) (s2.UploadResult, error) {
 	if err := validateName(obj.Name()); err != nil {
+		return s2.UploadResult{}, err
+	}
+	if err := s.checkTree(obj.Name()); err != nil {
 		return s2.UploadResult{}, err
 	}
 	rc, err := obj.Open()
@@ -443,6 +463,9 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 	if err != nil {
 		return err
 	}
+	if err := s.checkTree(dst); err != nil {
+		return err
+	}
 	rc, err := srcObj.Open()
 	if err != nil {
 		return err
@@ -471,6 +494,9 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 	// avoids reading the object body twice.
 	if _, ok := s.fsys.(wfs.RenameFS); ok {
 		if _, err := s.Get(ctx, src); err != nil {
+			return err
+		}
+		if err := s.checkTree(dst); err != nil {
 			return err
 		}
 		srcMeta, hasMeta, err := s.findMeta(src)
@@ -589,7 +615,7 @@ func (s *storage) delete(name string) error {
 	// Ignore metadata deletion errors (file may not have metadata)
 	_ = wfs.RemoveFile(s.fsys, metaPath(name))
 	removeLegacyMeta(s.fsys, name)
-	if err := wfs.RemoveFile(s.fsys, name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := wfs.RemoveFile(s.fsys, name); err != nil && !s.noKey(path.Dir(name), err) {
 		return fmt.Errorf("failed to delete %q: %w", name, err)
 	}
 	return nil
