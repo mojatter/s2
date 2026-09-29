@@ -31,8 +31,9 @@ func objectsData(ctx context.Context, s *server.Server, bucket, prefix, search s
 	}
 
 	var (
-		objs     []s2.Object
-		prefixes []string
+		objs      []s2.Object
+		prefixes  []string
+		truncated bool
 	)
 	if search != "" {
 		folder := ""
@@ -52,6 +53,7 @@ func objectsData(ctx context.Context, s *server.Server, bucket, prefix, search s
 			return nil, err
 		}
 		objs = server.FilterKeep(res.Objects)
+		truncated = res.NextAfter != ""
 	} else {
 		res, err := strg.List(ctx, s2.ListOptions{Prefix: prefix})
 		if err != nil {
@@ -59,6 +61,7 @@ func objectsData(ctx context.Context, s *server.Server, bucket, prefix, search s
 		}
 		objs = server.FilterKeep(res.Objects)
 		prefixes = res.CommonPrefixes
+		truncated = res.NextAfter != ""
 	}
 
 	var breadcrumbs []Breadcrumb
@@ -93,6 +96,7 @@ func objectsData(ctx context.Context, s *server.Server, bucket, prefix, search s
 		"Breadcrumbs":   breadcrumbs,
 		"HasParent":     prefix != "" && prefix != "/",
 		"Search":        search,
+		"Truncated":     truncated,
 	}, nil
 }
 
@@ -318,13 +322,18 @@ func searchFolder(ctx context.Context, strg s2.Storage, folder, listPrefix strin
 		}
 		// Names come back sorted, so nothing beyond the term's range matches.
 		if n := len(res.Objects); n > 0 && pastSearchRange(res.Objects[n-1].Name(), listPrefix) {
-			break
+			return out, nil
 		}
-		if res.NextAfter == "" || res.NextAfter == after {
+		if res.NextAfter == "" {
+			return out, nil
+		}
+		if res.NextAfter == after {
 			break
 		}
 		after = res.NextAfter
 	}
+	// Keys left unread: say so, as a single page does.
+	out.NextAfter = after
 	return out, nil
 }
 

@@ -658,6 +658,12 @@ tr:hover td {
   gap: 1rem;
 }
 
+.list-truncated {
+  margin: 0 0 1rem;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
 .table-controls-left {
   display: flex;
   align-items: center;

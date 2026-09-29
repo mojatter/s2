@@ -14,8 +14,8 @@ var (
 
 // ListOptions controls a Storage.List call.
 //
-// All fields are optional. The zero value lists the entire flat namespace
-// of the storage.
+// All fields are optional. The zero value lists the first page of the
+// storage's flat namespace.
 type ListOptions struct {
 	// Prefix restricts the listing to objects whose names begin with Prefix
 	// when Recursive is true. A non-recursive listing treats it as a
@@ -31,7 +31,8 @@ type ListOptions struct {
 	// After is set.
 	StartAfter string
 	// Limit caps the number of returned entries. Backends may count
-	// CommonPrefixes toward it, as S3's max-keys does. Zero means no limit.
+	// CommonPrefixes toward it, as S3's max-keys does. Zero means the
+	// backend's default page size; follow NextAfter for the rest.
 	Limit int
 	// Recursive, when true, walks subdirectories and returns no
 	// CommonPrefixes; when false, the listing stops at the first "/" past

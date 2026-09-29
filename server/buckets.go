@@ -116,18 +116,26 @@ func isValidBucketName(name string) bool {
 }
 
 func (bs *Buckets) Names(ctx context.Context) ([]string, error) {
-	res, err := bs.strg.List(ctx, s2.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(res.CommonPrefixes))
-	for _, name := range res.CommonPrefixes {
-		if isHiddenBucketEntry(name) {
-			continue
+	var names []string
+	for after := ""; ; {
+		res, err := bs.strg.List(ctx, s2.ListOptions{After: after})
+		if err != nil {
+			return nil, err
 		}
-		names = append(names, name)
+		for _, name := range res.CommonPrefixes {
+			if isHiddenBucketEntry(name) {
+				continue
+			}
+			names = append(names, name)
+		}
+		if res.NextAfter == "" {
+			return names, nil
+		}
+		if res.NextAfter == after {
+			return nil, fmt.Errorf("storage returned a list token that does not advance: %q", after)
+		}
+		after = res.NextAfter
 	}
-	return names, nil
 }
 
 func (bs *Buckets) Get(ctx context.Context, name string) (s2.Storage, error) {

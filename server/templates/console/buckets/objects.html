@@ -112,6 +112,10 @@
     </div>
   </div>
 
+  {{if .Truncated}}
+  <p class="list-truncated">{{if .Search}}The search stopped at a page limit; more objects may match.{{else}}The listing stopped at a page limit; there may be more entries.{{end}}</p>
+  {{end}}
+
   <div id="list-view" class="object-table-container">
     <table>
       <thead>
