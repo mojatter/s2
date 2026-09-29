@@ -54,6 +54,11 @@ modules locally, and CI resolves them through `go.work`, so the PR is
 green before any new tag exists. Don't run `go mod tidy` on the branch
 (it fails until the tags are published); just edit the `require` lines.
 
+If the release changes data at rest, configuration, or anything an
+s2-server operator must do, the same PR adds its section to
+[docs/upgrading.md](upgrading.md); the notes in step 4 link to it.
+Corrections to an earlier release go there too, not into its notes.
+
 Merge the PR.
 
 ### 2. Tag all six, push (submodules batched, root alone)
@@ -136,6 +141,7 @@ gh release edit v0.11.1 --notes "$(cat <<'EOF'
 ## Changes
 ...
 ## Upgrading
+- s2-server operators: https://github.com/mojatter/s2/blob/main/docs/upgrading.md#v0111
 ...
 ## Full Changelog
 https://github.com/mojatter/s2/compare/v0.11.0...v0.11.1
