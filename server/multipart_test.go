@@ -635,6 +635,31 @@ func (s *MultipartStoreTestSuite) TestUploads() {
 	s.Equal("videos", byID["id2"].Bucket)
 }
 
+// slashedStorage ends each common prefix in "/", as s3, gcs and azblob list them.
+type slashedStorage struct{ s2.Storage }
+
+func (st slashedStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	res, err := st.Storage.List(ctx, opts)
+	for i, p := range res.CommonPrefixes {
+		res.CommonPrefixes[i] = p + "/"
+	}
+	return res, err
+}
+
+// Upload IDs come without the trailing slash a cloud backend lists (#315).
+func (s *MultipartStoreTestSuite) TestUploadsTrimTheTrailingSlash() {
+	ctx := context.Background()
+	base := s.newStoreAt(s2.TypeOSFS, s.T().TempDir(), 3600)
+	s.Require().NoError(base.Create(ctx, "id1", "photos", "a.jpg", 0, nil, ""))
+	ms := &MultipartStore{strg: slashedStorage{base.Storage()}, maxAge: time.Hour}
+
+	got, err := ms.Uploads(ctx)
+
+	s.Require().NoError(err)
+	s.Require().Len(got, 1)
+	s.Equal("id1", got[0].ID)
+}
+
 // A backend failure must not pass for a complete, shorter listing.
 func (s *MultipartStoreTestSuite) TestUploadsSurfacesReadFailure() {
 	want := errors.New("backend unavailable")

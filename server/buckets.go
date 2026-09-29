@@ -123,6 +123,8 @@ func (bs *Buckets) Names(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 		for _, name := range res.CommonPrefixes {
+			// Cloud backends end a common prefix in "/" (#315).
+			name = strings.TrimSuffix(name, "/")
 			if isHiddenBucketEntry(name) {
 				continue
 			}
