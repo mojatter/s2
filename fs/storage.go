@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
 	"errors"
@@ -231,7 +232,7 @@ func (s *storage) noKey(dir string, err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || belowObject(s.fsys, dir)
 }
 
-// checkTree refuses a write the tree cannot hold: a key cannot be both an object and a directory, nor sit under an object.
+// checkTree refuses a write the tree cannot hold: a key cannot be both an object and a directory, nor sit under an object. Callers hold the lock.
 func (s *storage) checkTree(name string) error {
 	info, err := fs.Stat(s.fsys, name)
 	switch {
@@ -417,11 +418,9 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 }
 
 // Upload implements s2.Uploader. The ETag is the body MD5 this call computes.
-func (s *storage) Upload(_ context.Context, obj s2.Object, _ s2.UploadOptions) (s2.UploadResult, error) {
-	if err := validateName(obj.Name()); err != nil {
-		return s2.UploadResult{}, err
-	}
-	if err := s.checkTree(obj.Name()); err != nil {
+func (s *storage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOptions) (s2.UploadResult, error) {
+	name := obj.Name()
+	if err := validateName(name); err != nil {
 		return s2.UploadResult{}, err
 	}
 	rc, err := obj.Open()
@@ -430,33 +429,126 @@ func (s *storage) Upload(_ context.Context, obj s2.Object, _ s2.UploadOptions) (
 	}
 	defer func() { _ = rc.Close() }()
 
-	if err := s.prepareMeta(obj.Name()); err != nil {
-		return s2.UploadResult{}, err
+	if _, ok := s.fsys.(wfs.RenameFS); !ok {
+		var etag string
+		err := s.locked(ctx, func() (err error) {
+			etag, err = s.uploadDirect(name, rc, meta{ContentType: obj.ContentType(), Metadata: obj.Metadata()})
+			return err
+		})
+		return s2.UploadResult{ETag: etag}, err
 	}
-	h := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
-	if err := atomicWrite(s.fsys, obj.Name(), io.TeeReader(rc, h)); err != nil {
-		return s2.UploadResult{}, err
+	var p *pending
+	err = s.locked(ctx, func() (err error) {
+		p, err = s.begin(name)
+		return err
+	})
+	var etag string
+	if err == nil {
+		etag, err = p.stream(rc, meta{ContentType: obj.ContentType(), Metadata: obj.Metadata()})
 	}
-	etag := quotedMD5(h)
-	if err := s.saveMetaForNewBody(obj.Name(), meta{
-		ETag:        etag,
-		ContentType: obj.ContentType(),
-		Metadata:    obj.Metadata(),
-	}); err != nil {
+	if err == nil {
+		err = s.locked(ctx, func() error { return s.commit(p) })
+	}
+	if err != nil {
+		s.abandon(ctx, p)
 		return s2.UploadResult{}, err
 	}
 	return s2.UploadResult{ETag: etag}, nil
 }
 
-// saveMetaForNewBody writes the sidecar of a body just written, dropping a stale one when the write fails.
-func (s *storage) saveMetaForNewBody(name string, m meta) error {
-	err := saveMeta(s.fsys, name, m)
-	if err != nil {
-		// A stale sidecar would describe the previous body; without one the ETag falls back to the synthetic form.
+// uploadDirect writes name in place for a filesystem without rename. Callers hold the lock.
+func (s *storage) uploadDirect(name string, src io.Reader, m meta) (string, error) {
+	if err := s.checkTree(name); err != nil {
+		return "", err
+	}
+	if err := s.prepareMeta(name); err != nil {
+		return "", err
+	}
+	h := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
+	if err := atomicWrite(s.fsys, name, io.TeeReader(src, h)); err != nil {
+		return "", err
+	}
+	m.ETag = quotedMD5(h)
+	if err := saveMeta(s.fsys, name, m); err != nil {
+		// A stale metadata file would describe the previous body; without one the ETag falls back to the synthetic form.
 		_ = wfs.RemoveFile(s.fsys, metaPath(name))
 		removeLegacyMeta(s.fsys, name)
+		return "", err
 	}
-	return err
+	return m.ETag, nil
+}
+
+// pending is what a writer's first section created; commit publishes it, abandon removes it.
+type pending struct {
+	name       string
+	body, meta *tempFile
+}
+
+// begin vets name and creates both temp files, returning what it created even on error. Callers hold the lock.
+func (s *storage) begin(name string) (*pending, error) {
+	if err := s.checkTree(name); err != nil {
+		return nil, err
+	}
+	if err := s.prepareMeta(name); err != nil {
+		return nil, err
+	}
+	p := &pending{name: name}
+	var err error
+	if p.body, err = createTemp(s.fsys, name); err != nil {
+		return p, err
+	}
+	p.meta, err = createTemp(s.fsys, metaPath(name))
+	return p, err
+}
+
+// stream fills the body, then the metadata file with the body's ETag, outside the lock.
+func (p *pending) stream(src io.Reader, m meta) (string, error) {
+	h := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
+	if err := p.body.write(io.TeeReader(src, h)); err != nil {
+		return "", err
+	}
+	m.ETag = quotedMD5(h)
+	data, err := encodeMeta(m)
+	if err != nil {
+		return "", err
+	}
+	return m.ETag, p.meta.write(bytes.NewReader(data))
+}
+
+// commit publishes the body, then its metadata file. Callers hold the lock.
+func (s *storage) commit(p *pending) error {
+	// A directory may have taken the name since begin.
+	if err := s.checkTree(p.name); err != nil {
+		return err
+	}
+	if err := p.body.publish(); err != nil {
+		return err
+	}
+	if err := p.meta.publish(); err != nil {
+		// A stale metadata file would describe the previous body; dropped here, as a later section could hit another writer's.
+		_ = wfs.RemoveFile(s.fsys, metaPath(p.name))
+		removeLegacyMeta(s.fsys, p.name)
+		return err
+	}
+	removeLegacyMeta(s.fsys, p.name)
+	return nil
+}
+
+// abandon removes what p left unpublished in a section of its own; a cancelled ctx may be why the write failed.
+func (s *storage) abandon(ctx context.Context, p *pending) {
+	if p == nil {
+		return
+	}
+	_ = s.locked(context.WithoutCancel(ctx), func() error {
+		if p.body != nil {
+			p.body.discard()
+		}
+		if p.meta != nil {
+			p.meta.discard()
+		}
+		pruneEmptyParents(s.fsys, p.name)
+		return nil
+	})
 }
 
 // PutMetadata replaces the user metadata and keeps the ETag and content type.
@@ -484,29 +576,57 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 			return err
 		}
 	}
+	if _, ok := s.fsys.(wfs.RenameFS); !ok {
+		return s.locked(ctx, func() error {
+			srcObj, rc, err := s.openSource(src)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = rc.Close() }()
+
+			_, err = s.uploadDirect(dst, rc, srcObj.m)
+			return err
+		})
+	}
+	// The source's metadata file and body are read in one section; the open handle keeps that body.
+	var (
+		srcObj *object
+		rc     io.ReadCloser
+		p      *pending
+	)
+	err := s.locked(ctx, func() (err error) {
+		if srcObj, rc, err = s.openSource(src); err != nil {
+			return err
+		}
+		p, err = s.begin(dst)
+		return err
+	})
+	if rc != nil {
+		defer func() { _ = rc.Close() }()
+	}
+	if err == nil {
+		_, err = p.stream(rc, srcObj.m)
+	}
+	if err == nil {
+		err = s.locked(ctx, func() error { return s.commit(p) })
+	}
+	if err != nil {
+		s.abandon(ctx, p)
+	}
+	return err
+}
+
+// openSource gets src and opens its body, so both come from one version. Callers hold the lock.
+func (s *storage) openSource(src string) (*object, io.ReadCloser, error) {
 	srcObj, err := s.get(src)
 	if err != nil {
-		return err
-	}
-	if err := s.checkTree(dst); err != nil {
-		return err
+		return nil, nil, err
 	}
 	rc, err := srcObj.Open()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	defer func() { _ = rc.Close() }()
-
-	if err := s.prepareMeta(dst); err != nil {
-		return err
-	}
-	h := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
-	if err := atomicWrite(s.fsys, dst, io.TeeReader(rc, h)); err != nil {
-		return err
-	}
-	m := srcObj.m
-	m.ETag = quotedMD5(h)
-	return s.saveMetaForNewBody(dst, m)
+	return srcObj, rc, nil
 }
 
 func (s *storage) Move(ctx context.Context, src, dst string) error {
@@ -526,7 +646,7 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 	return s.Delete(ctx, src)
 }
 
-// rename moves src and its metadata file to dst; it runs under the lock.
+// rename moves src and its metadata file to dst. Callers hold the lock.
 func (s *storage) rename(src, dst string) error {
 	if _, err := s.get(src); err != nil {
 		return err
@@ -571,7 +691,7 @@ func (s *storage) rename(src, dst string) error {
 	return nil
 }
 
-// prepareMeta makes room for name's metadata file before its body is written, so a blocked one leaves the object untouched.
+// prepareMeta makes room for name's metadata file before its body is written, so a blocked one leaves the object untouched. Callers hold the lock.
 func (s *storage) prepareMeta(name string) error {
 	p := metaPath(name)
 	if info, err := fs.Stat(s.fsys, path.Dir(p)); err == nil && !info.IsDir() {
@@ -587,7 +707,7 @@ func (s *storage) prepareMeta(name string) error {
 	return nil
 }
 
-// removeEmptyTree removes dir and the empty directories under it, deepest first; a file anywhere keeps it.
+// removeEmptyTree removes dir and the empty directories under it, deepest first; a file anywhere keeps it. Callers hold the lock.
 func removeEmptyTree(fsys fs.FS, dir string) error {
 	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
@@ -617,7 +737,7 @@ func (s *storage) findMeta(name string) (string, bool, error) {
 	return p, true, nil
 }
 
-// mkdirParent creates name's parent directory, which Rename does not.
+// mkdirParent creates name's parent directory, which Rename does not. Callers hold the lock.
 func (s *storage) mkdirParent(name string) error {
 	dir := path.Dir(name)
 	// Skip MkdirAll when the parent exists so a RenameFS without WriteFileFS still moves.
@@ -643,6 +763,7 @@ func (s *storage) Delete(ctx context.Context, name string) error {
 	})
 }
 
+// delete removes name's metadata files and body. Callers hold the lock.
 func (s *storage) delete(name string) error {
 	// Ignore metadata deletion errors (file may not have metadata)
 	_ = wfs.RemoveFile(s.fsys, metaPath(name))
