@@ -3,6 +3,7 @@ package fs
 import (
 	"bytes"
 	"context"
+	"crypto/md5" // #nosec G501 -- the ETag is an MD5
 	"errors"
 	"fmt"
 	"io"
@@ -12,9 +13,13 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
+	"testing/iotest"
 	"time"
 
 	"github.com/mojatter/s2"
@@ -22,6 +27,7 @@ import (
 	"github.com/mojatter/wfs"
 	"github.com/mojatter/wfs/memfs"
 	"github.com/mojatter/wfs/osfs"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -173,7 +179,7 @@ func (s *StorageTestSuite) fillTestFS(fsys fs.FS) fs.FS {
 }
 
 func (s *StorageTestSuite) TestS2TestList() {
-	strg := &storage{fsys: s.testMemFS()}
+	strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
 	ctx := context.Background()
 
 	err := s2test.TestStorageListRecursive(ctx, strg, "a.txt", "b.txt", "cc/c1.txt", "cc/c2.txt")
@@ -238,7 +244,7 @@ func (s *StorageTestSuite) TestList() {
 	}{
 		{
 			caseName: "typical",
-			strg:     &storage{fsys: s.testMemFS()},
+			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "",
 			limit:    10,
@@ -249,7 +255,7 @@ func (s *StorageTestSuite) TestList() {
 		},
 		{
 			caseName: "prefix",
-			strg:     &storage{fsys: s.testMemFS()},
+			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "cc",
 			limit:    10,
@@ -309,7 +315,7 @@ func (s *StorageTestSuite) TestListRecursive() {
 	}{
 		{
 			caseName: "typical",
-			strg:     &storage{fsys: s.testMemFS()},
+			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "",
 			limit:    10,
@@ -322,7 +328,7 @@ func (s *StorageTestSuite) TestListRecursive() {
 		},
 		{
 			caseName: "prefix",
-			strg:     &storage{fsys: s.testMemFS()},
+			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "c",
 			limit:    10,
@@ -333,7 +339,7 @@ func (s *StorageTestSuite) TestListRecursive() {
 		},
 		{
 			caseName: "limit",
-			strg:     &storage{fsys: s.testMemFS()},
+			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "",
 			limit:    3,
@@ -393,7 +399,7 @@ func (s *StorageTestSuite) TestListAfter() {
 	}{
 		{
 			caseName: "typical",
-			strg:     &storage{fsys: s.testMemFS()},
+			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "",
 			after:    "a.txt",
@@ -467,7 +473,7 @@ func (s *StorageTestSuite) TestListStartAfter() {
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			strg := &storage{fsys: s.testMemFS()}
+			strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
 			res, err := strg.List(context.Background(), s2.ListOptions{
 				Prefix:     tc.prefix,
 				After:      tc.after,
@@ -499,7 +505,7 @@ func (s *StorageTestSuite) TestListRecursiveAfter() {
 	}{
 		{
 			caseName: "typical",
-			strg:     &storage{fsys: s.testMemFS()},
+			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "",
 			after:    "b.txt",
@@ -535,7 +541,7 @@ func (s *StorageTestSuite) TestListNextAfter() {
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			strg := &storage{fsys: s.testMemFS()}
+			strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
 			ctx := context.Background()
 
 			// Limit: 1 forces a new page per object, so a flat listing's
@@ -579,7 +585,7 @@ func (s *StorageTestSuite) TestListRecursivePaginationOrder() {
 	_, err = fsys.WriteFile("backup/2024-01-01.log", []byte("y"), fs.ModePerm)
 	s.Require().NoError(err)
 
-	strg := &storage{fsys: fsys}
+	strg := &storage{lk: newRootLocker(), fsys: fsys}
 	ctx := context.Background()
 
 	var got []string
@@ -607,7 +613,7 @@ func (s *StorageTestSuite) TestListRecursivePaginationOrder() {
 // at the top of the WalkDir callback in ListRecursiveAfter.
 func (s *StorageTestSuite) TestListRecursiveAfter_WalkDirError() {
 	base := s.testMemFS()
-	strg := &storage{fsys: &errReadDirFS{FS: base, errorPath: "cc"}}
+	strg := &storage{lk: newRootLocker(), fsys: &errReadDirFS{FS: base, errorPath: "cc"}}
 	ctx := context.Background()
 
 	_, err := strg.List(ctx, s2.ListOptions{Limit: 10, Recursive: true})
@@ -625,13 +631,13 @@ func (s *StorageTestSuite) TestGet() {
 	}{
 		{
 			caseName: "found",
-			strg:     &storage{fsys: s.testMemFS()},
+			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			name:     "a.txt",
 		},
 		{
 			caseName: "not found",
-			strg:     &storage{fsys: s.testMemFS()},
+			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			name:     "not-found.txt",
 			wantErr:  "not exist: not-found.txt",
@@ -665,7 +671,7 @@ func (s *StorageTestSuite) TestPut() {
 	}{
 		{
 			caseName: "new-file",
-			strg:     &storage{fsys: s.testMemFS()},
+			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			obj: &s2test.BytesObject{
 				Name_:     "new.txt",
@@ -677,7 +683,7 @@ func (s *StorageTestSuite) TestPut() {
 		{
 			caseName: "empty-metadata-deletion",
 			strg: func() s2.Storage {
-				strg := &storage{fsys: s.testMemFS()}
+				strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
 				o := &s2test.BytesObject{
 					Name_:     "empty-meta.txt",
 					Data:      []byte("content"),
@@ -727,7 +733,7 @@ func (s *StorageTestSuite) TestDelete() {
 	}{
 		{
 			caseName: "typical",
-			strg:     &storage{fsys: s.testMemFS()},
+			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			name:     "a.txt",
 		},
@@ -860,21 +866,21 @@ func (s *StorageTestSuite) TestDeleteRecursive() {
 	}{
 		{
 			caseName: "typical",
-			strg:     &storage{fsys: s.testMemFS()},
+			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "c",
 			wantLeft: []string{"a.txt", "b.txt"},
 		},
 		{
 			caseName: "memfs object named like the prefix",
-			strg:     &storage{fsys: s.testMemFS()},
+			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "a.txt/",
 			wantLeft: []string{"a.txt", "b.txt", "cc/c1.txt", "cc/c2.txt"},
 		},
 		{
 			caseName: "osfs object named like the prefix",
-			strg:     &storage{fsys: s.testOSFS()},
+			strg:     &storage{lk: newRootLocker(), fsys: s.testOSFS()},
 			ctx:      context.Background(),
 			prefix:   "a.txt/",
 			wantLeft: []string{"a.txt", "b.txt", "cc/c1.txt", "cc/c2.txt"},
@@ -983,7 +989,7 @@ func (s *StorageTestSuite) TestListSaysSoWhenTheRootIsNotADirectory() {
 // select either way, so the listing is empty rather than the raw walk error.
 func (s *StorageTestSuite) TestListWhenTheObjectVanishesMidWalk() {
 	dir := s.T().TempDir()
-	base := &storage{fsys: osfs.DirFS(dir), typ: s2.TypeOSFS}
+	base := &storage{lk: newRootLocker(), fsys: osfs.DirFS(dir), typ: s2.TypeOSFS}
 	ctx := context.Background()
 	s.Require().NoError(base.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"))))
 	strg := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, &goneStatFS{FS: osfs.DirFS(dir), gonePath: "a.txt"})
@@ -1056,7 +1062,7 @@ func (s *StorageTestSuite) TestDeleteRecursiveDropsSidecars() {
 		s.Run(tc.caseName, func() {
 			ctx := context.Background()
 			fsys := tc.newFS()
-			root := &storage{fsys: fsys, typ: tc.typ}
+			root := &storage{lk: newRootLocker(), fsys: fsys, typ: tc.typ}
 			sub, err := root.Sub(ctx, "up")
 			s.Require().NoError(err)
 			s.Require().NoError(sub.Put(ctx, s2.NewObjectBytes("1", []byte("a"))))
@@ -1107,13 +1113,13 @@ func (e *errStatMemFS) Stat(name string) (fs.FileInfo, error) {
 
 // An unreadable root is reported, not dereferenced.
 func (s *StorageTestSuite) TestDeleteRecursiveUnreadableRoot() {
-	strg := &storage{fsys: &errStatMemFS{memfs.New()}}
+	strg := &storage{lk: newRootLocker(), fsys: &errStatMemFS{memfs.New()}}
 
 	s.ErrorIs(strg.DeleteRecursive(context.Background(), ""), fs.ErrPermission)
 }
 
 func (s *StorageTestSuite) TestSub() {
-	strg := &storage{fsys: s.testMemFS(), typ: s2.TypeMemFS}
+	strg := &storage{lk: newRootLocker(), fsys: s.testMemFS(), typ: s2.TypeMemFS}
 
 	s.Run("typical", func() {
 		sub, err := strg.Sub(context.Background(), "cc")
@@ -1150,7 +1156,7 @@ func (s *StorageTestSuite) TestSub() {
 	// is that directory, and memfs reports its name as ".meta".
 	s.Run("the metadata directory", func() {
 		ctx := context.Background()
-		root := &storage{fsys: memfs.New(), typ: s2.TypeMemFS}
+		root := &storage{lk: newRootLocker(), fsys: memfs.New(), typ: s2.TypeMemFS}
 		s.Require().NoError(root.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"))))
 
 		_, err := root.Sub(ctx, ".meta")
@@ -1179,7 +1185,7 @@ func (s *StorageTestSuite) TestSub() {
 }
 
 func (s *StorageTestSuite) TestExists() {
-	strg := &storage{fsys: s.testMemFS()}
+	strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
 
 	testCases := []struct {
 		caseName string
@@ -1271,7 +1277,7 @@ func (s *StorageTestSuite) TestSidecarWriteFails() {
 				s.Require().NoError(mem.RemoveFile(metaPath(tc.name)))
 			}
 			s.Require().NoError(seed.Put(ctx, s2.NewObjectBytes("src.txt", []byte("new body"), s2.WithContentType("text/csv"))))
-			strg := &storage{fsys: &errMetaRenameMemFS{mem}}
+			strg := &storage{lk: newRootLocker(), fsys: &errMetaRenameMemFS{mem}}
 
 			s.ErrorIs(tc.write(ctx, strg, tc.name), fs.ErrPermission)
 
@@ -1284,7 +1290,7 @@ func (s *StorageTestSuite) TestSidecarWriteFails() {
 }
 
 func (s *StorageTestSuite) TestPutMetadata() {
-	strg := &storage{fsys: s.testMemFS()}
+	strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
 	ctx := context.Background()
 
 	s.Run("typical", func() {
@@ -1305,7 +1311,7 @@ func (s *StorageTestSuite) TestPutMetadata() {
 }
 
 func (s *StorageTestSuite) TestCopy() {
-	strg := &storage{fsys: s.testMemFS()}
+	strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
 	ctx := context.Background()
 
 	s.Run("typical", func() {
@@ -1328,7 +1334,7 @@ func (s *StorageTestSuite) TestCopy() {
 }
 
 func (s *StorageTestSuite) TestMove() {
-	strg := &storage{fsys: s.testMemFS()}
+	strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
 	ctx := context.Background()
 
 	err := strg.Move(ctx, "a.txt", "moved.txt")
@@ -1369,7 +1375,7 @@ func (s *StorageTestSuite) TestMoveNestedDst() {
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
 			fsys := tc.fsys()
-			strg := &storage{fsys: fsys}
+			strg := &storage{lk: newRootLocker(), fsys: fsys}
 			ctx := context.Background()
 			src, dst := "a.txt", "dir/sub/a.txt"
 			if tc.staleDst {
@@ -1423,10 +1429,10 @@ func (r *renameOnlyFS) Rename(oldpath, newpath string) error {
 func (s *StorageTestSuite) TestMoveRenameOnlyFS() {
 	mem := memfs.New()
 	ctx := context.Background()
-	memStrg := &storage{fsys: mem}
+	memStrg := &storage{lk: newRootLocker(), fsys: mem}
 	s.Require().NoError(memStrg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"), s2.WithContentType("text/plain"))))
 	s.Require().NoError(memStrg.Put(ctx, s2.NewObjectBytes("dir/b.txt", []byte("b"), s2.WithContentType("text/plain"))))
-	strg := &storage{fsys: &renameOnlyFS{FS: mem, mem: mem}}
+	strg := &storage{lk: newRootLocker(), fsys: &renameOnlyFS{FS: mem, mem: mem}}
 
 	s.Require().NoError(strg.Move(ctx, "a.txt", "dir/a.txt"))
 
@@ -1438,7 +1444,7 @@ func (s *StorageTestSuite) TestMoveRenameOnlyFS() {
 // A parent that cannot be created must fail the Move before anything is renamed.
 func (s *StorageTestSuite) TestMoveBlockedParentLeavesSrc() {
 	mem := memfs.New()
-	strg := &storage{fsys: mem}
+	strg := &storage{lk: newRootLocker(), fsys: mem}
 	ctx := context.Background()
 	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"), s2.WithContentType("text/plain"))))
 	// A file where the sidecar's parent directory must go.
@@ -1462,7 +1468,7 @@ func (s *StorageTestSuite) TestMoveBlockedParentLeavesSrc() {
 // A moved file without a sidecar must not keep the destination's old one.
 func (s *StorageTestSuite) TestMoveDropsStaleSidecar() {
 	fsys := memfs.New()
-	strg := &storage{fsys: fsys}
+	strg := &storage{lk: newRootLocker(), fsys: fsys}
 	ctx := context.Background()
 	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("dst.txt", []byte("old"), s2.WithContentType("text/plain"))))
 	_, err := fsys.WriteFile("src.txt", []byte("new"), fs.ModePerm)
@@ -1491,6 +1497,7 @@ func (s *StorageTestSuite) TestSignedURL() {
 		{
 			caseName: "typical",
 			strg: &storage{
+				lk:   newRootLocker(),
 				cfg:  s2.Config{},
 				fsys: s.testMemFS(),
 			},
@@ -1502,6 +1509,7 @@ func (s *StorageTestSuite) TestSignedURL() {
 		{
 			caseName: "with signed url",
 			strg: &storage{
+				lk:   newRootLocker(),
 				cfg:  s2.Config{SignedURL: "http://localhost"},
 				fsys: s.testMemFS(),
 			},
@@ -1513,6 +1521,7 @@ func (s *StorageTestSuite) TestSignedURL() {
 		{
 			caseName: "not found",
 			strg: &storage{
+				lk:   newRootLocker(),
 				cfg:  s2.Config{SignedURL: "http://localhost"},
 				fsys: s.testMemFS(),
 			},
@@ -1647,7 +1656,7 @@ func BenchmarkGetObjectMemFS(b *testing.B) { benchGetObject(b, s2.TypeMemFS) }
 
 func (s *StorageTestSuite) TestListCursorDoesNotReachSidecars() {
 	ctx := context.Background()
-	strg := &storage{fsys: memfs.New(), typ: s2.TypeMemFS}
+	strg := &storage{lk: newRootLocker(), fsys: memfs.New(), typ: s2.TypeMemFS}
 	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("private/secret.txt", []byte("x"),
 		s2.WithContentType("text/plain"))))
 
@@ -1676,7 +1685,7 @@ func (s *StorageTestSuite) TestListCursorDoesNotReachSidecars() {
 
 func (s *StorageTestSuite) TestMetaDirIsNotAnObjectName() {
 	ctx := context.Background()
-	strg := &storage{fsys: memfs.New(), typ: s2.TypeMemFS}
+	strg := &storage{lk: newRootLocker(), fsys: memfs.New(), typ: s2.TypeMemFS}
 	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"),
 		s2.WithContentType("text/plain"), s2.WithMetadata(s2.Metadata{"k": "v"}))))
 
@@ -1719,7 +1728,7 @@ func (s *StorageTestSuite) TestMetaDirIsNotAnObjectName() {
 	// The same one level down: a Sub keeps its sidecars beside the names it
 	// scopes, so every bucket in a server root has one.
 	s.Run("a prefix that merely starts a nested meta dir", func() {
-		root := &storage{fsys: memfs.New(), typ: s2.TypeMemFS}
+		root := &storage{lk: newRootLocker(), fsys: memfs.New(), typ: s2.TypeMemFS}
 		sub, err := root.Sub(ctx, "photos")
 		s.Require().NoError(err)
 		s.Require().NoError(sub.Put(ctx, s2.NewObjectBytes("a.txt", []byte("body"),
@@ -1748,7 +1757,7 @@ func (s *StorageTestSuite) TestMetaDirIsNotAnObjectName() {
 			_, err := fsys.WriteFile(name, []byte("x"), fs.ModePerm)
 			s.Require().NoError(err)
 		}
-		strg := &storage{fsys: fsys, typ: s2.TypeMemFS}
+		strg := &storage{lk: newRootLocker(), fsys: fsys, typ: s2.TypeMemFS}
 
 		// It is not an object either, so no listing offers a name that Get
 		// would then refuse.
@@ -2239,4 +2248,586 @@ func (s *StorageTestSuite) TestDeleteKeepsPermissionErrors() {
 	s.Require().ErrorIs(err, fs.ErrPermission)
 	_, err = strg.Get(ctx, "dir/x.txt")
 	s.NoError(err)
+}
+
+// writableFS is what the hooked filesystems below wrap.
+type writableFS interface {
+	wfs.WriteFileFS
+	wfs.RenameFS
+	wfs.RemoveFileFS
+	RemoveAll(path string) error
+}
+
+// hookFile runs onClose once the temp file is written, outside any locked section.
+type hookFile struct {
+	wfs.WriterFile
+	onClose func() error
+}
+
+func (f *hookFile) Sync() error {
+	if sf, ok := f.WriterFile.(wfs.SyncWriterFile); ok {
+		return sf.Sync()
+	}
+	return nil
+}
+
+func (f *hookFile) Close() error {
+	if err := f.WriterFile.Close(); err != nil {
+		return err
+	}
+	return f.onClose()
+}
+
+// fsHooks injects steps into a storage's filesystem.
+type fsHooks struct {
+	closed  map[string]func() error // by the name a temp file replaces; fires once
+	renamed func(oldpath, newpath string) error
+	readDir map[string]func() // by directory, before it is read; fires once. Only the unlocked walk reads directories.
+}
+
+// newHookedStorage returns a storage on base whose temp files and renames go through hooks.
+func newHookedStorage(base writableFS, hooks *fsHooks, spy *spyLocker) s2.Storage {
+	fsys := wfs.DelegateFS(base)
+	fsys.MkdirAllFunc = base.MkdirAll
+	fsys.RemoveFileFunc = base.RemoveFile
+	fsys.RemoveAllFunc = base.RemoveAll
+	fsys.ReadDirFunc = func(name string) ([]fs.DirEntry, error) {
+		if hook, ok := hooks.readDir[name]; ok {
+			delete(hooks.readDir, name)
+			hook()
+		}
+		return fs.ReadDir(base, name)
+	}
+	fsys.CreateFileFunc = func(name string, mode fs.FileMode) (wfs.WriterFile, error) {
+		f, err := base.CreateFile(name, mode)
+		if err != nil {
+			return nil, err
+		}
+		dir, file := path.Split(name)
+		for target, hook := range hooks.closed {
+			tdir, tbase := path.Split(target)
+			if dir == tdir && strings.HasPrefix(file, tmpPrefix+tbase+".") {
+				delete(hooks.closed, target)
+				return &hookFile{WriterFile: f, onClose: hook}, nil
+			}
+		}
+		return f, nil
+	}
+	fsys.RenameFunc = func(oldpath, newpath string) error {
+		if hooks.renamed != nil {
+			if err := hooks.renamed(oldpath, newpath); err != nil {
+				return err
+			}
+		}
+		return base.Rename(oldpath, newpath)
+	}
+	return NewStorageFS(s2.Config{}, fsys, WithNameLocker(spy))
+}
+
+// readConsistent reads name and fails unless its ETag and Content-Type belong to its body.
+func readConsistent(t *testing.T, strg s2.Storage, name string) string {
+	t.Helper()
+	obj, err := strg.Get(context.Background(), name)
+	require.NoError(t, err)
+	rc, err := obj.Open()
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+
+	body, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprintf("%q", fmt.Sprintf("%x", md5.Sum(body))), obj.ETag(), "ETag of %q", name)
+	require.Equal(t, "text/"+string(body[:1]), obj.ContentType(), "Content-Type of %q", name)
+	return string(body)
+}
+
+// putText writes body with the Content-Type readConsistent expects.
+func putText(ctx context.Context, strg s2.Storage, name, body string, md s2.Metadata) error {
+	return strg.Put(ctx, s2.NewObjectBytes(name, []byte(body), s2.WithContentType("text/"+body[:1]), s2.WithMetadata(md)))
+}
+
+// TestWritesCommitWholly checks a write racing another on one name leaves a body and metadata file from one writer (#329, #317).
+func TestWritesCommitWholly(t *testing.T) {
+	ctx := context.Background()
+	testCases := []struct {
+		caseName string
+		seed     map[string]string
+		// write is A; race runs once A's metadata file is written, before it is published, outside the lock.
+		write  func(strg s2.Storage) error
+		raceOn string
+		race   func(strg s2.Storage) error
+		want   map[string]string // name → body; "" means absent
+	}{
+		{
+			caseName: "put x put",
+			write:    func(strg s2.Storage) error { return putText(ctx, strg, "x", "aaa", nil) },
+			raceOn:   "x",
+			race:     func(strg s2.Storage) error { return putText(ctx, strg, "x", "bbbbbb", nil) },
+			want:     map[string]string{"x": "aaa"},
+		},
+		{
+			caseName: "put x put metadata",
+			seed:     map[string]string{"x": "ooo"},
+			write:    func(strg s2.Storage) error { return putText(ctx, strg, "x", "aaa", nil) },
+			raceOn:   "x",
+			race:     func(strg s2.Storage) error { return strg.PutMetadata(ctx, "x", s2.Metadata{"k": "v"}) },
+			want:     map[string]string{"x": "aaa"},
+		},
+		{
+			caseName: "put x delete",
+			seed:     map[string]string{"x": "ooo"},
+			write:    func(strg s2.Storage) error { return putText(ctx, strg, "x", "aaa", nil) },
+			raceOn:   "x",
+			race:     func(strg s2.Storage) error { return strg.Delete(ctx, "x") },
+			want:     map[string]string{"x": "aaa"},
+		},
+		{
+			caseName: "put x move to it",
+			seed:     map[string]string{"s": "sss"},
+			write:    func(strg s2.Storage) error { return putText(ctx, strg, "d", "aaa", nil) },
+			raceOn:   "d",
+			race:     func(strg s2.Storage) error { return s2.Move(ctx, strg, "s", "d") },
+			want:     map[string]string{"d": "aaa", "s": ""},
+		},
+		{
+			caseName: "copy x put source",
+			seed:     map[string]string{"s": "sss"},
+			write:    func(strg s2.Storage) error { return strg.Copy(ctx, "s", "d") },
+			raceOn:   "d",
+			race:     func(strg s2.Storage) error { return putText(ctx, strg, "s", "bbbbbb", nil) },
+			want:     map[string]string{"d": "sss", "s": "bbbbbb"},
+		},
+		{
+			caseName: "put x delete of the last sibling",
+			seed:     map[string]string{"a/b/y": "yyy"},
+			write:    func(strg s2.Storage) error { return putText(ctx, strg, "a/b/x", "aaa", nil) },
+			raceOn:   "a/b/x",
+			race:     func(strg s2.Storage) error { return strg.Delete(ctx, "a/b/y") },
+			want:     map[string]string{"a/b/x": "aaa", "a/b/y": ""},
+		},
+	}
+	for _, backend := range []string{"memfs", "osfs"} {
+		for _, tc := range testCases {
+			t.Run(backend+"/"+tc.caseName, func(t *testing.T) {
+				var base writableFS = memfs.New()
+				if backend == "osfs" {
+					base = osfs.DirFS(t.TempDir()).(*osfs.OSFS)
+				}
+				spy := newSpyLocker()
+				hooks := &fsHooks{closed: map[string]func() error{}}
+				strg := newHookedStorage(base, hooks, spy)
+				for name, body := range tc.seed {
+					require.NoError(t, putText(ctx, strg, name, body, nil))
+				}
+				hooks.closed[metaPath(tc.raceOn)] = func() error {
+					require.False(t, spy.held.Load(), "the race would run inside a section")
+					require.NoError(t, tc.race(strg))
+					return nil
+				}
+
+				require.NoError(t, tc.write(strg))
+				for name, want := range tc.want {
+					if want == "" {
+						ok, err := strg.Exists(ctx, name)
+						require.NoError(t, err)
+						require.False(t, ok, "%q should be gone", name)
+						continue
+					}
+					require.Equal(t, want, readConsistent(t, strg, name))
+				}
+			})
+		}
+	}
+}
+
+// TestWriteFailuresCleanUp checks a failed write leaves no temp file or directory it made, and the previous object intact.
+func TestWriteFailuresCleanUp(t *testing.T) {
+	ctx := context.Background()
+	errInjected := errors.New("injected")
+	failRename := func(target string) func(_, newpath string) error {
+		return func(_, newpath string) error {
+			if newpath == target {
+				return errInjected
+			}
+			return nil
+		}
+	}
+	testCases := []struct {
+		caseName string
+		seed     map[string]string
+		name     string
+		closed   func(strg s2.Storage) error // on the metadata temp of name
+		renamed  func(oldpath, newpath string) error
+		wantErr  error
+		want     map[string]string // name → body; "" means absent
+		wantDirs []string          // directories left at the root
+	}{
+		{
+			caseName: "metadata write fails",
+			name:     "a/b/x",
+			closed:   func(s2.Storage) error { return errInjected },
+			wantErr:  errInjected,
+			want:     map[string]string{"a/b/x": ""},
+		},
+		{
+			caseName: "body publish fails",
+			name:     "a/b/x",
+			renamed:  failRename("a/b/x"),
+			wantErr:  errInjected,
+			want:     map[string]string{"a/b/x": ""},
+		},
+		{
+			caseName: "body publish fails over an object",
+			seed:     map[string]string{"x": "ooo"},
+			name:     "x",
+			renamed:  failRename("x"),
+			wantErr:  errInjected,
+			want:     map[string]string{"x": "ooo"},
+			wantDirs: []string{metaDir},
+		},
+		{
+			caseName: "directory takes the name",
+			name:     "x",
+			closed:   func(strg s2.Storage) error { return putText(ctx, strg, "x/y", "yyy", nil) },
+			wantErr:  s2.ErrInvalidName,
+			want:     map[string]string{"x/y": "yyy"},
+			wantDirs: []string{"x", metaDir}, // the root's .meta is never pruned
+		},
+	}
+	for _, backend := range []string{"memfs", "osfs"} {
+		for _, tc := range testCases {
+			t.Run(backend+"/"+tc.caseName, func(t *testing.T) {
+				var base writableFS = memfs.New()
+				if backend == "osfs" {
+					base = osfs.DirFS(t.TempDir()).(*osfs.OSFS)
+				}
+				hooks := &fsHooks{closed: map[string]func() error{}}
+				strg := newHookedStorage(base, hooks, newSpyLocker())
+				for name, body := range tc.seed {
+					require.NoError(t, putText(ctx, strg, name, body, nil))
+				}
+				if tc.closed != nil {
+					hooks.closed[metaPath(tc.name)] = func() error { return tc.closed(strg) }
+				}
+				hooks.renamed = tc.renamed
+
+				require.ErrorIs(t, putText(ctx, strg, tc.name, "aaa", nil), tc.wantErr)
+				hooks.renamed = nil
+				for name, want := range tc.want {
+					if want == "" {
+						ok, err := strg.Exists(ctx, name)
+						require.NoError(t, err)
+						require.False(t, ok, "%q should be absent", name)
+						continue
+					}
+					require.Equal(t, want, readConsistent(t, strg, name))
+				}
+				var dirs []string
+				require.NoError(t, fs.WalkDir(base, ".", func(name string, d fs.DirEntry, err error) error {
+					require.NoError(t, err)
+					require.False(t, strings.HasPrefix(d.Name(), tmpPrefix), "temp file %q left", name)
+					if d.IsDir() && name != "." && !strings.Contains(name, "/") {
+						dirs = append(dirs, name)
+					}
+					return nil
+				}))
+				require.ElementsMatch(t, tc.wantDirs, dirs)
+			})
+		}
+	}
+}
+
+// TestMetadataPublishFailureDropsStaleMetadata checks the new body is left without the previous body's metadata file.
+func TestMetadataPublishFailureDropsStaleMetadata(t *testing.T) {
+	ctx := context.Background()
+	base := memfs.New()
+	hooks := &fsHooks{closed: map[string]func() error{}}
+	strg := newHookedStorage(base, hooks, newSpyLocker())
+	require.NoError(t, putText(ctx, strg, "x", "ooo", nil))
+	hooks.renamed = func(_, newpath string) error {
+		if newpath == metaPath("x") {
+			return errors.New("injected")
+		}
+		return nil
+	}
+
+	require.Error(t, putText(ctx, strg, "x", "aaa", nil))
+	_, err := fs.Stat(base, metaPath("x"))
+	require.ErrorIs(t, err, fs.ErrNotExist)
+	obj, err := strg.Get(ctx, "x")
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), obj.Length())
+	require.NotEqual(t, fmt.Sprintf("%q", fmt.Sprintf("%x", md5.Sum([]byte("ooo")))), obj.ETag())
+}
+
+// TestConcurrentWritesStress races two writers on one name and checks every round ends consistent (#329, #317).
+func TestConcurrentWritesStress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("stress")
+	}
+	rounds := 50
+	if v := os.Getenv("S2_STRESS_ROUNDS"); v != "" {
+		var err error
+		rounds, err = strconv.Atoi(v)
+		require.NoError(t, err)
+	}
+	ctx := context.Background()
+	both := func(f, g func() error) {
+		var wg sync.WaitGroup
+		wg.Go(func() { _ = f() })
+		wg.Go(func() { _ = g() })
+		wg.Wait()
+	}
+	testCases := []struct {
+		caseName string
+		seed     map[string]string
+		a, b     func(strg s2.Storage) error
+		check    []string // names that must be consistent when present
+	}{
+		{
+			caseName: "put x put",
+			a:        func(strg s2.Storage) error { return putText(ctx, strg, "k", "aaa", nil) },
+			b:        func(strg s2.Storage) error { return putText(ctx, strg, "k", "bbbbbb", nil) },
+			check:    []string{"k"},
+		},
+		{
+			caseName: "put metadata x put",
+			seed:     map[string]string{"k": "aaa"},
+			a:        func(strg s2.Storage) error { return strg.PutMetadata(ctx, "k", s2.Metadata{"m": "1"}) },
+			b:        func(strg s2.Storage) error { return putText(ctx, strg, "k", "bbbbbb", nil) },
+			check:    []string{"k"},
+		},
+		{
+			caseName: "put x delete",
+			seed:     map[string]string{"k": "aaa"},
+			a:        func(strg s2.Storage) error { return putText(ctx, strg, "k", "bbbbbb", nil) },
+			b:        func(strg s2.Storage) error { return strg.Delete(ctx, "k") },
+			check:    []string{"k"},
+		},
+		{
+			caseName: "move x put destination",
+			seed:     map[string]string{"s": "aaa"},
+			a:        func(strg s2.Storage) error { return s2.Move(ctx, strg, "s", "d") },
+			b:        func(strg s2.Storage) error { return putText(ctx, strg, "d", "bbbbbb", nil) },
+			check:    []string{"s", "d"},
+		},
+		{
+			caseName: "move x delete source",
+			seed:     map[string]string{"s": "aaa"},
+			a:        func(strg s2.Storage) error { return s2.Move(ctx, strg, "s", "d") },
+			b:        func(strg s2.Storage) error { return strg.Delete(ctx, "s") },
+			check:    []string{"s", "d"},
+		},
+		{
+			caseName: "copy x put source",
+			seed:     map[string]string{"s": "aaa"},
+			a:        func(strg s2.Storage) error { return strg.Copy(ctx, "s", "d") },
+			b:        func(strg s2.Storage) error { return putText(ctx, strg, "s", "bbbbbb", nil) },
+			check:    []string{"s", "d"},
+		},
+		{
+			caseName: "put x delete of the last sibling",
+			seed:     map[string]string{"a/b/c/y": "aaa"},
+			a:        func(strg s2.Storage) error { return strg.Delete(ctx, "a/b/c/y") },
+			b:        func(strg s2.Storage) error { return putText(ctx, strg, "a/b/c/x", "bbbbbb", nil) },
+			check:    []string{"a/b/c/x"},
+		},
+	}
+	for _, backend := range []string{"memfs", "osfs"} {
+		for _, tc := range testCases {
+			t.Run(backend+"/"+tc.caseName, func(t *testing.T) {
+				for range rounds {
+					strg := NewStorageMem(s2.Config{})
+					if backend == "osfs" {
+						strg = NewStorageDir(t.TempDir())
+					}
+					for name, body := range tc.seed {
+						require.NoError(t, putText(ctx, strg, name, body, nil))
+					}
+					var errB error
+					both(func() error { return tc.a(strg) }, func() error { errB = tc.b(strg); return errB })
+					if strings.HasPrefix(tc.caseName, "put x delete of") {
+						require.NoError(t, errB, "a put racing a prune")
+					}
+					for _, name := range tc.check {
+						if ok, err := strg.Exists(ctx, name); err == nil && ok {
+							readConsistent(t, strg, name)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestDeleteRecursiveRaces checks DeleteRecursive against writes landing under its prefix while it walks (#317).
+func TestDeleteRecursiveRaces(t *testing.T) {
+	ctx := context.Background()
+	testCases := []struct {
+		caseName string
+		seed     map[string]string
+		// Exactly one of these races: a write of name whose metadata file is closed, or a read of a directory by the walk.
+		write   string
+		readDir string
+		prefix  string // of DeleteRecursive when readDir is set; "a/" if empty
+		race    func(strg s2.Storage) error
+		wantErr bool              // of the write
+		want    map[string]string // name → body; "" means absent
+	}{
+		{
+			caseName: "a put in flight",
+			write:    "d/x",
+			race:     func(strg s2.Storage) error { return strg.DeleteRecursive(ctx, "d/") },
+			wantErr:  true,
+			want:     map[string]string{"d/x": ""},
+		},
+		{
+			caseName: "a prefix that selects only a temp name",
+			write:    "a/x",
+			race:     func(strg s2.Storage) error { return strg.DeleteRecursive(ctx, "a/.s") },
+			want:     map[string]string{"a/x": "xxx"},
+		},
+		{
+			caseName: "an object takes a directory's name",
+			seed:     map[string]string{"a/b/c": "ccc"},
+			readDir:  "a/b",
+			race: func(strg s2.Storage) error {
+				if err := strg.Delete(ctx, "a/b/c"); err != nil {
+					return err
+				}
+				return putText(ctx, strg, "a/b", "bbb", nil)
+			},
+			want: map[string]string{"a/b": "", "a/b/c": ""},
+		},
+		{
+			caseName: "an object takes the prefix's name",
+			seed:     map[string]string{"a/b/c": "ccc"},
+			readDir:  "a/b",
+			race: func(strg s2.Storage) error {
+				if err := strg.Delete(ctx, "a/b/c"); err != nil {
+					return err
+				}
+				return putText(ctx, strg, "a", "aaa", nil)
+			},
+			want: map[string]string{"a": "aaa"},
+		},
+		{
+			caseName: "an object takes a name the prefix selects",
+			seed:     map[string]string{"a/b/c": "ccc"},
+			readDir:  "a/b",
+			prefix:   "a",
+			race: func(strg s2.Storage) error {
+				if err := strg.Delete(ctx, "a/b/c"); err != nil {
+					return err
+				}
+				return putText(ctx, strg, "a", "aaa", nil)
+			},
+			want: map[string]string{"a": ""},
+		},
+	}
+	for _, backend := range []string{"memfs", "osfs"} {
+		for _, tc := range testCases {
+			t.Run(backend+"/"+tc.caseName, func(t *testing.T) {
+				var base writableFS = memfs.New()
+				if backend == "osfs" {
+					base = osfs.DirFS(t.TempDir()).(*osfs.OSFS)
+				}
+				spy := newSpyLocker()
+				hooks := &fsHooks{closed: map[string]func() error{}, readDir: map[string]func(){}}
+				strg := newHookedStorage(base, hooks, spy)
+				for name, body := range tc.seed {
+					require.NoError(t, putText(ctx, strg, name, body, nil))
+				}
+				race := func() {
+					require.False(t, spy.held.Load(), "the race would run inside a section")
+					require.NoError(t, tc.race(strg))
+				}
+
+				if tc.write != "" {
+					hooks.closed[metaPath(tc.write)] = func() error { race(); return nil }
+					err := putText(ctx, strg, tc.write, "xxx", nil)
+					require.Equal(t, tc.wantErr, err != nil, "write error: %v", err)
+				} else {
+					hooks.readDir[tc.readDir] = race
+					prefix := tc.prefix
+					if prefix == "" {
+						prefix = "a/"
+					}
+					require.NoError(t, strg.DeleteRecursive(ctx, prefix))
+				}
+				for name, want := range tc.want {
+					if want == "" {
+						ok, err := strg.Exists(ctx, name)
+						require.NoError(t, err)
+						require.False(t, ok, "%q should be absent", name)
+						continue
+					}
+					require.Equal(t, want, readConsistent(t, strg, name))
+				}
+				require.NoError(t, fs.WalkDir(base, ".", func(name string, d fs.DirEntry, err error) error {
+					require.NoError(t, err)
+					require.False(t, strings.HasPrefix(d.Name(), tmpPrefix), "temp file %q left", name)
+					return nil
+				}))
+			})
+		}
+	}
+}
+
+// TestDeleteRecursiveRemovesOrphanedTemps checks temp files a crash left behind do not keep a directory alive.
+func TestDeleteRecursiveRemovesOrphanedTemps(t *testing.T) {
+	ctx := context.Background()
+	for _, backend := range []string{"memfs", "osfs"} {
+		t.Run(backend, func(t *testing.T) {
+			var base writableFS = memfs.New()
+			if backend == "osfs" {
+				base = osfs.DirFS(t.TempDir()).(*osfs.OSFS)
+			}
+			strg := NewStorageFS(s2.Config{}, base)
+			require.NoError(t, putText(ctx, strg, "d/x", "xxx", nil))
+			for _, name := range []string{"d/" + tmpPrefix + "y.0", "d/.meta/" + tmpPrefix + "y.0"} {
+				_, err := base.WriteFile(name, []byte("partial"), 0o644)
+				require.NoError(t, err)
+			}
+
+			require.NoError(t, strg.DeleteRecursive(ctx, "d/"))
+			_, err := fs.Stat(base, "d")
+			require.ErrorIs(t, err, fs.ErrNotExist)
+		})
+	}
+}
+
+// countingFile counts how many temp files get closed.
+type countingFile struct {
+	wfs.WriterFile
+	closed *atomic.Int32
+}
+
+func (f *countingFile) Close() error {
+	f.closed.Add(1)
+	return f.WriterFile.Close()
+}
+
+// TestFailedWriteClosesItsTemps checks every temp file a failed write opened is closed, not only removed.
+func TestFailedWriteClosesItsTemps(t *testing.T) {
+	ctx := context.Background()
+	base := osfs.DirFS(t.TempDir()).(*osfs.OSFS)
+	var created, closed atomic.Int32
+	fsys := wfs.DelegateFS(base)
+	fsys.MkdirAllFunc = base.MkdirAll
+	fsys.RemoveFileFunc = base.RemoveFile
+	fsys.RenameFunc = base.Rename
+	fsys.CreateFileFunc = func(name string, mode fs.FileMode) (wfs.WriterFile, error) {
+		f, err := base.CreateFile(name, mode)
+		if err != nil {
+			return nil, err
+		}
+		created.Add(1)
+		return &countingFile{WriterFile: f, closed: &closed}, nil
+	}
+	strg := NewStorageFS(s2.Config{}, fsys)
+	body := io.NopCloser(iotest.ErrReader(errors.New("client went away")))
+
+	require.Error(t, strg.Put(ctx, s2.NewObjectReader("a/x", body, 10)))
+	require.Equal(t, int32(2), created.Load())
+	require.Equal(t, created.Load(), closed.Load())
 }

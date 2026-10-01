@@ -29,40 +29,82 @@ const tmpPrefix = ".s2tmp-"
 // The write order is Write -> Sync -> Close -> Rename. This order is load
 // bearing: on wfs/memfs, buffered writes are not published to the store
 // until Close, so Rename must run after Close.
+//
+// Callers hold the lock, except MigrateMeta, which runs without writers.
 func atomicWrite(fsys iofs.FS, name string, src io.Reader) error {
 	if _, ok := fsys.(wfs.RenameFS); !ok {
 		return directWrite(fsys, name, src)
 	}
-	tmp, err := tempName(name)
+	t, err := createTemp(fsys, name)
 	if err != nil {
 		return err
 	}
+	defer t.discard()
+
+	if err := t.write(src); err != nil {
+		return err
+	}
+	return t.publish()
+}
+
+// tempFile is an in-flight write: created and published under the lock, filled outside it.
+type tempFile struct {
+	fsys      iofs.FS
+	name, tmp string
+	f         wfs.WriterFile
+	written   bool // write ran, and closed f
+	published bool
+}
+
+// createTemp creates the temp file that will replace name. Callers hold the lock.
+func createTemp(fsys iofs.FS, name string) (*tempFile, error) {
+	tmp, err := tempName(name)
+	if err != nil {
+		return nil, err
+	}
 	f, err := wfs.CreateFile(fsys, tmp, os.ModePerm)
 	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
-	// After a successful Rename the temp path no longer exists, so this is
-	// a no-op on the success path. On any error path it cleans up the
-	// leftover temp file.
-	defer func() { _ = wfs.RemoveFile(fsys, tmp) }()
+	return &tempFile{fsys: fsys, name: name, tmp: tmp, f: f}, nil
+}
 
-	if _, err := io.Copy(f, src); err != nil {
-		_ = f.Close()
+// write copies src into the temp file, syncs and closes it; it closes on error too.
+func (t *tempFile) write(src io.Reader) error {
+	t.written = true
+	if _, err := io.Copy(t.f, src); err != nil {
+		_ = t.f.Close()
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
-	if sf, ok := f.(wfs.SyncWriterFile); ok {
+	if sf, ok := t.f.(wfs.SyncWriterFile); ok {
 		if err := sf.Sync(); err != nil {
-			_ = f.Close()
+			_ = t.f.Close()
 			return fmt.Errorf("failed to sync temp file: %w", err)
 		}
 	}
-	if err := f.Close(); err != nil {
+	if err := t.f.Close(); err != nil {
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
-	if err := wfs.Rename(fsys, tmp, name); err != nil {
+	return nil
+}
+
+// publish renames the temp file over name. Callers hold the lock.
+func (t *tempFile) publish() error {
+	if err := wfs.Rename(t.fsys, t.tmp, t.name); err != nil {
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
+	t.published = true
 	return nil
+}
+
+// discard closes the temp file if write never did and removes it unless it was published. Callers hold the lock.
+func (t *tempFile) discard() {
+	if !t.written {
+		_ = t.f.Close()
+	}
+	if !t.published {
+		_ = wfs.RemoveFile(t.fsys, t.tmp)
+	}
 }
 
 // directWrite writes src to name without atomicity, used as a fallback for
