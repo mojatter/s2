@@ -430,31 +430,49 @@ func (s *storage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOptions)
 	}
 	defer func() { _ = rc.Close() }()
 
+	m := meta{ContentType: obj.ContentType(), Metadata: obj.Metadata()}
+	etag, err := s.write(ctx, name, func() (io.Reader, meta, error) { return rc, m, nil })
+	return s2.UploadResult{ETag: etag}, err
+}
+
+// write stores what open yields under name; open runs inside the first locked section.
+func (s *storage) write(ctx context.Context, name string, open func() (io.Reader, meta, error)) (string, error) {
 	if _, ok := s.fsys.(wfs.RenameFS); !ok {
 		var etag string
-		err := s.locked(ctx, func() (err error) {
-			etag, err = s.uploadDirect(name, rc, meta{ContentType: obj.ContentType(), Metadata: obj.Metadata()})
+		err := s.locked(ctx, func() error {
+			src, m, err := open()
+			if err != nil {
+				return err
+			}
+			etag, err = s.uploadDirect(name, src, m)
 			return err
 		})
-		return s2.UploadResult{ETag: etag}, err
+		return etag, err
 	}
-	var p *pending
-	err = s.locked(ctx, func() (err error) {
+	var (
+		src io.Reader
+		m   meta
+		p   *pending
+	)
+	err := s.locked(ctx, func() (err error) {
+		if src, m, err = open(); err != nil {
+			return err
+		}
 		p, err = s.begin(name)
 		return err
 	})
 	var etag string
 	if err == nil {
-		etag, err = p.stream(rc, meta{ContentType: obj.ContentType(), Metadata: obj.Metadata()})
+		etag, err = p.stream(src, m)
 	}
 	if err == nil {
 		err = s.locked(ctx, func() error { return s.commit(p) })
 	}
 	if err != nil {
 		s.abandon(ctx, p)
-		return s2.UploadResult{}, err
+		return "", err
 	}
-	return s2.UploadResult{ETag: etag}, nil
+	return etag, nil
 }
 
 // uploadDirect writes name in place for a filesystem without rename. Callers hold the lock.
@@ -472,11 +490,16 @@ func (s *storage) uploadDirect(name string, src io.Reader, m meta) (string, erro
 	m.ETag = quotedMD5(h)
 	if err := saveMeta(s.fsys, name, m); err != nil {
 		// A stale metadata file would describe the previous body; without one the ETag falls back to the synthetic form.
-		_ = wfs.RemoveFile(s.fsys, metaPath(name))
-		removeLegacyMeta(s.fsys, name)
+		s.dropMeta(name)
 		return "", err
 	}
 	return m.ETag, nil
+}
+
+// dropMeta removes name's metadata files, ignoring errors. Callers hold the lock.
+func (s *storage) dropMeta(name string) {
+	_ = wfs.RemoveFile(s.fsys, metaPath(name))
+	removeLegacyMeta(s.fsys, name)
 }
 
 // pending is what a writer's first section created; commit publishes it, abandon removes it.
@@ -527,8 +550,7 @@ func (s *storage) commit(p *pending) error {
 	}
 	if err := p.meta.publish(); err != nil {
 		// A stale metadata file would describe the previous body; dropped here, as a later section could hit another writer's.
-		_ = wfs.RemoveFile(s.fsys, metaPath(p.name))
-		removeLegacyMeta(s.fsys, p.name)
+		s.dropMeta(p.name)
 		return err
 	}
 	removeLegacyMeta(s.fsys, p.name)
@@ -577,43 +599,22 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 			return err
 		}
 	}
-	if _, ok := s.fsys.(wfs.RenameFS); !ok {
-		return s.locked(ctx, func() error {
-			srcObj, rc, err := s.openSource(src)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = rc.Close() }()
-
-			_, err = s.uploadDirect(dst, rc, srcObj.m)
-			return err
-		})
-	}
 	// The source's metadata file and body are read in one section; the open handle keeps that body.
-	var (
-		srcObj *object
-		rc     io.ReadCloser
-		p      *pending
-	)
-	err := s.locked(ctx, func() (err error) {
-		if srcObj, rc, err = s.openSource(src); err != nil {
-			return err
+	var rc io.ReadCloser
+	defer func() {
+		if rc != nil {
+			_ = rc.Close()
 		}
-		p, err = s.begin(dst)
-		return err
+	}()
+
+	_, err := s.write(ctx, dst, func() (io.Reader, meta, error) {
+		srcObj, body, err := s.openSource(src)
+		if err != nil {
+			return nil, meta{}, err
+		}
+		rc = body
+		return rc, srcObj.m, nil
 	})
-	if rc != nil {
-		defer func() { _ = rc.Close() }()
-	}
-	if err == nil {
-		_, err = p.stream(rc, srcObj.m)
-	}
-	if err == nil {
-		err = s.locked(ctx, func() error { return s.commit(p) })
-	}
-	if err != nil {
-		s.abandon(ctx, p)
-	}
 	return err
 }
 
@@ -766,9 +767,7 @@ func (s *storage) Delete(ctx context.Context, name string) error {
 
 // delete removes name's metadata files and body. Callers hold the lock.
 func (s *storage) delete(name string) error {
-	// Ignore metadata deletion errors (file may not have metadata)
-	_ = wfs.RemoveFile(s.fsys, metaPath(name))
-	removeLegacyMeta(s.fsys, name)
+	s.dropMeta(name)
 	if err := wfs.RemoveFile(s.fsys, name); err != nil && !s.noKey(path.Dir(name), err) {
 		return fmt.Errorf("failed to delete %q: %w", name, err)
 	}
