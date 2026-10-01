@@ -270,16 +270,25 @@ func parseMeta(data []byte) (meta, error) {
 }
 
 func saveMeta(fsys fs.FS, name string, m meta) error {
+	data, err := encodeMeta(m)
+	if err != nil {
+		return err
+	}
+	if err := atomicWrite(fsys, metaPath(name), bytes.NewReader(data)); err != nil {
+		return err
+	}
+	removeLegacyMeta(fsys, name)
+	return nil
+}
+
+// encodeMeta renders the metadata file, writing nil metadata as {}.
+func encodeMeta(m meta) ([]byte, error) {
 	if m.Metadata == nil {
 		m.Metadata = s2.Metadata{}
 	}
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(m); err != nil {
-		return fmt.Errorf("failed to encode meta file: %w", err)
+		return nil, fmt.Errorf("failed to encode meta file: %w", err)
 	}
-	if err := atomicWrite(fsys, metaPath(name), &buf); err != nil {
-		return err
-	}
-	removeLegacyMeta(fsys, name)
-	return nil
+	return buf.Bytes(), nil
 }
