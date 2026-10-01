@@ -733,6 +733,8 @@ func (s *storage) rename(src, dst string) error {
 	// Move the sidecar too; a source without one must not inherit dst's.
 	if hasMeta {
 		if err := wfs.Rename(s.fsys, srcMeta, dstMeta); err != nil {
+			// dst's metadata file would describe its previous body.
+			s.dropMeta(dst)
 			return fmt.Errorf("failed to rename metadata for %q: %w", src, err)
 		}
 		if srcMeta != metaPath(src) {

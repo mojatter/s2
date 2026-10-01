@@ -2762,24 +2762,50 @@ func TestWriteFailuresCleanUp(t *testing.T) {
 // TestMetadataPublishFailureDropsStaleMetadata checks the new body is left without the previous body's metadata file.
 func TestMetadataPublishFailureDropsStaleMetadata(t *testing.T) {
 	ctx := context.Background()
-	base := memfs.New()
-	hooks := newFSHooks()
-	strg := newHookedStorage(base, hooks, newSpyLocker())
-	require.NoError(t, putText(ctx, strg, "x", "ooo", nil))
-	hooks.renamed = func(_, newpath string) error {
-		if newpath == metaPath("x") {
-			return errors.New("injected")
-		}
-		return nil
+	testCases := []struct {
+		caseName string
+		write    func(strg s2.Storage) error
+		wantLen  uint64
+	}{
+		{
+			caseName: "put",
+			write:    func(strg s2.Storage) error { return putText(ctx, strg, "x", "aaa", nil) },
+			wantLen:  3,
+		},
+		{
+			caseName: "move",
+			write: func(strg s2.Storage) error {
+				if err := putText(ctx, strg, "y", "aaaaa", nil); err != nil {
+					return err
+				}
+				return s2.Move(ctx, strg, "y", "x")
+			},
+			wantLen: 5,
+		},
 	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			base := memfs.New()
+			hooks := newFSHooks()
+			strg := newHookedStorage(base, hooks, newSpyLocker())
+			require.NoError(t, putText(ctx, strg, "x", "ooo", nil))
+			hooks.renamed = func(_, newpath string) error {
+				if newpath == metaPath("x") {
+					return errors.New("injected")
+				}
+				return nil
+			}
 
-	require.Error(t, putText(ctx, strg, "x", "aaa", nil))
-	_, err := fs.Stat(base, metaPath("x"))
-	require.ErrorIs(t, err, fs.ErrNotExist)
-	obj, err := strg.Get(ctx, "x")
-	require.NoError(t, err)
-	require.Equal(t, uint64(3), obj.Length())
-	require.NotEqual(t, fmt.Sprintf("%q", fmt.Sprintf("%x", md5.Sum([]byte("ooo")))), obj.ETag())
+			require.Error(t, tc.write(strg))
+			_, err := fs.Stat(base, metaPath("x"))
+			require.ErrorIs(t, err, fs.ErrNotExist)
+			obj, err := strg.Get(ctx, "x")
+			require.NoError(t, err)
+			require.Equal(t, tc.wantLen, obj.Length())
+			require.Contains(t, obj.ETag(), "-", "synthetic ETag, not the old body's MD5")
+			require.Empty(t, obj.ContentType())
+		})
+	}
 }
 
 // TestConcurrentWritesStress races two writers on one name and checks every round ends consistent (#329, #317).
