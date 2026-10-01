@@ -48,7 +48,7 @@ func NewStorageFS(cfg s2.Config, fs fs.FS, opts ...Option) s2.Storage {
 	if o, ok := fs.(*osfs.OSFS); ok {
 		s.lk = dirLockerFor(o.Dir)
 	} else {
-		s.lk = newRootLocker()
+		s.lk = newNameLocker()
 	}
 	return s.with(opts)
 }
@@ -58,7 +58,7 @@ func NewStorageMem(cfg s2.Config, opts ...Option) s2.Storage {
 		cfg:  cfg,
 		fsys: memfs.New(),
 		typ:  s2.TypeMemFS,
-		lk:   newRootLocker(),
+		lk:   newNameLocker(),
 	}
 	return s.with(opts)
 }

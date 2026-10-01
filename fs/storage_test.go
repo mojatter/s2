@@ -179,7 +179,7 @@ func (s *StorageTestSuite) fillTestFS(fsys fs.FS) fs.FS {
 }
 
 func (s *StorageTestSuite) TestS2TestList() {
-	strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
+	strg := &storage{lk: newNameLocker(), fsys: s.testMemFS()}
 	ctx := context.Background()
 
 	err := s2test.TestStorageListRecursive(ctx, strg, "a.txt", "b.txt", "cc/c1.txt", "cc/c2.txt")
@@ -244,7 +244,7 @@ func (s *StorageTestSuite) TestList() {
 	}{
 		{
 			caseName: "typical",
-			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
+			strg:     &storage{lk: newNameLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "",
 			limit:    10,
@@ -255,7 +255,7 @@ func (s *StorageTestSuite) TestList() {
 		},
 		{
 			caseName: "prefix",
-			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
+			strg:     &storage{lk: newNameLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "cc",
 			limit:    10,
@@ -315,7 +315,7 @@ func (s *StorageTestSuite) TestListRecursive() {
 	}{
 		{
 			caseName: "typical",
-			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
+			strg:     &storage{lk: newNameLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "",
 			limit:    10,
@@ -328,7 +328,7 @@ func (s *StorageTestSuite) TestListRecursive() {
 		},
 		{
 			caseName: "prefix",
-			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
+			strg:     &storage{lk: newNameLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "c",
 			limit:    10,
@@ -339,7 +339,7 @@ func (s *StorageTestSuite) TestListRecursive() {
 		},
 		{
 			caseName: "limit",
-			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
+			strg:     &storage{lk: newNameLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "",
 			limit:    3,
@@ -399,7 +399,7 @@ func (s *StorageTestSuite) TestListAfter() {
 	}{
 		{
 			caseName: "typical",
-			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
+			strg:     &storage{lk: newNameLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "",
 			after:    "a.txt",
@@ -473,7 +473,7 @@ func (s *StorageTestSuite) TestListStartAfter() {
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
+			strg := &storage{lk: newNameLocker(), fsys: s.testMemFS()}
 			res, err := strg.List(context.Background(), s2.ListOptions{
 				Prefix:     tc.prefix,
 				After:      tc.after,
@@ -505,7 +505,7 @@ func (s *StorageTestSuite) TestListRecursiveAfter() {
 	}{
 		{
 			caseName: "typical",
-			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
+			strg:     &storage{lk: newNameLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "",
 			after:    "b.txt",
@@ -541,7 +541,7 @@ func (s *StorageTestSuite) TestListNextAfter() {
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
+			strg := &storage{lk: newNameLocker(), fsys: s.testMemFS()}
 			ctx := context.Background()
 
 			// Limit: 1 forces a new page per object, so a flat listing's
@@ -585,7 +585,7 @@ func (s *StorageTestSuite) TestListRecursivePaginationOrder() {
 	_, err = fsys.WriteFile("backup/2024-01-01.log", []byte("y"), fs.ModePerm)
 	s.Require().NoError(err)
 
-	strg := &storage{lk: newRootLocker(), fsys: fsys}
+	strg := &storage{lk: newNameLocker(), fsys: fsys}
 	ctx := context.Background()
 
 	var got []string
@@ -613,7 +613,7 @@ func (s *StorageTestSuite) TestListRecursivePaginationOrder() {
 // at the top of the WalkDir callback in ListRecursiveAfter.
 func (s *StorageTestSuite) TestListRecursiveAfter_WalkDirError() {
 	base := s.testMemFS()
-	strg := &storage{lk: newRootLocker(), fsys: &errReadDirFS{FS: base, errorPath: "cc"}}
+	strg := &storage{lk: newNameLocker(), fsys: &errReadDirFS{FS: base, errorPath: "cc"}}
 	ctx := context.Background()
 
 	_, err := strg.List(ctx, s2.ListOptions{Limit: 10, Recursive: true})
@@ -631,13 +631,13 @@ func (s *StorageTestSuite) TestGet() {
 	}{
 		{
 			caseName: "found",
-			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
+			strg:     &storage{lk: newNameLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			name:     "a.txt",
 		},
 		{
 			caseName: "not found",
-			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
+			strg:     &storage{lk: newNameLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			name:     "not-found.txt",
 			wantErr:  "not exist: not-found.txt",
@@ -671,7 +671,7 @@ func (s *StorageTestSuite) TestPut() {
 	}{
 		{
 			caseName: "new-file",
-			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
+			strg:     &storage{lk: newNameLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			obj: &s2test.BytesObject{
 				Name_:     "new.txt",
@@ -683,7 +683,7 @@ func (s *StorageTestSuite) TestPut() {
 		{
 			caseName: "empty-metadata-deletion",
 			strg: func() s2.Storage {
-				strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
+				strg := &storage{lk: newNameLocker(), fsys: s.testMemFS()}
 				o := &s2test.BytesObject{
 					Name_:     "empty-meta.txt",
 					Data:      []byte("content"),
@@ -733,7 +733,7 @@ func (s *StorageTestSuite) TestDelete() {
 	}{
 		{
 			caseName: "typical",
-			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
+			strg:     &storage{lk: newNameLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			name:     "a.txt",
 		},
@@ -866,21 +866,21 @@ func (s *StorageTestSuite) TestDeleteRecursive() {
 	}{
 		{
 			caseName: "typical",
-			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
+			strg:     &storage{lk: newNameLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "c",
 			wantLeft: []string{"a.txt", "b.txt"},
 		},
 		{
 			caseName: "memfs object named like the prefix",
-			strg:     &storage{lk: newRootLocker(), fsys: s.testMemFS()},
+			strg:     &storage{lk: newNameLocker(), fsys: s.testMemFS()},
 			ctx:      context.Background(),
 			prefix:   "a.txt/",
 			wantLeft: []string{"a.txt", "b.txt", "cc/c1.txt", "cc/c2.txt"},
 		},
 		{
 			caseName: "osfs object named like the prefix",
-			strg:     &storage{lk: newRootLocker(), fsys: s.testOSFS()},
+			strg:     &storage{lk: newNameLocker(), fsys: s.testOSFS()},
 			ctx:      context.Background(),
 			prefix:   "a.txt/",
 			wantLeft: []string{"a.txt", "b.txt", "cc/c1.txt", "cc/c2.txt"},
@@ -989,7 +989,7 @@ func (s *StorageTestSuite) TestListSaysSoWhenTheRootIsNotADirectory() {
 // select either way, so the listing is empty rather than the raw walk error.
 func (s *StorageTestSuite) TestListWhenTheObjectVanishesMidWalk() {
 	dir := s.T().TempDir()
-	base := &storage{lk: newRootLocker(), fsys: osfs.DirFS(dir), typ: s2.TypeOSFS}
+	base := &storage{lk: newNameLocker(), fsys: osfs.DirFS(dir), typ: s2.TypeOSFS}
 	ctx := context.Background()
 	s.Require().NoError(base.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"))))
 	strg := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, &goneStatFS{FS: osfs.DirFS(dir), gonePath: "a.txt"})
@@ -1062,7 +1062,7 @@ func (s *StorageTestSuite) TestDeleteRecursiveDropsSidecars() {
 		s.Run(tc.caseName, func() {
 			ctx := context.Background()
 			fsys := tc.newFS()
-			root := &storage{lk: newRootLocker(), fsys: fsys, typ: tc.typ}
+			root := &storage{lk: newNameLocker(), fsys: fsys, typ: tc.typ}
 			sub, err := root.Sub(ctx, "up")
 			s.Require().NoError(err)
 			s.Require().NoError(sub.Put(ctx, s2.NewObjectBytes("1", []byte("a"))))
@@ -1113,13 +1113,13 @@ func (e *errStatMemFS) Stat(name string) (fs.FileInfo, error) {
 
 // An unreadable root is reported, not dereferenced.
 func (s *StorageTestSuite) TestDeleteRecursiveUnreadableRoot() {
-	strg := &storage{lk: newRootLocker(), fsys: &errStatMemFS{memfs.New()}}
+	strg := &storage{lk: newNameLocker(), fsys: &errStatMemFS{memfs.New()}}
 
 	s.ErrorIs(strg.DeleteRecursive(context.Background(), ""), fs.ErrPermission)
 }
 
 func (s *StorageTestSuite) TestSub() {
-	strg := &storage{lk: newRootLocker(), fsys: s.testMemFS(), typ: s2.TypeMemFS}
+	strg := &storage{lk: newNameLocker(), fsys: s.testMemFS(), typ: s2.TypeMemFS}
 
 	s.Run("typical", func() {
 		sub, err := strg.Sub(context.Background(), "cc")
@@ -1156,7 +1156,7 @@ func (s *StorageTestSuite) TestSub() {
 	// is that directory, and memfs reports its name as ".meta".
 	s.Run("the metadata directory", func() {
 		ctx := context.Background()
-		root := &storage{lk: newRootLocker(), fsys: memfs.New(), typ: s2.TypeMemFS}
+		root := &storage{lk: newNameLocker(), fsys: memfs.New(), typ: s2.TypeMemFS}
 		s.Require().NoError(root.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"))))
 
 		_, err := root.Sub(ctx, ".meta")
@@ -1185,7 +1185,7 @@ func (s *StorageTestSuite) TestSub() {
 }
 
 func (s *StorageTestSuite) TestExists() {
-	strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
+	strg := &storage{lk: newNameLocker(), fsys: s.testMemFS()}
 
 	testCases := []struct {
 		caseName string
@@ -1277,7 +1277,7 @@ func (s *StorageTestSuite) TestSidecarWriteFails() {
 				s.Require().NoError(mem.RemoveFile(metaPath(tc.name)))
 			}
 			s.Require().NoError(seed.Put(ctx, s2.NewObjectBytes("src.txt", []byte("new body"), s2.WithContentType("text/csv"))))
-			strg := &storage{lk: newRootLocker(), fsys: &errMetaRenameMemFS{mem}}
+			strg := &storage{lk: newNameLocker(), fsys: &errMetaRenameMemFS{mem}}
 
 			s.ErrorIs(tc.write(ctx, strg, tc.name), fs.ErrPermission)
 
@@ -1290,7 +1290,7 @@ func (s *StorageTestSuite) TestSidecarWriteFails() {
 }
 
 func (s *StorageTestSuite) TestPutMetadata() {
-	strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
+	strg := &storage{lk: newNameLocker(), fsys: s.testMemFS()}
 	ctx := context.Background()
 
 	s.Run("typical", func() {
@@ -1311,7 +1311,7 @@ func (s *StorageTestSuite) TestPutMetadata() {
 }
 
 func (s *StorageTestSuite) TestCopy() {
-	strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
+	strg := &storage{lk: newNameLocker(), fsys: s.testMemFS()}
 	ctx := context.Background()
 
 	s.Run("typical", func() {
@@ -1334,7 +1334,7 @@ func (s *StorageTestSuite) TestCopy() {
 }
 
 func (s *StorageTestSuite) TestMove() {
-	strg := &storage{lk: newRootLocker(), fsys: s.testMemFS()}
+	strg := &storage{lk: newNameLocker(), fsys: s.testMemFS()}
 	ctx := context.Background()
 
 	err := strg.Move(ctx, "a.txt", "moved.txt")
@@ -1375,7 +1375,7 @@ func (s *StorageTestSuite) TestMoveNestedDst() {
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
 			fsys := tc.fsys()
-			strg := &storage{lk: newRootLocker(), fsys: fsys}
+			strg := &storage{lk: newNameLocker(), fsys: fsys}
 			ctx := context.Background()
 			src, dst := "a.txt", "dir/sub/a.txt"
 			if tc.staleDst {
@@ -1429,10 +1429,10 @@ func (r *renameOnlyFS) Rename(oldpath, newpath string) error {
 func (s *StorageTestSuite) TestMoveRenameOnlyFS() {
 	mem := memfs.New()
 	ctx := context.Background()
-	memStrg := &storage{lk: newRootLocker(), fsys: mem}
+	memStrg := &storage{lk: newNameLocker(), fsys: mem}
 	s.Require().NoError(memStrg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"), s2.WithContentType("text/plain"))))
 	s.Require().NoError(memStrg.Put(ctx, s2.NewObjectBytes("dir/b.txt", []byte("b"), s2.WithContentType("text/plain"))))
-	strg := &storage{lk: newRootLocker(), fsys: &renameOnlyFS{FS: mem, mem: mem}}
+	strg := &storage{lk: newNameLocker(), fsys: &renameOnlyFS{FS: mem, mem: mem}}
 
 	s.Require().NoError(strg.Move(ctx, "a.txt", "dir/a.txt"))
 
@@ -1444,7 +1444,7 @@ func (s *StorageTestSuite) TestMoveRenameOnlyFS() {
 // A parent that cannot be created must fail the Move before anything is renamed.
 func (s *StorageTestSuite) TestMoveBlockedParentLeavesSrc() {
 	mem := memfs.New()
-	strg := &storage{lk: newRootLocker(), fsys: mem}
+	strg := &storage{lk: newNameLocker(), fsys: mem}
 	ctx := context.Background()
 	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"), s2.WithContentType("text/plain"))))
 	// A file where the sidecar's parent directory must go.
@@ -1468,7 +1468,7 @@ func (s *StorageTestSuite) TestMoveBlockedParentLeavesSrc() {
 // A moved file without a sidecar must not keep the destination's old one.
 func (s *StorageTestSuite) TestMoveDropsStaleSidecar() {
 	fsys := memfs.New()
-	strg := &storage{lk: newRootLocker(), fsys: fsys}
+	strg := &storage{lk: newNameLocker(), fsys: fsys}
 	ctx := context.Background()
 	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("dst.txt", []byte("old"), s2.WithContentType("text/plain"))))
 	_, err := fsys.WriteFile("src.txt", []byte("new"), fs.ModePerm)
@@ -1497,7 +1497,7 @@ func (s *StorageTestSuite) TestSignedURL() {
 		{
 			caseName: "typical",
 			strg: &storage{
-				lk:   newRootLocker(),
+				lk:   newNameLocker(),
 				cfg:  s2.Config{},
 				fsys: s.testMemFS(),
 			},
@@ -1509,7 +1509,7 @@ func (s *StorageTestSuite) TestSignedURL() {
 		{
 			caseName: "with signed url",
 			strg: &storage{
-				lk:   newRootLocker(),
+				lk:   newNameLocker(),
 				cfg:  s2.Config{SignedURL: "http://localhost"},
 				fsys: s.testMemFS(),
 			},
@@ -1521,7 +1521,7 @@ func (s *StorageTestSuite) TestSignedURL() {
 		{
 			caseName: "not found",
 			strg: &storage{
-				lk:   newRootLocker(),
+				lk:   newNameLocker(),
 				cfg:  s2.Config{SignedURL: "http://localhost"},
 				fsys: s.testMemFS(),
 			},
@@ -1656,7 +1656,7 @@ func BenchmarkGetObjectMemFS(b *testing.B) { benchGetObject(b, s2.TypeMemFS) }
 
 func (s *StorageTestSuite) TestListCursorDoesNotReachSidecars() {
 	ctx := context.Background()
-	strg := &storage{lk: newRootLocker(), fsys: memfs.New(), typ: s2.TypeMemFS}
+	strg := &storage{lk: newNameLocker(), fsys: memfs.New(), typ: s2.TypeMemFS}
 	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("private/secret.txt", []byte("x"),
 		s2.WithContentType("text/plain"))))
 
@@ -1685,7 +1685,7 @@ func (s *StorageTestSuite) TestListCursorDoesNotReachSidecars() {
 
 func (s *StorageTestSuite) TestMetaDirIsNotAnObjectName() {
 	ctx := context.Background()
-	strg := &storage{lk: newRootLocker(), fsys: memfs.New(), typ: s2.TypeMemFS}
+	strg := &storage{lk: newNameLocker(), fsys: memfs.New(), typ: s2.TypeMemFS}
 	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"),
 		s2.WithContentType("text/plain"), s2.WithMetadata(s2.Metadata{"k": "v"}))))
 
@@ -1728,7 +1728,7 @@ func (s *StorageTestSuite) TestMetaDirIsNotAnObjectName() {
 	// The same one level down: a Sub keeps its sidecars beside the names it
 	// scopes, so every bucket in a server root has one.
 	s.Run("a prefix that merely starts a nested meta dir", func() {
-		root := &storage{lk: newRootLocker(), fsys: memfs.New(), typ: s2.TypeMemFS}
+		root := &storage{lk: newNameLocker(), fsys: memfs.New(), typ: s2.TypeMemFS}
 		sub, err := root.Sub(ctx, "photos")
 		s.Require().NoError(err)
 		s.Require().NoError(sub.Put(ctx, s2.NewObjectBytes("a.txt", []byte("body"),
@@ -1757,7 +1757,7 @@ func (s *StorageTestSuite) TestMetaDirIsNotAnObjectName() {
 			_, err := fsys.WriteFile(name, []byte("x"), fs.ModePerm)
 			s.Require().NoError(err)
 		}
-		strg := &storage{lk: newRootLocker(), fsys: fsys, typ: s2.TypeMemFS}
+		strg := &storage{lk: newNameLocker(), fsys: fsys, typ: s2.TypeMemFS}
 
 		// It is not an object either, so no listing offers a name that Get
 		// would then refuse.
