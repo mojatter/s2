@@ -30,7 +30,7 @@ const tmpPrefix = ".s2tmp-"
 // bearing: on wfs/memfs, buffered writes are not published to the store
 // until Close, so Rename must run after Close.
 //
-// Callers hold the lock, except MigrateMeta, which runs without writers.
+// Callers hold name's lock, except MigrateMeta, which runs without writers.
 func atomicWrite(fsys iofs.FS, name string, src io.Reader) error {
 	if _, ok := fsys.(wfs.RenameFS); !ok {
 		return directWrite(fsys, name, src)
@@ -56,7 +56,7 @@ type tempFile struct {
 	published bool
 }
 
-// createTemp creates the temp file that will replace name. Callers hold the lock.
+// createTemp creates the temp file that will replace name. Callers hold name's lock.
 func createTemp(fsys iofs.FS, name string) (*tempFile, error) {
 	tmp, err := tempName(name)
 	if err != nil {
@@ -88,7 +88,7 @@ func (t *tempFile) write(src io.Reader) error {
 	return nil
 }
 
-// publish renames the temp file over name. Callers hold the lock.
+// publish renames the temp file over name. Callers hold name's lock.
 func (t *tempFile) publish() error {
 	if err := wfs.Rename(t.fsys, t.tmp, t.name); err != nil {
 		return fmt.Errorf("failed to rename temp file: %w", err)
@@ -97,7 +97,7 @@ func (t *tempFile) publish() error {
 	return nil
 }
 
-// discard closes the temp file if write never did and removes it unless it was published. Callers hold the lock.
+// discard closes the temp file if write never did and removes it unless it was published. Callers hold name's lock.
 func (t *tempFile) discard() {
 	if !t.written {
 		_ = t.f.Close()

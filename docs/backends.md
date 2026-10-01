@@ -202,14 +202,35 @@ A third-party `Storage` should call `s2.ValidateName` and `s2.ValidatePrefix` at
 
 ## Concurrent writes on osfs and memfs
 
-An `osfs` or `memfs` object is two files, its body and its metadata file, each replaced by a rename. Every change to the tree — creating a temp file, publishing a body and its metadata file, deleting, moving, removing the directories a delete leaves empty — runs under one lock per storage root, so the body, ETag and Content-Type read after a write all come from that write. Bodies are received and synced outside the lock.
+An `osfs` or `memfs` object is two files, its body and its metadata file, each replaced by a rename. Every change to the tree runs under a lock, so the body, ETag and Content-Type read after a write all come from that write. A write — creating its temp files, publishing a body and its metadata file, deleting, moving — holds the storage root shared and its key exclusively, so writes to different keys run side by side. Removing the directories a delete leaves empty holds the root exclusively, and only when a directory did empty. Bodies are received and synced outside the lock.
 
-- The lock is shared by every storage opened on the same directory in one process, whatever path spells it, symlinks included, and by every `Sub` of them. It is not shared by nested roots (`/data` and `/data/b`), by a wrapped filesystem or an `fs.Sub` passed to `fs.NewStorageFS`, by spellings that differ only in case on a case-insensitive filesystem, or by other processes. To coordinate those, give each storage the same `fs.NameLocker`, such as one backed by `flock`, with `fs.WithNameLocker`; a storage built by `s2.NewStorage` gets one when its type is registered again with `s2.RegisterNewStorageFunc`.
+- The lock is shared by every storage opened on the same directory in one process, whatever path spells it, symlinks and case included, and by every `Sub` of them. It is not shared by nested roots (`/data` and `/data/b`), by a wrapped filesystem or an `fs.Sub` passed to `fs.NewStorageFS`, or by other processes. To coordinate a wrapped filesystem or other processes, give each storage the same `fs.NameLocker`, such as one backed by `flock`, with `fs.WithNameLocker`; nested roots and an `fs.Sub` see different names for one file, so a locker shared across them must not implement `SLock`; a storage built by `s2.NewStorage` gets one when its type is registered again with `s2.RegisterNewStorageFunc`.
+- A `NameLocker` sees names relative to the storage it was given to, a `Sub` adding its prefix, with case folded; share one only among storages of the same root. One that also implements `fs.SharedNameLocker` gets the per-key scheme above; one that does not is only asked for `"."`, which then serializes every write.
+- Keys that differ only in case lock as one, on every filesystem. Keys that differ only in Unicode normalization (a composed and a decomposed `é`) or in full case folding (`ß` and `SS`) lock separately, although a case- or normalization-insensitive filesystem such as APFS stores each pair as one file.
 - Reads take no lock: a `Get` racing a `Put` can return the new body with the previous ETag, Content-Type or length until the `Put` finishes.
 - A `Put` racing a `DeleteRecursive` of its directory fails or lands, depending on which reaches the directory first.
-- `PutMetadata` syncs the metadata file under the lock, and on a filesystem without rename a write holds it while it streams.
+- Writing `a` and `a/x` at once leaves one of them; the other fails with `s2.ErrInvalidName`.
+- `Delete` of a name that is a directory, a prefix rather than a key, removes nothing and succeeds.
+- `PutMetadata` syncs the metadata file under its key's lock, and on a filesystem without rename a write holds its key while it streams.
 - `fs.MigrateMeta` takes no lock; run it while nothing writes.
 - A symlinked directory inside a root is not supported: a listing shows it as an object, and deleting an object under it removes the link.
+
+### What a NameLocker is asked for
+
+Each row is one or more sections; within a section the root is taken first, then names in byte order, and a holder of `Lock(".")` takes no names. Names are relative to the storage the locker was given to, case-folded.
+
+| Operation | Calls |
+|---|---|
+| `Put`, `Upload` | `SLock(".")` + `Lock(name)`, once to create the temp files and once to publish them |
+| `Copy` | `SLock(".")` + `Lock(src)` and `Lock(dst)`, then `SLock(".")` + `Lock(dst)` to publish |
+| `PutMetadata`, `Delete` | `SLock(".")` + `Lock(name)` |
+| `Move` | `SLock(".")` + `Lock(src)` and `Lock(dst)`; on a filesystem without rename, `Copy` then `Delete` |
+| `DeleteRecursive` | `SLock(".")` + `Lock(name)` per object, then `Lock(".")` per directory and once more to prune |
+| Pruning after `Delete`, `Move` or a failed write, when a directory emptied | `Lock(".")` |
+| A failed write's cleanup | `SLock(".")` + `Lock(name)` |
+| `Get`, `Exists`, `List`, `SignedURL` | nothing |
+
+On a filesystem without rename, `Put`, `Upload` and `Copy` write in their first section and take no second. A `NameLocker` without `SLock` gets `Lock(".")` alone in place of every row's calls.
 
 ## Content-Type and ETag
 
