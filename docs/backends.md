@@ -200,6 +200,17 @@ An `osfs` or `memfs` root may already hold a key under `.meta`: nothing refused 
 
 A third-party `Storage` should call `s2.ValidateName` and `s2.ValidatePrefix` at the entry of every method that takes a name or a prefix; `s2test.TestStorageNameEscape` checks that it does.
 
+## Concurrent writes on osfs and memfs
+
+An `osfs` or `memfs` object is two files, its body and its metadata file, each replaced by a rename. Every change to the tree — creating a temp file, publishing a body and its metadata file, deleting, moving, removing the directories a delete leaves empty — runs under one lock per storage root, so the body, ETag and Content-Type read after a write all come from that write. Bodies are received and synced outside the lock.
+
+- The lock is shared by every storage opened on the same directory in one process, whatever path spells it, symlinks included, and by every `Sub` of them. It is not shared by nested roots (`/data` and `/data/b`), by a wrapped filesystem or an `fs.Sub` passed to `fs.NewStorageFS`, by spellings that differ only in case on a case-insensitive filesystem, or by other processes. To coordinate those, give each storage the same `fs.NameLocker`, such as one backed by `flock`, with `fs.WithNameLocker`; a storage built by `s2.NewStorage` gets one when its type is registered again with `s2.RegisterNewStorageFunc`.
+- Reads take no lock: a `Get` racing a `Put` can return the new body with the previous ETag, Content-Type or length until the `Put` finishes.
+- A `Put` racing a `DeleteRecursive` of its directory fails or lands, depending on which reaches the directory first.
+- `PutMetadata` syncs the metadata file under the lock, and on a filesystem without rename a write holds it while it streams.
+- `fs.MigrateMeta` takes no lock; run it while nothing writes.
+- A symlinked directory inside a root is not supported: a listing shows it as an object, and deleting an object under it removes the link.
+
 ## Content-Type and ETag
 
 Both are attributes of `s2.Object`, not entries in `Metadata()`. Each backend answers them from what it stores natively, and a `List` result carries the ETag without extra requests. Content-Type is different: S3's listing does not return it, so on an `s3` root every listed object reports `""` and only `Get` has the real value.
