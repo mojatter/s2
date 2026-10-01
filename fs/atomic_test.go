@@ -21,6 +21,7 @@ func newOSFSStorage(t *testing.T) (*storage, string) {
 	t.Helper()
 	dir := t.TempDir()
 	return &storage{
+		lk:   newRootLocker(),
 		cfg:  s2.Config{Type: s2.TypeOSFS, Root: dir},
 		fsys: osfs.DirFS(dir),
 		typ:  s2.TypeOSFS,

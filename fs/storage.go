@@ -33,33 +33,55 @@ func NewStorage(_ context.Context, cfg s2.Config) (s2.Storage, error) {
 	return NewStorageFS(cfg, osfs.DirFS(cfg.Root)), nil
 }
 
-func NewStorageFS(cfg s2.Config, fs fs.FS) s2.Storage {
-	return &storage{
+// Option configures a storage.
+type Option func(*storage)
+
+// NewStorageFS serves fs; an osfs one shares its lock with every storage on the same directory.
+func NewStorageFS(cfg s2.Config, fs fs.FS, opts ...Option) s2.Storage {
+	s := &storage{
 		cfg:  cfg,
 		fsys: fs,
 		typ:  cfg.Type,
 	}
+	if o, ok := fs.(*osfs.OSFS); ok {
+		s.lk = dirLockerFor(o.Dir)
+	} else {
+		s.lk = newRootLocker()
+	}
+	return s.with(opts)
 }
 
-func NewStorageMem(cfg s2.Config) s2.Storage {
-	return &storage{
+func NewStorageMem(cfg s2.Config, opts ...Option) s2.Storage {
+	s := &storage{
 		cfg:  cfg,
 		fsys: memfs.New(),
 		typ:  s2.TypeMemFS,
+		lk:   newRootLocker(),
 	}
+	return s.with(opts)
 }
 
-func NewStorageDir(dir string) s2.Storage {
-	return &storage{
+func NewStorageDir(dir string, opts ...Option) s2.Storage {
+	s := &storage{
 		fsys: osfs.DirFS(dir),
 		typ:  s2.TypeOSFS,
+		lk:   dirLockerFor(dir),
 	}
+	return s.with(opts)
+}
+
+func (s *storage) with(opts []Option) *storage {
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 type storage struct {
 	cfg  s2.Config
 	fsys fs.FS
 	typ  s2.Type
+	lk   NameLocker
 }
 
 func (s *storage) Type() s2.Type {
@@ -102,7 +124,7 @@ func (s *storage) sub(prefix string) (s2.Storage, error) {
 	// io/fs.Sub takes neither.
 	prefix = strings.TrimSuffix(prefix, "/")
 	if prefix == "" {
-		return &storage{cfg: s.cfg, fsys: s.fsys, typ: s.typ}, nil
+		return &storage{cfg: s.cfg, fsys: s.fsys, typ: s.typ, lk: s.lk}, nil
 	}
 	sub, err := fs.Sub(s.fsys, prefix)
 	if err != nil {
@@ -112,6 +134,7 @@ func (s *storage) sub(prefix string) (s2.Storage, error) {
 		cfg:  s.cfg,
 		fsys: sub,
 		typ:  s.typ,
+		lk:   s.lk,
 	}, nil
 }
 
@@ -441,16 +464,18 @@ func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Meta
 	if err := validateName(name); err != nil {
 		return err
 	}
-	obj, err := s.get(name)
-	if err != nil {
-		return err
-	}
-	if err := s.prepareMeta(name); err != nil {
-		return err
-	}
-	m := obj.m
-	m.Metadata = metadata
-	return saveMeta(s.fsys, name, m)
+	return s.locked(ctx, func() error {
+		obj, err := s.get(name)
+		if err != nil {
+			return err
+		}
+		if err := s.prepareMeta(name); err != nil {
+			return err
+		}
+		m := obj.m
+		m.Metadata = metadata
+		return saveMeta(s.fsys, name, m)
+	})
 }
 
 func (s *storage) Copy(ctx context.Context, src, dst string) error {
@@ -493,52 +518,57 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 	// Prefer a direct rename on filesystems that support it: it's atomic and
 	// avoids reading the object body twice.
 	if _, ok := s.fsys.(wfs.RenameFS); ok {
-		if _, err := s.Get(ctx, src); err != nil {
-			return err
-		}
-		if err := s.checkTree(dst); err != nil {
-			return err
-		}
-		srcMeta, hasMeta, err := s.findMeta(src)
-		if err != nil {
-			return err
-		}
-		dstMeta := metaPath(dst)
-		// Create the parents first so a missing or blocked one fails before anything moves.
-		if err := s.mkdirParent(dst); err != nil {
-			return err
-		}
-		if hasMeta {
-			if err := s.prepareMeta(dst); err != nil {
-				return err
-			}
-		}
-		if err := wfs.Rename(s.fsys, src, dst); err != nil {
-			return fmt.Errorf("failed to rename %q to %q: %w", src, dst, err)
-		}
-		// Move the sidecar too; a source without one must not inherit dst's.
-		if hasMeta {
-			if err := wfs.Rename(s.fsys, srcMeta, dstMeta); err != nil {
-				return fmt.Errorf("failed to rename metadata for %q: %w", src, err)
-			}
-			if srcMeta != metaPath(src) {
-				pruneEmptyDirs(s.fsys, path.Dir(srcMeta), metaDir)
-			}
-		} else if info, err := fs.Stat(s.fsys, dstMeta); err == nil && !info.IsDir() {
-			// Only a file: a directory there is no metadata file and can stay.
-			if err := wfs.RemoveFile(s.fsys, dstMeta); err != nil && !isMissingMeta(err) {
-				return fmt.Errorf("failed to remove metadata for %q: %w", dst, err)
-			}
-		}
-		removeLegacyMeta(s.fsys, src)
-		removeLegacyMeta(s.fsys, dst)
-		pruneEmptyParents(s.fsys, src)
-		return nil
+		return s.locked(ctx, func() error { return s.rename(src, dst) })
 	}
 	if err := s.Copy(ctx, src, dst); err != nil {
 		return err
 	}
 	return s.Delete(ctx, src)
+}
+
+// rename moves src and its metadata file to dst; it runs under the lock.
+func (s *storage) rename(src, dst string) error {
+	if _, err := s.get(src); err != nil {
+		return err
+	}
+	if err := s.checkTree(dst); err != nil {
+		return err
+	}
+	srcMeta, hasMeta, err := s.findMeta(src)
+	if err != nil {
+		return err
+	}
+	dstMeta := metaPath(dst)
+	// Create the parents first so a missing or blocked one fails before anything moves.
+	if err := s.mkdirParent(dst); err != nil {
+		return err
+	}
+	if hasMeta {
+		if err := s.prepareMeta(dst); err != nil {
+			return err
+		}
+	}
+	if err := wfs.Rename(s.fsys, src, dst); err != nil {
+		return fmt.Errorf("failed to rename %q to %q: %w", src, dst, err)
+	}
+	// Move the sidecar too; a source without one must not inherit dst's.
+	if hasMeta {
+		if err := wfs.Rename(s.fsys, srcMeta, dstMeta); err != nil {
+			return fmt.Errorf("failed to rename metadata for %q: %w", src, err)
+		}
+		if srcMeta != metaPath(src) {
+			pruneEmptyDirs(s.fsys, path.Dir(srcMeta), metaDir)
+		}
+	} else if info, err := fs.Stat(s.fsys, dstMeta); err == nil && !info.IsDir() {
+		// Only a file: a directory there is no metadata file and can stay.
+		if err := wfs.RemoveFile(s.fsys, dstMeta); err != nil && !isMissingMeta(err) {
+			return fmt.Errorf("failed to remove metadata for %q: %w", dst, err)
+		}
+	}
+	removeLegacyMeta(s.fsys, src)
+	removeLegacyMeta(s.fsys, dst)
+	pruneEmptyParents(s.fsys, src)
+	return nil
 }
 
 // prepareMeta makes room for name's metadata file before its body is written, so a blocked one leaves the object untouched.
@@ -604,11 +634,13 @@ func (s *storage) Delete(ctx context.Context, name string) error {
 	if err := validateName(name); err != nil {
 		return err
 	}
-	if err := s.delete(name); err != nil {
-		return err
-	}
-	pruneEmptyParents(s.fsys, name)
-	return nil
+	return s.locked(ctx, func() error {
+		if err := s.delete(name); err != nil {
+			return err
+		}
+		pruneEmptyParents(s.fsys, name)
+		return nil
+	})
 }
 
 func (s *storage) delete(name string) error {
