@@ -2,11 +2,13 @@ package fs
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/mojatter/s2"
 	"github.com/mojatter/wfs/osfs"
@@ -19,6 +21,7 @@ func newOSFSStorage(t *testing.T) (*storage, string) {
 	t.Helper()
 	dir := t.TempDir()
 	return &storage{
+		lk:   newNameLocker(),
 		cfg:  s2.Config{Type: s2.TypeOSFS, Root: dir},
 		fsys: osfs.DirFS(dir),
 		typ:  s2.TypeOSFS,
@@ -163,4 +166,45 @@ func TestAtomicWrite_FallbackWhenNoRename(t *testing.T) {
 	data, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	require.Equal(t, []byte("v"), data)
+}
+
+// TestTempFile checks each step leaves name and the temp file as the next section expects.
+func TestTempFile(t *testing.T) {
+	testCases := []struct {
+		caseName    string
+		src         io.Reader
+		publish     bool
+		wantWrite   string
+		wantContent string
+	}{
+		{caseName: "published", src: strings.NewReader("new"), publish: true, wantContent: "new"},
+		{caseName: "discarded", src: strings.NewReader("new"), wantContent: "old"},
+		{caseName: "write fails", src: iotest.ErrReader(errors.New("boom")), wantWrite: "boom", wantContent: "old"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			dir := t.TempDir()
+			fsys := osfs.DirFS(dir)
+			require.NoError(t, os.MkdirAll(filepath.Join(dir, "d"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "d", "x"), []byte("old"), 0o644))
+
+			tf, err := createTemp(fsys, "d/x")
+			require.NoError(t, err)
+			err = tf.write(tc.src)
+			if tc.wantWrite != "" {
+				require.ErrorContains(t, err, tc.wantWrite)
+			} else {
+				require.NoError(t, err)
+			}
+			if tc.publish {
+				require.NoError(t, tf.publish())
+			}
+			tf.discard()
+
+			require.Equal(t, []string{"x"}, readDirNames(t, filepath.Join(dir, "d")))
+			data, err := os.ReadFile(filepath.Join(dir, "d", "x"))
+			require.NoError(t, err)
+			require.Equal(t, tc.wantContent, string(data))
+		})
+	}
 }

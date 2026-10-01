@@ -162,19 +162,24 @@ func isMissingMeta(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
-// removeLegacyMeta drops name's legacy metadata file and the directories it leaves empty.
+// removeLegacyMeta drops name's legacy metadata file and the directories it leaves empty. Callers hold name's lock.
 func removeLegacyMeta(fsys fs.FS, name string) {
 	legacy, ok := legacyMetaPath(name)
 	if !ok {
 		return
 	}
 	if wfs.RemoveFile(fsys, legacy) == nil {
-		// A leftover .meta/photos would block a later object "photos".
-		pruneEmptyDirs(fsys, path.Dir(legacy), metaDir)
+		pruneLegacyDirs(fsys, name)
 	}
 }
 
-// pruneEmptyDirs removes dir and its empty parents up to, not including, stop.
+// pruneLegacyDirs removes the directories name's legacy metadata file left empty, keeping .meta/<top>, which only Lock(top) may remove.
+func pruneLegacyDirs(fsys fs.FS, name string) {
+	top, _, _ := strings.Cut(name, "/")
+	pruneEmptyDirs(fsys, path.Dir(path.Join(metaDir, name)), path.Join(metaDir, top))
+}
+
+// pruneEmptyDirs removes dir and its empty parents up to, not including, stop. Callers hold the root exclusively, or stop at a .meta/<top>.
 func pruneEmptyDirs(fsys fs.FS, dir, stop string) {
 	for ; dir != stop && dir != "."; dir = path.Dir(dir) {
 		if info, err := fs.Stat(fsys, dir); err != nil || !info.IsDir() {
@@ -186,7 +191,7 @@ func pruneEmptyDirs(fsys fs.FS, dir, stop string) {
 	}
 }
 
-// pruneEmptyParents removes the directories, with their .meta, that deleting name left empty, up to the storage root.
+// pruneEmptyParents removes the directories, with their .meta, that deleting name left empty, up to the storage root. Callers hold the root exclusively.
 func pruneEmptyParents(fsys fs.FS, name string) {
 	for dir := path.Dir(name); dir != "."; dir = path.Dir(dir) {
 		pruneEmptyDirs(fsys, path.Join(dir, metaDir), dir)
@@ -269,17 +274,27 @@ func parseMeta(data []byte) (meta, error) {
 	return m, nil
 }
 
+// saveMeta writes name's metadata file and drops a legacy one. Callers hold name's lock.
 func saveMeta(fsys fs.FS, name string, m meta) error {
+	data, err := encodeMeta(m)
+	if err != nil {
+		return err
+	}
+	if err := atomicWrite(fsys, metaPath(name), bytes.NewReader(data)); err != nil {
+		return err
+	}
+	removeLegacyMeta(fsys, name)
+	return nil
+}
+
+// encodeMeta renders the metadata file, writing nil metadata as {}.
+func encodeMeta(m meta) ([]byte, error) {
 	if m.Metadata == nil {
 		m.Metadata = s2.Metadata{}
 	}
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(m); err != nil {
-		return fmt.Errorf("failed to encode meta file: %w", err)
+		return nil, fmt.Errorf("failed to encode meta file: %w", err)
 	}
-	if err := atomicWrite(fsys, metaPath(name), &buf); err != nil {
-		return err
-	}
-	removeLegacyMeta(fsys, name)
-	return nil
+	return buf.Bytes(), nil
 }
