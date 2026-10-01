@@ -2311,12 +2311,12 @@ type fsHooks struct {
 	creating map[string]func()       // by the name a temp file replaces, between the mkdir of its parent and its creation
 	mkdir    map[string]func()       // by directory, between the mkdir of its parent and its own
 	renamed  func(oldpath, newpath string) error
-	readDir  map[string]func() // by directory, before it is read. Only the unlocked walk and removeEmptyTree read directories.
-	removing map[string]func() // by name, before it is removed
+	readDir  map[string]func()       // by directory, before it is read. Only the unlocked walk and removeEmptyTree read directories.
+	removing map[string]func() error // by name, before it is removed; an error stands in for the removal's
 }
 
 func newFSHooks() *fsHooks {
-	return &fsHooks{closed: map[string]func() error{}, creating: map[string]func(){}, mkdir: map[string]func(){}, readDir: map[string]func(){}, removing: map[string]func(){}}
+	return &fsHooks{closed: map[string]func() error{}, creating: map[string]func(){}, mkdir: map[string]func(){}, readDir: map[string]func(){}, removing: map[string]func() error{}}
 }
 
 // take pops the hook under key.
@@ -2351,7 +2351,9 @@ func newHookedStorage(base writableFS, hooks *fsHooks, spy *spyLocker) s2.Storag
 	fsys := wfs.DelegateFS(base)
 	fsys.RemoveFileFunc = func(name string) error {
 		if hook, ok := take(hooks, hooks.removing, name); ok {
-			hook()
+			if err := hook(); err != nil {
+				return err
+			}
 		}
 		return base.RemoveFile(name)
 	}
@@ -2616,7 +2618,7 @@ func TestWritesCommitWholly(t *testing.T) {
 				case tc.readDirOn != "":
 					hooks.readDir[tc.readDirOn] = race
 				case tc.removingOn != "":
-					hooks.removing[tc.removingOn] = race
+					hooks.removing[tc.removingOn] = func() error { race(); return nil }
 				case tc.pruneOn:
 					parked := make(chan struct{})
 					park := func() { parked <- struct{}{}; <-release }
@@ -2656,7 +2658,7 @@ func TestWritesCommitWholly(t *testing.T) {
 				released()
 				// A that never removed removingOn runs B afterwards.
 				if hook, ok := take(hooks, hooks.removing, tc.removingOn); ok {
-					hook()
+					_ = hook()
 				}
 				require.ErrorIs(t, <-raceErr, tc.wantRaceErr)
 				for name, want := range tc.want {
@@ -3075,6 +3077,79 @@ func TestDeleteRecursiveRemovesOrphanedTemps(t *testing.T) {
 			_, err := fs.Stat(base, "d")
 			require.ErrorIs(t, err, fs.ErrNotExist)
 		})
+	}
+}
+
+// TestDeleteRecursivePartialFailure checks a run that fails midway still removes the directories it emptied, keeps those holding objects and returns its error (#331).
+func TestDeleteRecursivePartialFailure(t *testing.T) {
+	errInjected := errors.New("injected")
+	seed := []string{"a/gone/x", "a/keep/sub/z", "a/keep/y", "a/late/w"}
+	testCases := []struct {
+		caseName string
+		removing string // the removal that fails or cancels
+		cancel   bool   // cancel the context there instead of failing
+		wantErr  error
+		wantLeft []string
+	}{
+		{
+			caseName: "a removal fails",
+			removing: "a/keep/y",
+			wantErr:  errInjected,
+			wantLeft: []string{"a", "a/keep", "a/keep/y", "a/late", "a/late/w"},
+		},
+		{
+			caseName: "the context is cancelled",
+			removing: "a/keep/sub/z",
+			cancel:   true,
+			wantErr:  context.Canceled,
+			wantLeft: []string{"a", "a/keep", "a/keep/y", "a/late", "a/late/w"},
+		},
+		{
+			caseName: "the context is cancelled after the walk",
+			removing: "a/late/w",
+			cancel:   true,
+			wantErr:  context.Canceled,
+			wantLeft: []string{"a"}, // the prefix's own directory stays until a run succeeds
+		},
+	}
+	for _, backend := range []string{"memfs", "osfs"} {
+		for _, tc := range testCases {
+			t.Run(backend+"/"+tc.caseName, func(t *testing.T) {
+				var base writableFS = memfs.New()
+				if backend == "osfs" {
+					base = osfs.DirFS(t.TempDir()).(*osfs.OSFS)
+				}
+				hooks := newFSHooks()
+				strg := newHookedStorage(base, hooks, newSpyLocker())
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+
+				for _, name := range seed {
+					require.NoError(t, putText(ctx, strg, name, "xxx", nil))
+				}
+				hooks.removing[tc.removing] = func() error {
+					if tc.cancel {
+						cancel()
+						return nil
+					}
+					return errInjected
+				}
+
+				require.ErrorIs(t, strg.DeleteRecursive(ctx, "a/"), tc.wantErr)
+				var left []string
+				// Bodies and directories only: what a failed delete does to metadata files is not this test's concern.
+				require.NoError(t, fs.WalkDir(base, ".", func(name string, d fs.DirEntry, err error) error {
+					if d != nil && d.IsDir() && isMetaDir(d.Name()) {
+						return fs.SkipDir
+					}
+					if name != "." {
+						left = append(left, name)
+					}
+					return err
+				}))
+				require.Equal(t, tc.wantLeft, left)
+			})
+		}
 	}
 }
 

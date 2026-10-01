@@ -243,6 +243,27 @@ func (s *BucketsTestSuite) TestCreateFolder() {
 	s.Contains(res.CommonPrefixes, "sub/")
 }
 
+// A directory used as a bucket without .keep stays a bucket once its last object is deleted (#331).
+func (s *BucketsTestSuite) TestBucketOutlivesItsLastObject() {
+	ctx := context.Background()
+	cfg := DefaultConfig()
+	cfg.Type = s2.TypeOSFS
+	cfg.Root = s.T().TempDir()
+	s.Require().NoError(os.Mkdir(filepath.Join(cfg.Root, "local"), 0o755))
+	bs, err := newBuckets(ctx, cfg)
+	s.Require().NoError(err)
+
+	strg, err := bs.Get(ctx, "local")
+	s.Require().NoError(err)
+	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("sub/a.txt", []byte("a"))))
+	s.Require().NoError(strg.Delete(ctx, "sub/a.txt"))
+
+	s.DirExists(filepath.Join(cfg.Root, "local"))
+	names, err := bs.Names(ctx)
+	s.Require().NoError(err)
+	s.Contains(names, "local")
+}
+
 // A folder must not create the bucket it is written into (#224).
 func (s *BucketsTestSuite) TestCreateFolderMissingBucket() {
 	ctx := context.Background()
