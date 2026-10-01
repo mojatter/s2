@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,10 +19,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// spyLocker is a nameLocker that reports whether it is held.
+// spyLocker is a nameLocker that records every call and counts how many locks are held.
 type spyLocker struct {
 	*nameLocker
-	held atomic.Bool
+	held   atomic.Int32
+	onLock func(name string, shared bool) // runs before each call is delegated
+
+	mu    sync.Mutex
+	calls []lockReq
 }
 
 func newSpyLocker() *spyLocker {
@@ -29,22 +34,56 @@ func newSpyLocker() *spyLocker {
 }
 
 func (l *spyLocker) Lock(ctx context.Context, name string) (func(), error) {
+	l.record(name, false)
 	return l.track(l.nameLocker.Lock(ctx, name))
 }
 
 func (l *spyLocker) SLock(ctx context.Context, name string) (func(), error) {
+	l.record(name, true)
 	return l.track(l.nameLocker.SLock(ctx, name))
+}
+
+func (l *spyLocker) record(name string, shared bool) {
+	if l.onLock != nil {
+		l.onLock(name, shared)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.calls = append(l.calls, lockReq{name: name, shared: shared})
 }
 
 func (l *spyLocker) track(unlock func(), err error) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	l.held.Store(true)
+	l.held.Add(1)
 	return func() {
-		l.held.Store(false)
+		l.held.Add(-1)
 		unlock()
 	}, nil
+}
+
+// holding reports whether any lock is held.
+func (l *spyLocker) holding() bool {
+	return l.held.Load() > 0
+}
+
+// recorded returns the calls so far and forgets them.
+func (l *spyLocker) recorded() []lockReq {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	calls := l.calls
+	l.calls = nil
+	return calls
+}
+
+// lockOnly is a NameLocker without SLock, which s2 serves with the root lock alone.
+type lockOnly struct{ spy *spyLocker }
+
+func (l lockOnly) Lock(ctx context.Context, name string) (func(), error) {
+	return l.spy.Lock(ctx, name)
 }
 
 // lockReq is one lock call of a locker test.
@@ -276,26 +315,147 @@ func TestLockerSharing(t *testing.T) {
 	require.Equal(t, NameLocker(spy), lockerOf(NewStorageDir(dir, WithNameLocker(spy))))
 }
 
-// TestWritesHoldTheLock checks every change an operation makes to the filesystem happens under the lock.
+// TestWritesHoldTheLock checks which locks each operation takes, that every filesystem change happens under them, and that it waits behind them.
 func TestWritesHoldTheLock(t *testing.T) {
 	ctx := context.Background()
+	x := func(name string) lockReq { return lockReq{name: name} }
+	s := func(name string) lockReq { return lockReq{name: name, shared: true} }
+	put := func(name string) func(context.Context, s2.Storage) error {
+		return func(ctx context.Context, strg s2.Storage) error {
+			return strg.Put(ctx, s2.NewObjectBytes(name, []byte("x")))
+		}
+	}
+	move := func(src, dst string) func(context.Context, s2.Storage) error {
+		return func(ctx context.Context, strg s2.Storage) error { return s2.Move(ctx, strg, src, dst) }
+	}
 	testCases := []struct {
 		caseName string
+		seed     []string // objects put through the root before each run; a/b/x if empty
+		sub      string   // the op runs through this Sub; "sidecar" is SubSidecar
+		lockOnly bool     // the locker has no SLock
 		op       func(context.Context, s2.Storage) error
+		want     []lockReq // every call, in order, as the root's locker sees it
+		waitOn   []string  // besides ".", names whose exclusive lock the op waits behind
+		freeOn   string    // a name whose exclusive lock the op does not wait behind
 	}{
-		{caseName: "put metadata", op: func(ctx context.Context, strg s2.Storage) error {
-			return strg.PutMetadata(ctx, "a/b/x", s2.Metadata{"k": "v"})
-		}},
-		{caseName: "move", op: func(ctx context.Context, strg s2.Storage) error { return s2.Move(ctx, strg, "a/b/x", "c/y") }},
-		{caseName: "delete", op: func(ctx context.Context, strg s2.Storage) error { return strg.Delete(ctx, "a/b/x") }},
-		{caseName: "delete recursive", op: func(ctx context.Context, strg s2.Storage) error { return strg.DeleteRecursive(ctx, "a/") }},
+		{
+			caseName: "put",
+			op:       put("a/b/x"),
+			want:     []lockReq{s("."), x("A/B/X"), s("."), x("A/B/X")},
+			waitOn:   []string{"A/B/X"},
+			freeOn:   "A/B/Y",
+		},
+		{
+			caseName: "put metadata",
+			op: func(ctx context.Context, strg s2.Storage) error {
+				return strg.PutMetadata(ctx, "a/b/x", s2.Metadata{"k": "v"})
+			},
+			want:   []lockReq{s("."), x("A/B/X")},
+			waitOn: []string{"A/B/X"},
+			freeOn: "A/B/Y",
+		},
+		{
+			caseName: "copy",
+			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "a/b/x", "c/y") },
+			want:     []lockReq{s("."), x("A/B/X"), x("C/Y"), s("."), x("C/Y")},
+			waitOn:   []string{"A/B/X", "C/Y"},
+			freeOn:   "A/B/Y",
+		},
+		{
+			caseName: "copy onto itself",
+			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "a/b/x", "a/b/x") },
+			want:     []lockReq{s("."), x("A/B/X"), s("."), x("A/B/X")}, // one lock, not a self-deadlock
+			waitOn:   []string{"A/B/X"},
+			freeOn:   "A/B/Y",
+		},
+		{
+			caseName: "move",
+			op:       move("a/b/x", "c/y"),
+			want:     []lockReq{s("."), x("A/B/X"), x("C/Y"), x(".")}, // the prune of a/b is exclusive
+			waitOn:   []string{"A/B/X", "C/Y"},
+			freeOn:   "A/B/Y",
+		},
+		{
+			caseName: "delete",
+			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Delete(ctx, "a/b/x") },
+			want:     []lockReq{s("."), x("A/B/X"), x(".")},
+			waitOn:   []string{"A/B/X"},
+			freeOn:   "A/B/Y",
+		},
+		{
+			caseName: "delete with a sibling left",
+			seed:     []string{"a/b/x", "a/b/y"},
+			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Delete(ctx, "a/b/x") },
+			want:     []lockReq{s("."), x("A/B/X")}, // nothing emptied, so no exclusive section
+			waitOn:   []string{"A/B/X"},
+			freeOn:   "A/B/Y",
+		},
+		{
+			caseName: "delete recursive",
+			op:       func(ctx context.Context, strg s2.Storage) error { return strg.DeleteRecursive(ctx, "a/") },
+			want:     []lockReq{s("."), x("A/B/X"), x("."), x("."), x("."), x(".")}, // a, a/b, a/b/.meta, then the prune
+			waitOn:   []string{"A/B/X"},
+			freeOn:   "A/B/Y",
+		},
+		{
+			caseName: "put through a sub locks the parent's name",
+			sub:      "a/b",
+			op:       put("x"),
+			want:     []lockReq{s("."), x("A/B/X"), s("."), x("A/B/X")},
+			waitOn:   []string{"A/B/X"},
+			freeOn:   "A/B/Y",
+		},
+		{
+			caseName: "put through the sidecar",
+			sub:      "sidecar",
+			op:       put("x"),
+			want:     []lockReq{s("."), x(".META/X"), s("."), x(".META/X")},
+			waitOn:   []string{".META/X"},
+			freeOn:   "X",
+		},
+		{
+			caseName: "put waits behind the other spelling of its name",
+			op:       put("Photo.jpg"),
+			want:     []lockReq{s("."), x("PHOTO.JPG"), s("."), x("PHOTO.JPG")},
+			waitOn:   []string{foldName("photo.jpg")},
+			freeOn:   "A/B/X",
+		},
+		{
+			caseName: "move between spellings of one name",
+			seed:     []string{"Photo.jpg"},
+			op:       move("Photo.jpg", "photo.jpg"),
+			want:     []lockReq{s("."), x("PHOTO.JPG")}, // one lock, not a self-deadlock
+			waitOn:   []string{"PHOTO.JPG"},
+			freeOn:   "A/B/X",
+		},
+		{
+			caseName: "put without SLock",
+			lockOnly: true,
+			op:       put("a/b/x"),
+			want:     []lockReq{x("."), x(".")},
+			freeOn:   "A/B/X",
+		},
+		{
+			caseName: "delete without SLock",
+			lockOnly: true,
+			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Delete(ctx, "a/b/x") },
+			want:     []lockReq{x("."), x(".")},
+			freeOn:   "A/B/X",
+		},
+		{
+			caseName: "copy without SLock",
+			lockOnly: true,
+			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "a/b/x", "c/y") },
+			want:     []lockReq{x("."), x(".")},
+			freeOn:   "A/B/X",
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
 			spy := newSpyLocker()
 			var recording, unlocked atomic.Bool
 			check := func() {
-				if recording.Load() && !spy.held.Load() {
+				if recording.Load() && !spy.holding() {
 					unlocked.Store(true)
 				}
 			}
@@ -309,23 +469,57 @@ func TestWritesHoldTheLock(t *testing.T) {
 			fsys.RemoveFileFunc = func(name string) error { check(); return base.RemoveFile(name) }
 			fsys.MkdirAllFunc = func(dir string, mode iofs.FileMode) error { check(); return base.MkdirAll(dir, mode) }
 			fsys.RemoveAllFunc = func(dir string) error { check(); return base.RemoveAll(dir) }
-			strg := NewStorageFS(s2.Config{Type: s2.TypeMemFS}, fsys, WithNameLocker(spy))
-			require.NoError(t, strg.Put(ctx, s2.NewObjectBytes("a/b/x", []byte("x"))))
+			var lk NameLocker = spy
+			if tc.lockOnly {
+				lk = lockOnly{spy}
+			}
+			root := NewStorageFS(s2.Config{Type: s2.TypeMemFS}, fsys, WithNameLocker(lk))
+			strg := root
+			switch tc.sub {
+			case "":
+			case "sidecar":
+				var ok bool
+				strg, ok = SubSidecar(root)
+				require.True(t, ok)
+			default:
+				var err error
+				strg, err = root.Sub(ctx, tc.sub)
+				require.NoError(t, err)
+			}
+			seed := func() {
+				names := tc.seed
+				if names == nil {
+					names = []string{"a/b/x"}
+				}
+				for _, name := range names {
+					require.NoError(t, root.Put(ctx, s2.NewObjectBytes(name, []byte("x"))))
+				}
+				spy.recorded()
+			}
 
+			seed()
 			recording.Store(true)
 			require.NoError(t, tc.op(ctx, strg))
+			recording.Store(false)
 			require.False(t, unlocked.Load(), "changed the filesystem without the lock")
+			require.Equal(t, tc.want, spy.recorded())
 
-			// The lock is taken, not only held: with it held elsewhere the operation waits.
-			require.NoError(t, strg.Put(ctx, s2.NewObjectBytes("a/b/x", []byte("x"))))
-			unlock, err := spy.Lock(ctx, ".")
+			// The locks are taken, not only held: with one held elsewhere the operation waits.
+			for _, name := range append([]string{"."}, tc.waitOn...) {
+				seed()
+				unlock, err := spy.Lock(ctx, name)
+				require.NoError(t, err)
+				waitCtx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+				require.ErrorIs(t, tc.op(waitCtx, strg), context.DeadlineExceeded, "behind %q", name)
+				cancel()
+				unlock()
+			}
+			seed()
+			unlock, err := spy.Lock(ctx, tc.freeOn)
 			require.NoError(t, err)
 			defer unlock()
 
-			waitCtx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
-			defer cancel()
-
-			require.ErrorIs(t, tc.op(waitCtx, strg), context.DeadlineExceeded)
+			require.NoError(t, tc.op(ctx, strg), "behind %q", tc.freeOn)
 		})
 	}
 }

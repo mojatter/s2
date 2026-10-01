@@ -80,10 +80,11 @@ func (s *storage) with(opts []Option) *storage {
 }
 
 type storage struct {
-	cfg  s2.Config
-	fsys fs.FS
-	typ  s2.Type
-	lk   NameLocker
+	cfg    s2.Config
+	fsys   fs.FS
+	typ    s2.Type
+	lk     NameLocker
+	prefix string // of this storage under the lock root
 }
 
 func (s *storage) Type() s2.Type {
@@ -126,17 +127,18 @@ func (s *storage) sub(prefix string) (s2.Storage, error) {
 	// io/fs.Sub takes neither.
 	prefix = strings.TrimSuffix(prefix, "/")
 	if prefix == "" {
-		return &storage{cfg: s.cfg, fsys: s.fsys, typ: s.typ, lk: s.lk}, nil
+		return &storage{cfg: s.cfg, fsys: s.fsys, typ: s.typ, lk: s.lk, prefix: s.prefix}, nil
 	}
 	sub, err := fs.Sub(s.fsys, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sub %q: %w", prefix, err)
 	}
 	return &storage{
-		cfg:  s.cfg,
-		fsys: sub,
-		typ:  s.typ,
-		lk:   s.lk,
+		cfg:    s.cfg,
+		fsys:   sub,
+		typ:    s.typ,
+		lk:     s.lk,
+		prefix: path.Join(s.prefix, prefix),
 	}, nil
 }
 
@@ -233,7 +235,7 @@ func (s *storage) noKey(dir string, err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || belowObject(s.fsys, dir)
 }
 
-// checkTree refuses a write the tree cannot hold: a key cannot be both an object and a directory, nor sit under an object. Callers hold the lock.
+// checkTree refuses a write the tree cannot hold: a key cannot be both an object and a directory, nor sit under an object. Callers hold name's lock.
 func (s *storage) checkTree(name string) error {
 	info, err := fs.Stat(s.fsys, name)
 	switch {
@@ -431,15 +433,15 @@ func (s *storage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOptions)
 	defer func() { _ = rc.Close() }()
 
 	m := meta{ContentType: obj.ContentType(), Metadata: obj.Metadata()}
-	etag, err := s.write(ctx, name, func() (io.Reader, meta, error) { return rc, m, nil })
+	etag, err := s.write(ctx, []string{name}, name, func() (io.Reader, meta, error) { return rc, m, nil })
 	return s2.UploadResult{ETag: etag}, err
 }
 
-// write stores what open yields under name; open runs inside the first locked section.
-func (s *storage) write(ctx context.Context, name string, open func() (io.Reader, meta, error)) (string, error) {
+// write stores what open yields under name; open runs inside the first section, which holds locks.
+func (s *storage) write(ctx context.Context, locks []string, name string, open func() (io.Reader, meta, error)) (string, error) {
 	if _, ok := s.fsys.(wfs.RenameFS); !ok {
 		var etag string
-		err := s.locked(ctx, func() error {
+		err := s.lockNames(ctx, locks, func() error {
 			src, m, err := open()
 			if err != nil {
 				return err
@@ -454,7 +456,7 @@ func (s *storage) write(ctx context.Context, name string, open func() (io.Reader
 		m   meta
 		p   *pending
 	)
-	err := s.locked(ctx, func() (err error) {
+	err := s.lockNames(ctx, locks, func() (err error) {
 		if src, m, err = open(); err != nil {
 			return err
 		}
@@ -466,7 +468,7 @@ func (s *storage) write(ctx context.Context, name string, open func() (io.Reader
 		etag, err = p.stream(src, m)
 	}
 	if err == nil {
-		err = s.locked(ctx, func() error { return s.commit(p) })
+		err = s.lockNames(ctx, []string{name}, func() error { return s.commit(p) })
 	}
 	if err != nil {
 		s.abandon(ctx, p)
@@ -475,7 +477,7 @@ func (s *storage) write(ctx context.Context, name string, open func() (io.Reader
 	return etag, nil
 }
 
-// uploadDirect writes name in place for a filesystem without rename. Callers hold the lock.
+// uploadDirect writes name in place for a filesystem without rename. Callers hold name's lock.
 func (s *storage) uploadDirect(name string, src io.Reader, m meta) (string, error) {
 	if err := s.checkTree(name); err != nil {
 		return "", err
@@ -496,7 +498,7 @@ func (s *storage) uploadDirect(name string, src io.Reader, m meta) (string, erro
 	return m.ETag, nil
 }
 
-// dropMeta removes name's metadata files, ignoring errors. Callers hold the lock.
+// dropMeta removes name's metadata files, ignoring errors. Callers hold name's lock.
 func (s *storage) dropMeta(name string) {
 	_ = wfs.RemoveFile(s.fsys, metaPath(name))
 	removeLegacyMeta(s.fsys, name)
@@ -508,21 +510,29 @@ type pending struct {
 	body, meta *tempFile
 }
 
-// begin vets name and creates both temp files, returning what it created even on error. Callers hold the lock.
+// begin vets name and creates both temp files, returning what it created even on error. Callers hold name's lock.
 func (s *storage) begin(name string) (*pending, error) {
 	if err := s.checkTree(name); err != nil {
 		return nil, err
 	}
 	if err := s.prepareMeta(name); err != nil {
-		return nil, err
+		return nil, s.refused(name, err)
 	}
 	p := &pending{name: name}
 	var err error
 	if p.body, err = createTemp(s.fsys, name); err != nil {
-		return p, err
+		return p, s.refused(name, err)
 	}
 	p.meta, err = createTemp(s.fsys, metaPath(name))
 	return p, err
+}
+
+// refused answers with checkTree's refusal when the tree changed under err, which stands otherwise.
+func (s *storage) refused(name string, err error) error {
+	if treeErr := s.checkTree(name); treeErr != nil {
+		return treeErr
+	}
+	return err
 }
 
 // stream fills the body, then the metadata file with the body's ETag, outside the lock.
@@ -539,14 +549,14 @@ func (p *pending) stream(src io.Reader, m meta) (string, error) {
 	return m.ETag, p.meta.write(bytes.NewReader(data))
 }
 
-// commit publishes the body, then its metadata file. Callers hold the lock.
+// commit publishes the body, then its metadata file. Callers hold name's lock.
 func (s *storage) commit(p *pending) error {
 	// A directory may have taken the name since begin.
 	if err := s.checkTree(p.name); err != nil {
 		return err
 	}
 	if err := p.body.publish(); err != nil {
-		return err
+		return s.refused(p.name, err)
 	}
 	if err := p.meta.publish(); err != nil {
 		// A stale metadata file would describe the previous body; dropped here, as a later section could hit another writer's.
@@ -562,16 +572,59 @@ func (s *storage) abandon(ctx context.Context, p *pending) {
 	if p == nil {
 		return
 	}
-	_ = s.locked(context.WithoutCancel(ctx), func() error {
+	ctx = context.WithoutCancel(ctx)
+	_ = s.lockNames(ctx, []string{p.name}, func() error {
 		if p.body != nil {
 			p.body.discard()
 		}
 		if p.meta != nil {
 			p.meta.discard()
 		}
-		pruneEmptyParents(s.fsys, p.name)
 		return nil
 	})
+	s.pruneIfEmpty(ctx, p.name)
+}
+
+// pruneIfEmpty removes the directories that removing name left empty, excluding every writer meanwhile; the removal stands either way.
+func (s *storage) pruneIfEmpty(ctx context.Context, name string) {
+	if !emptied(s.fsys, path.Dir(name)) {
+		return
+	}
+	_ = s.lockRoot(context.WithoutCancel(ctx), func() error {
+		pruneEmptyParents(s.fsys, name)
+		return nil
+	})
+}
+
+// emptied reports whether dir holds nothing but perhaps its .meta, without reading it whole.
+func emptied(fsys fs.FS, dir string) bool {
+	if dir == "." {
+		return false
+	}
+	entries, err := readSome(fsys, dir, 2)
+	if err != nil {
+		return false
+	}
+	return len(entries) == 0 || len(entries) == 1 && isMetaDir(entries[0].Name())
+}
+
+// readSome reads up to n entries of dir.
+func readSome(fsys fs.FS, dir string, n int) ([]fs.DirEntry, error) {
+	f, err := fsys.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	rd, ok := f.(fs.ReadDirFile)
+	if !ok {
+		return fs.ReadDir(fsys, dir)
+	}
+	entries, err := rd.ReadDir(n)
+	if err == io.EOF {
+		err = nil
+	}
+	return entries, err
 }
 
 // PutMetadata replaces the user metadata and keeps the ETag and content type.
@@ -579,7 +632,7 @@ func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Meta
 	if err := validateName(name); err != nil {
 		return err
 	}
-	return s.locked(ctx, func() error {
+	return s.lockNames(ctx, []string{name}, func() error {
 		obj, err := s.get(name)
 		if err != nil {
 			return err
@@ -607,7 +660,7 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 		}
 	}()
 
-	_, err := s.write(ctx, dst, func() (io.Reader, meta, error) {
+	_, err := s.write(ctx, []string{src, dst}, dst, func() (io.Reader, meta, error) {
 		srcObj, body, err := s.openSource(src)
 		if err != nil {
 			return nil, meta{}, err
@@ -618,7 +671,7 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 	return err
 }
 
-// openSource gets src and opens its body, so both come from one version. Callers hold the lock.
+// openSource gets src and opens its body, so both come from one version. Callers hold src's lock.
 func (s *storage) openSource(src string) (*object, io.ReadCloser, error) {
 	srcObj, err := s.get(src)
 	if err != nil {
@@ -640,7 +693,11 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 	// Prefer a direct rename on filesystems that support it: it's atomic and
 	// avoids reading the object body twice.
 	if _, ok := s.fsys.(wfs.RenameFS); ok {
-		return s.locked(ctx, func() error { return s.rename(src, dst) })
+		if err := s.lockNames(ctx, []string{src, dst}, func() error { return s.rename(src, dst) }); err != nil {
+			return err
+		}
+		s.pruneIfEmpty(ctx, src)
+		return nil
 	}
 	if err := s.Copy(ctx, src, dst); err != nil {
 		return err
@@ -648,7 +705,7 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 	return s.Delete(ctx, src)
 }
 
-// rename moves src and its metadata file to dst. Callers hold the lock.
+// rename moves src and its metadata file to dst. Callers hold both names' locks.
 func (s *storage) rename(src, dst string) error {
 	if _, err := s.get(src); err != nil {
 		return err
@@ -663,15 +720,15 @@ func (s *storage) rename(src, dst string) error {
 	dstMeta := metaPath(dst)
 	// Create the parents first so a missing or blocked one fails before anything moves.
 	if err := s.mkdirParent(dst); err != nil {
-		return err
+		return s.refused(dst, err)
 	}
 	if hasMeta {
 		if err := s.prepareMeta(dst); err != nil {
-			return err
+			return s.refused(dst, err)
 		}
 	}
 	if err := wfs.Rename(s.fsys, src, dst); err != nil {
-		return fmt.Errorf("failed to rename %q to %q: %w", src, dst, err)
+		return s.refused(dst, fmt.Errorf("failed to rename %q to %q: %w", src, dst, err))
 	}
 	// Move the sidecar too; a source without one must not inherit dst's.
 	if hasMeta {
@@ -679,7 +736,7 @@ func (s *storage) rename(src, dst string) error {
 			return fmt.Errorf("failed to rename metadata for %q: %w", src, err)
 		}
 		if srcMeta != metaPath(src) {
-			pruneEmptyDirs(s.fsys, path.Dir(srcMeta), metaDir)
+			pruneLegacyDirs(s.fsys, src)
 		}
 	} else if info, err := fs.Stat(s.fsys, dstMeta); err == nil && !info.IsDir() {
 		// Only a file: a directory there is no metadata file and can stay.
@@ -689,11 +746,10 @@ func (s *storage) rename(src, dst string) error {
 	}
 	removeLegacyMeta(s.fsys, src)
 	removeLegacyMeta(s.fsys, dst)
-	pruneEmptyParents(s.fsys, src)
 	return nil
 }
 
-// prepareMeta makes room for name's metadata file before its body is written, so a blocked one leaves the object untouched. Callers hold the lock.
+// prepareMeta makes room for name's metadata file before its body is written, so a blocked one leaves the object untouched. Callers hold name's lock.
 func (s *storage) prepareMeta(name string) error {
 	p := metaPath(name)
 	if info, err := fs.Stat(s.fsys, path.Dir(p)); err == nil && !info.IsDir() {
@@ -709,9 +765,12 @@ func (s *storage) prepareMeta(name string) error {
 	return nil
 }
 
-// removeEmptyTree removes dir and the empty directories under it, deepest first; a file anywhere keeps it. Callers hold the lock.
+// removeEmptyTree removes dir and the empty directories under it, deepest first; a file anywhere keeps it, another remover's work counts as done.
 func removeEmptyTree(fsys fs.FS, dir string) error {
 	entries, err := fs.ReadDir(fsys, dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -723,7 +782,10 @@ func removeEmptyTree(fsys fs.FS, dir string) error {
 			return err
 		}
 	}
-	return wfs.RemoveFile(fsys, dir)
+	if err := wfs.RemoveFile(fsys, dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // findMeta locates name's metadata file, falling back to the legacy location as loadMeta does.
@@ -739,7 +801,7 @@ func (s *storage) findMeta(name string) (string, bool, error) {
 	return p, true, nil
 }
 
-// mkdirParent creates name's parent directory, which Rename does not. Callers hold the lock.
+// mkdirParent creates name's parent directory, which Rename does not. Callers hold name's lock.
 func (s *storage) mkdirParent(name string) error {
 	dir := path.Dir(name)
 	// Skip MkdirAll when the parent exists so a RenameFS without WriteFileFS still moves.
@@ -756,19 +818,26 @@ func (s *storage) Delete(ctx context.Context, name string) error {
 	if err := validateName(name); err != nil {
 		return err
 	}
-	return s.locked(ctx, func() error {
-		if err := s.delete(name); err != nil {
-			return err
-		}
-		pruneEmptyParents(s.fsys, name)
-		return nil
-	})
+	if err := s.lockNames(ctx, []string{name}, func() error { return s.delete(name) }); err != nil {
+		return err
+	}
+	s.pruneIfEmpty(ctx, name)
+	return nil
 }
 
-// delete removes name's metadata files and body. Callers hold the lock.
+// delete removes name's metadata files, then its body; a directory is a prefix, not a key, and stays. Callers hold name's lock.
 func (s *storage) delete(name string) error {
 	s.dropMeta(name)
-	if err := wfs.RemoveFile(s.fsys, name); err != nil && !s.noKey(path.Dir(name), err) {
+	info, err := fs.Stat(s.fsys, name)
+	switch {
+	case err != nil && s.noKey(path.Dir(name), err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("failed to stat %q: %w", name, err)
+	case info.IsDir():
+		return nil
+	}
+	if err := wfs.RemoveFile(s.fsys, name); err != nil {
 		return fmt.Errorf("failed to delete %q: %w", name, err)
 	}
 	return nil
@@ -809,24 +878,24 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 		}
 		// These names came from the walk, so they are whatever the filesystem
 		// already holds; validating them here would leave the rest behind.
-		return s.locked(ctx, func() error { return s.delete(name) })
+		return s.lockNames(ctx, []string{name}, func() error { return s.delete(name) })
 	})
 	if err != nil {
 		return err
 	}
-	// Deepest first, one section each, so writers are never held for the whole run.
+	// Deepest first, one exclusive section each, so writers are never held for the whole run.
 	for _, dir := range slices.Backward(dirs) {
-		if err := s.locked(ctx, func() error { return s.removeDir(dir, prefix) }); err != nil {
+		if err := s.lockRoot(ctx, func() error { return s.removeDir(dir, prefix) }); err != nil {
 			return err
 		}
 	}
-	return s.locked(ctx, func() error {
+	return s.lockRoot(ctx, func() error {
 		pruneEmptyParents(s.fsys, dirName)
 		return nil
 	})
 }
 
-// removeDir removes dir as the walk saw it, which may be gone or an object by now. Callers hold the lock.
+// removeDir removes dir as the walk saw it, which may be gone or an object by now. Callers hold the root exclusively.
 func (s *storage) removeDir(dir, prefix string) error {
 	info, err := fs.Stat(s.fsys, dir)
 	switch {

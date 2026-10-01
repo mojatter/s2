@@ -2,6 +2,7 @@ package fs
 
 import (
 	"context"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -10,13 +11,13 @@ import (
 )
 
 // NameLocker locks names relative to the storage root; "." is the root itself.
-// s2 locks only "." for now; an implementation must treat each name as its own lock.
+// Without SLock, s2 locks only "."; with it, each name is its own lock.
 type NameLocker interface {
 	// Lock takes name exclusively.
 	Lock(ctx context.Context, name string) (unlock func(), err error)
 }
 
-// SharedNameLocker is a NameLocker whose names can also be held shared.
+// SharedNameLocker is a NameLocker whose names can also be held shared; docs/backends.md lists which operation takes which.
 type SharedNameLocker interface {
 	NameLocker
 	// SLock takes name shared: it excludes Lock holders, not other SLock holders.
@@ -182,8 +183,8 @@ func rootKey(dir string) string {
 	}
 }
 
-// locked runs fn under the root lock; it is not reentrant, so nothing inside fn may call it.
-func (s *storage) locked(ctx context.Context, fn func() error) error {
+// lockRoot runs fn with the root held exclusively; nothing nests, so nothing inside fn may lock.
+func (s *storage) lockRoot(ctx context.Context, fn func() error) error {
 	unlock, err := s.lk.Lock(ctx, ".")
 	if err != nil {
 		return err
@@ -191,4 +192,36 @@ func (s *storage) locked(ctx context.Context, fn func() error) error {
 	defer unlock()
 
 	return fn()
+}
+
+// lockNames runs fn with the root shared and names held exclusively; a locker without SLock holds the root alone.
+func (s *storage) lockNames(ctx context.Context, names []string, fn func() error) error {
+	sl, ok := s.lk.(SharedNameLocker)
+	if !ok {
+		return s.lockRoot(ctx, fn)
+	}
+	unlock, err := sl.SLock(ctx, ".")
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	for _, key := range s.qualifiedNames(names) {
+		unlock, err := sl.Lock(ctx, key)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	}
+	return fn()
+}
+
+// qualifiedNames qualifies names by the storage's prefix and folds them, sorted and without duplicates.
+func (s *storage) qualifiedNames(names []string) []string {
+	keys := make([]string, 0, len(names))
+	for _, name := range names {
+		keys = append(keys, foldName(path.Join(s.prefix, name)))
+	}
+	slices.Sort(keys)
+	return slices.Compact(keys)
 }

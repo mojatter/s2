@@ -27,6 +27,7 @@ import (
 	"github.com/mojatter/wfs"
 	"github.com/mojatter/wfs/memfs"
 	"github.com/mojatter/wfs/osfs"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
@@ -789,6 +790,12 @@ func (s *StorageTestSuite) TestDeletePrunesEmptyDirs() {
 			raws:     []string{"a/x.txt"},
 			remove:   func(strg s2.Storage) error { return strg.Delete(ctx, "a/b/c.txt") },
 			wantLeft: []string{"a", "a/x.txt"},
+		},
+		{
+			caseName: "a prefix's name is not a key", // nor a directory to remove, which only the root lock may
+			puts:     []string{"a/b/c.txt"},
+			remove:   func(strg s2.Storage) error { return strg.Delete(ctx, "a/b") },
+			wantLeft: []string{"a", "a/b", "a/b/.meta", "a/b/.meta/c.txt", "a/b/c.txt"},
 		},
 		{
 			caseName: "delete recursive",
@@ -1837,7 +1844,7 @@ func (s *StorageTestSuite) TestMetaLegacyLocation() {
 		wantCT    string
 		wantMeta  s2.Metadata
 		wantETagF func(etag string) bool
-		// keepsLegacy is set when nothing is written, so the legacy directory stays.
+		// keepsLegacy is set when nothing is written, so the legacy metadata file stays.
 		keepsLegacy bool
 	}{
 		{
@@ -1921,8 +1928,11 @@ func (s *StorageTestSuite) TestMetaLegacyLocation() {
 				if tc.keepsLegacy {
 					return
 				}
-				_, err := fs.Stat(fsys, ".meta/photos")
-				s.ErrorIs(err, fs.ErrNotExist, "the legacy directory is pruned")
+				_, err := fs.Stat(fsys, ".meta/photos/a.txt")
+				s.ErrorIs(err, fs.ErrNotExist, "the legacy metadata file is gone")
+				entries, err := fs.ReadDir(fsys, ".meta/photos")
+				s.NoError(err, ".meta/photos stays for Lock(\"photos\") to remove")
+				s.Empty(entries)
 			})
 		}
 	}
@@ -2278,38 +2288,96 @@ func (f *hookFile) Close() error {
 	return f.onClose()
 }
 
-// fsHooks injects steps into a storage's filesystem.
+// fsHooks injects steps into a storage's filesystem; each fires once.
 type fsHooks struct {
-	closed  map[string]func() error // by the name a temp file replaces; fires once
-	renamed func(oldpath, newpath string) error
-	readDir map[string]func() // by directory, before it is read; fires once. Only the unlocked walk reads directories.
+	mu       sync.Mutex
+	closed   map[string]func() error // by the name a temp file replaces, once it is written
+	creating map[string]func()       // by the name a temp file replaces, between the mkdir of its parent and its creation
+	mkdir    map[string]func()       // by directory, between the mkdir of its parent and its own
+	renamed  func(oldpath, newpath string) error
+	readDir  map[string]func() // by directory, before it is read. Only the unlocked walk and removeEmptyTree read directories.
+	removing map[string]func() // by name, before it is removed
 }
 
-// newHookedStorage returns a storage on base whose temp files and renames go through hooks.
+func newFSHooks() *fsHooks {
+	return &fsHooks{closed: map[string]func() error{}, creating: map[string]func(){}, mkdir: map[string]func(){}, readDir: map[string]func(){}, removing: map[string]func(){}}
+}
+
+// take pops the hook under key.
+func take[H any](h *fsHooks, hooks map[string]H, key string) (H, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	hook, ok := hooks[key]
+	delete(hooks, key)
+	return hook, ok
+}
+
+// takeTemp pops the hook of the object name the temp file tmp stands for.
+func takeTemp[H any](h *fsHooks, hooks map[string]H, tmp string) (H, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	dir, file := path.Split(tmp)
+	for target, hook := range hooks {
+		tdir, tbase := path.Split(target)
+		if dir == tdir && strings.HasPrefix(file, tmpPrefix+tbase+".") {
+			delete(hooks, target)
+			return hook, true
+		}
+	}
+	var none H
+	return none, false
+}
+
+// newHookedStorage returns a storage on base whose temp files, directories, renames and removals go through hooks.
 func newHookedStorage(base writableFS, hooks *fsHooks, spy *spyLocker) s2.Storage {
 	fsys := wfs.DelegateFS(base)
-	fsys.MkdirAllFunc = base.MkdirAll
-	fsys.RemoveFileFunc = base.RemoveFile
+	fsys.RemoveFileFunc = func(name string) error {
+		if hook, ok := take(hooks, hooks.removing, name); ok {
+			hook()
+		}
+		return base.RemoveFile(name)
+	}
 	fsys.RemoveAllFunc = base.RemoveAll
+	fsys.MkdirAllFunc = func(dir string, mode fs.FileMode) error {
+		hook, ok := take(hooks, hooks.mkdir, dir)
+		if !ok {
+			return base.MkdirAll(dir, mode)
+		}
+		// As os.MkdirAll: the parent first, then dir, which fails when the parent went away meanwhile.
+		if err := base.MkdirAll(path.Dir(dir), mode); err != nil {
+			return err
+		}
+		hook()
+		if _, err := fs.Stat(base, path.Dir(dir)); err != nil {
+			return err
+		}
+		return base.MkdirAll(dir, mode)
+	}
 	fsys.ReadDirFunc = func(name string) ([]fs.DirEntry, error) {
-		if hook, ok := hooks.readDir[name]; ok {
-			delete(hooks.readDir, name)
+		if hook, ok := take(hooks, hooks.readDir, name); ok {
 			hook()
 		}
 		return fs.ReadDir(base, name)
 	}
 	fsys.CreateFileFunc = func(name string, mode fs.FileMode) (wfs.WriterFile, error) {
+		if hook, ok := takeTemp(hooks, hooks.creating, name); ok {
+			// As wfs.CreateFile: the parent first, then the file, which fails when the parent went away meanwhile.
+			if err := base.MkdirAll(path.Dir(name), mode); err != nil {
+				return nil, err
+			}
+			hook()
+			if _, err := fs.Stat(base, path.Dir(name)); err != nil {
+				return nil, err
+			}
+		}
 		f, err := base.CreateFile(name, mode)
 		if err != nil {
 			return nil, err
 		}
-		dir, file := path.Split(name)
-		for target, hook := range hooks.closed {
-			tdir, tbase := path.Split(target)
-			if dir == tdir && strings.HasPrefix(file, tmpPrefix+tbase+".") {
-				delete(hooks.closed, target)
-				return &hookFile{WriterFile: f, onClose: hook}, nil
-			}
+		if hook, ok := takeTemp(hooks, hooks.closed, name); ok {
+			return &hookFile{WriterFile: f, onClose: hook}, nil
 		}
 		return f, nil
 	}
@@ -2345,64 +2413,149 @@ func putText(ctx context.Context, strg s2.Storage, name, body string, md s2.Meta
 	return strg.Put(ctx, s2.NewObjectBytes(name, []byte(body), s2.WithContentType("text/"+body[:1]), s2.WithMetadata(md)))
 }
 
-// TestWritesCommitWholly checks a write racing another on one name leaves a body and metadata file from one writer (#329, #317).
+// TestWritesCommitWholly checks a write racing another leaves a body and metadata file from one writer, and the tree it found (#329, #317).
 func TestWritesCommitWholly(t *testing.T) {
 	ctx := context.Background()
+	put := func(name, body string) func(context.Context, s2.Storage) error {
+		return func(ctx context.Context, strg s2.Storage) error { return putText(ctx, strg, name, body, nil) }
+	}
+	del := func(name string) func(context.Context, s2.Storage) error {
+		return func(ctx context.Context, strg s2.Storage) error { return strg.Delete(ctx, name) }
+	}
 	testCases := []struct {
 		caseName string
 		seed     map[string]string
-		// write is A; race runs once A's metadata file is written, before it is published, outside the lock.
-		write  func(strg s2.Storage) error
-		raceOn string
-		race   func(strg s2.Storage) error
-		want   map[string]string // name → body; "" means absent
+		raws     []string                                // files made around the storage, such as by an older s2
+		write    func(context.Context, s2.Storage) error // A
+		timeout  time.Duration                           // of A's ctx, if any
+		// race is B, run at exactly one point of A: once A's metadata temp of raceOn is written, outside sections;
+		// between the two mkdirs of mkdirOn, before A reads readDirOn or removes removingOn, inside A's first section; or, with pruneOn,
+		// as A is about to take its exclusive prune lock, in a goroutine that parks on its own body temp's close
+		// (parkOnClose) or creation (parkOnCreate) until A's ctx expires or, without a timeout, A has returned or
+		// its prune is queued behind B.
+		raceOn, mkdirOn, readDirOn, removingOn string
+		pruneOn                                bool
+		parkOnClose, parkOnCreate              string
+		race                                   func(context.Context, s2.Storage) error
+		wantErr, wantRaceErr                   error
+		want                                   map[string]string // name → body; "" means absent, a directory included
 	}{
 		{
 			caseName: "put x put",
-			write:    func(strg s2.Storage) error { return putText(ctx, strg, "x", "aaa", nil) },
+			write:    put("x", "aaa"),
 			raceOn:   "x",
-			race:     func(strg s2.Storage) error { return putText(ctx, strg, "x", "bbbbbb", nil) },
+			race:     put("x", "bbbbbb"),
 			want:     map[string]string{"x": "aaa"},
 		},
 		{
 			caseName: "put x put metadata",
 			seed:     map[string]string{"x": "ooo"},
-			write:    func(strg s2.Storage) error { return putText(ctx, strg, "x", "aaa", nil) },
+			write:    put("x", "aaa"),
 			raceOn:   "x",
-			race:     func(strg s2.Storage) error { return strg.PutMetadata(ctx, "x", s2.Metadata{"k": "v"}) },
-			want:     map[string]string{"x": "aaa"},
+			race: func(ctx context.Context, strg s2.Storage) error {
+				return strg.PutMetadata(ctx, "x", s2.Metadata{"k": "v"})
+			},
+			want: map[string]string{"x": "aaa"},
 		},
 		{
 			caseName: "put x delete",
 			seed:     map[string]string{"x": "ooo"},
-			write:    func(strg s2.Storage) error { return putText(ctx, strg, "x", "aaa", nil) },
+			write:    put("x", "aaa"),
 			raceOn:   "x",
-			race:     func(strg s2.Storage) error { return strg.Delete(ctx, "x") },
+			race:     del("x"),
 			want:     map[string]string{"x": "aaa"},
 		},
 		{
 			caseName: "put x move to it",
 			seed:     map[string]string{"s": "sss"},
-			write:    func(strg s2.Storage) error { return putText(ctx, strg, "d", "aaa", nil) },
+			write:    put("d", "aaa"),
 			raceOn:   "d",
-			race:     func(strg s2.Storage) error { return s2.Move(ctx, strg, "s", "d") },
+			race:     func(ctx context.Context, strg s2.Storage) error { return s2.Move(ctx, strg, "s", "d") },
 			want:     map[string]string{"d": "aaa", "s": ""},
 		},
 		{
 			caseName: "copy x put source",
 			seed:     map[string]string{"s": "sss"},
-			write:    func(strg s2.Storage) error { return strg.Copy(ctx, "s", "d") },
+			write:    func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "s", "d") },
 			raceOn:   "d",
-			race:     func(strg s2.Storage) error { return putText(ctx, strg, "s", "bbbbbb", nil) },
+			race:     put("s", "bbbbbb"),
 			want:     map[string]string{"d": "sss", "s": "bbbbbb"},
 		},
 		{
 			caseName: "put x delete of the last sibling",
 			seed:     map[string]string{"a/b/y": "yyy"},
-			write:    func(strg s2.Storage) error { return putText(ctx, strg, "a/b/x", "aaa", nil) },
+			write:    put("a/b/x", "aaa"),
 			raceOn:   "a/b/x",
-			race:     func(strg s2.Storage) error { return strg.Delete(ctx, "a/b/y") },
+			race:     del("a/b/y"),
 			want:     map[string]string{"a/b/x": "aaa", "a/b/y": ""},
+		},
+		{
+			// B lands first, so A's commit finds a directory; the raw-error branch of begin and commit is stress-only.
+			caseName: "put x put beneath it",
+			write:    put("a", "aaa"),
+			raceOn:   "a",
+			race:     put("a/x", "bbbbbb"),
+			wantErr:  s2.ErrInvalidName,
+			want:     map[string]string{"a/x": "bbbbbb"},
+		},
+		{
+			caseName:    "put beneath x put above it",
+			write:       put("a/x", "aaa"),
+			raceOn:      "a/x",
+			race:        put("a", "bbbbbb"),
+			wantRaceErr: s2.ErrInvalidName, // A's directory is there before B begins
+			want:        map[string]string{"a/x": "aaa"},
+		},
+		{
+			caseName: "put beneath x delete of the directory's name", // a prefix is not a key, even while empty between a writer's mkdirs
+			write:    put("a/x", "aaa"),
+			mkdirOn:  "a/.meta",
+			race:     del("a"),
+			want:     map[string]string{"a/x": "aaa"},
+		},
+		{
+			caseName:    "put x delete of the last sibling, delete first", // the prune stops at the temps of a writer between its sections
+			seed:        map[string]string{"a/b/y": "yyy"},
+			write:       del("a/b/y"),
+			pruneOn:     true,
+			parkOnClose: "a/b/x",
+			race:        put("a/b/x", "bbbbbb"),
+			want:        map[string]string{"a/b/x": "bbbbbb", "a/b/y": ""},
+		},
+		{
+			caseName:     "put x delete of the last sibling, prune during the put's first section", // #317: the prune waits for the writer's mkdir and create
+			seed:         map[string]string{"a/b/y": "yyy"},
+			write:        del("a/b/y"),
+			pruneOn:      true,
+			parkOnCreate: "a/b/x",
+			race:         put("a/b/x", "bbbbbb"),
+			want:         map[string]string{"a/b/x": "bbbbbb", "a/b/y": ""},
+		},
+		{
+			caseName:     "delete whose ctx expires while its prune waits", // the deletion stands, so the prune must follow
+			seed:         map[string]string{"a/b/y": "yyy"},
+			write:        del("a/b/y"),
+			timeout:      100 * time.Millisecond,
+			pruneOn:      true,
+			parkOnCreate: "c/z",
+			race:         put("c/z", "bbbbbb"),
+			want:         map[string]string{"a/b/y": "", "a/b": "", "c/z": "bbbbbb"},
+		},
+		{
+			caseName:  "put x delete pruning the legacy directory it is clearing", // removeEmptyTree finds another remover's work done
+			raws:      []string{".meta/photos/sub/x"},
+			write:     put("photos", "aaa"),
+			readDirOn: ".meta/photos",
+			race:      del("photos/sub/x"),
+			want:      map[string]string{"photos": "aaa"},
+		},
+		{
+			caseName:   "delete pruning the legacy directory x put of its name", // the prune keeps .meta/photos, the put's metadata directory
+			raws:       []string{".meta/photos/sub/x"},
+			write:      del("photos/sub/x"),
+			removingOn: ".meta/photos",
+			race:       put("photos", "aaa"),
+			want:       map[string]string{"photos": "aaa"},
 		},
 	}
 	for _, backend := range []string{"memfs", "osfs"} {
@@ -2413,18 +2566,83 @@ func TestWritesCommitWholly(t *testing.T) {
 					base = osfs.DirFS(t.TempDir()).(*osfs.OSFS)
 				}
 				spy := newSpyLocker()
-				hooks := &fsHooks{closed: map[string]func() error{}}
+				hooks := newFSHooks()
 				strg := newHookedStorage(base, hooks, spy)
 				for name, body := range tc.seed {
 					require.NoError(t, putText(ctx, strg, name, body, nil))
 				}
-				hooks.closed[metaPath(tc.raceOn)] = func() error {
-					require.False(t, spy.held.Load(), "the race would run inside a section")
-					require.NoError(t, tc.race(strg))
-					return nil
+				for _, name := range tc.raws {
+					_, err := wfs.WriteFile(base, name, []byte("x"), fs.ModePerm)
+					require.NoError(t, err)
+				}
+				spy.recorded()
+				writeCtx := ctx
+				if tc.timeout > 0 {
+					var cancel context.CancelFunc
+					writeCtx, cancel = context.WithTimeout(ctx, tc.timeout)
+					defer cancel()
+				}
+				raceErr := make(chan error, 1)
+				race := func() { raceErr <- tc.race(ctx, strg) }
+				var done atomic.Bool
+				release := make(chan struct{})
+				var releaseOnce sync.Once
+				released := func() { releaseOnce.Do(func() { close(release) }) }
+				switch {
+				case tc.raceOn != "":
+					hooks.closed[metaPath(tc.raceOn)] = func() error {
+						assert.False(t, spy.holding(), "the race would run inside a section")
+						race()
+						return nil
+					}
+				case tc.mkdirOn != "":
+					hooks.mkdir[tc.mkdirOn] = race
+				case tc.readDirOn != "":
+					hooks.readDir[tc.readDirOn] = race
+				case tc.removingOn != "":
+					hooks.removing[tc.removingOn] = race
+				case tc.pruneOn:
+					parked := make(chan struct{})
+					park := func() { parked <- struct{}{}; <-release }
+					if tc.parkOnClose != "" {
+						hooks.closed[tc.parkOnClose] = func() error { park(); return nil }
+					}
+					if tc.parkOnCreate != "" {
+						hooks.creating[tc.parkOnCreate] = park
+					}
+					var fired atomic.Bool
+					spy.onLock = func(name string, shared bool) {
+						// A's first section took "." and its name; the next "." is the prune.
+						spy.mu.Lock()
+						calls := len(spy.calls)
+						spy.mu.Unlock()
+						if name != "." || calls < 2 || fired.Swap(true) {
+							return
+						}
+						assert.False(t, shared, "the prune holds the root exclusively")
+						go race()
+						<-parked
+						go func() {
+							if tc.timeout > 0 {
+								<-writeCtx.Done()
+							} else {
+								for !done.Load() && queued(spy.nameLocker, ".") == 0 {
+									time.Sleep(time.Millisecond)
+								}
+							}
+							released()
+						}()
+					}
 				}
 
-				require.NoError(t, tc.write(strg))
+				require.ErrorIs(t, tc.write(writeCtx, strg), tc.wantErr)
+				done.Store(true)
+				released()
+				// A that never removed removingOn runs B afterwards.
+				if hook, ok := take(hooks, hooks.removing, tc.removingOn); ok {
+					hook()
+				}
+				require.ErrorIs(t, <-raceErr, tc.wantRaceErr)
 				for name, want := range tc.want {
 					if want == "" {
 						ok, err := strg.Exists(ctx, name)
@@ -2434,6 +2652,11 @@ func TestWritesCommitWholly(t *testing.T) {
 					}
 					require.Equal(t, want, readConsistent(t, strg, name))
 				}
+				require.NoError(t, fs.WalkDir(base, ".", func(name string, d fs.DirEntry, err error) error {
+					require.NoError(t, err)
+					require.False(t, strings.HasPrefix(d.Name(), tmpPrefix), "temp file %q left", name)
+					return nil
+				}))
 			})
 		}
 	}
@@ -2500,7 +2723,7 @@ func TestWriteFailuresCleanUp(t *testing.T) {
 				if backend == "osfs" {
 					base = osfs.DirFS(t.TempDir()).(*osfs.OSFS)
 				}
-				hooks := &fsHooks{closed: map[string]func() error{}}
+				hooks := newFSHooks()
 				strg := newHookedStorage(base, hooks, newSpyLocker())
 				for name, body := range tc.seed {
 					require.NoError(t, putText(ctx, strg, name, body, nil))
@@ -2540,7 +2763,7 @@ func TestWriteFailuresCleanUp(t *testing.T) {
 func TestMetadataPublishFailureDropsStaleMetadata(t *testing.T) {
 	ctx := context.Background()
 	base := memfs.New()
-	hooks := &fsHooks{closed: map[string]func() error{}}
+	hooks := newFSHooks()
 	strg := newHookedStorage(base, hooks, newSpyLocker())
 	require.NoError(t, putText(ctx, strg, "x", "ooo", nil))
 	hooks.renamed = func(_, newpath string) error {
@@ -2631,6 +2854,23 @@ func TestConcurrentWritesStress(t *testing.T) {
 			b:        func(strg s2.Storage) error { return putText(ctx, strg, "a/b/c/x", "bbbbbb", nil) },
 			check:    []string{"a/b/c/x"},
 		},
+		{
+			caseName: "put x delete of its directory's name", // osfs makes the directory in two mkdirs, empty in between
+			a: func(strg s2.Storage) error {
+				for range 200 {
+					_ = strg.Delete(ctx, "a")
+				}
+				return nil
+			},
+			b:     func(strg s2.Storage) error { return putText(ctx, strg, "a/x", "bbbbbb", nil) },
+			check: []string{"a/x"},
+		},
+		{
+			caseName: "put x put beneath it",
+			a:        func(strg s2.Storage) error { return putText(ctx, strg, "a", "aaa", nil) },
+			b:        func(strg s2.Storage) error { return putText(ctx, strg, "a/x", "bbbbbb", nil) },
+			check:    []string{"a", "a/x"},
+		},
 	}
 	for _, backend := range []string{"memfs", "osfs"} {
 		for _, tc := range testCases {
@@ -2649,7 +2889,7 @@ func TestConcurrentWritesStress(t *testing.T) {
 						require.NoError(t, errB, "a put racing a prune")
 					}
 					for _, name := range tc.check {
-						if ok, err := strg.Exists(ctx, name); err == nil && ok {
+						if _, err := strg.Get(ctx, name); err == nil { // not a directory the other writer made
 							readConsistent(t, strg, name)
 						}
 					}
@@ -2732,13 +2972,13 @@ func TestDeleteRecursiveRaces(t *testing.T) {
 					base = osfs.DirFS(t.TempDir()).(*osfs.OSFS)
 				}
 				spy := newSpyLocker()
-				hooks := &fsHooks{closed: map[string]func() error{}, readDir: map[string]func(){}}
+				hooks := newFSHooks()
 				strg := newHookedStorage(base, hooks, spy)
 				for name, body := range tc.seed {
 					require.NoError(t, putText(ctx, strg, name, body, nil))
 				}
 				race := func() {
-					require.False(t, spy.held.Load(), "the race would run inside a section")
+					require.False(t, spy.holding(), "the race would run inside a section")
 					require.NoError(t, tc.race(strg))
 				}
 
