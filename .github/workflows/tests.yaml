@@ -5,10 +5,12 @@ on:
     branches:
       - main
       - develop
+      - 'develop/**'
   pull_request:
     branches:
       - main
       - develop
+      - 'develop/**'
       - 'release/**'
   workflow_call:
 
