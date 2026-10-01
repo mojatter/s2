@@ -625,6 +625,14 @@ func (s *ObjectsTestSuite) TestListObjectsWalksRealFS() {
 			wantPrefixes: []string{"dir/"},
 		},
 		{
+			// Grouping is by "/" whatever the delimiter; it only renders after it.
+			caseName:     "a delimiter other than slash",
+			objects:      []string{"dir/a.txt", "x-y.txt"},
+			query:        "delimiter=-",
+			wantKeys:     []string{"x-y.txt"},
+			wantPrefixes: []string{"dir/-"},
+		},
+		{
 			// A page landing exactly on max-keys makes the fs backend claim
 			// more follows; the extra empty page must still terminate.
 			caseName: "page boundary on the last object",

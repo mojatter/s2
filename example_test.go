@@ -89,7 +89,7 @@ func ExampleStorage_List_flat() {
 	// Output:
 	// obj: a.txt
 	// obj: b.txt
-	// dir: sub
+	// dir: sub/
 }
 
 // ExampleStorage_List_recursive walks the entire namespace below a prefix.

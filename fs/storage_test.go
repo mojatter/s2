@@ -189,13 +189,29 @@ func (s *StorageTestSuite) TestS2TestList() {
 	err = s2test.TestStorageListRecursivePrefix(ctx, strg)
 	s.Require().NoError(err)
 
-	err = s2test.TestStorageListWithPrefixes(ctx, strg, "", []string{"cc"}, "a.txt", "b.txt")
+	err = s2test.TestStorageListWithPrefixes(ctx, strg, "", []string{"cc/"}, "a.txt", "b.txt")
 	s.Require().NoError(err)
 
 	err = s2test.TestStorageList(ctx, strg, "cc", "cc/c1.txt", "cc/c2.txt")
 	s.Require().NoError(err)
 
 	s.Require().NoError(s2test.TestStorageListDefaultPage(ctx, strg))
+}
+
+func (s *StorageTestSuite) TestS2TestListPaging() {
+	testCases := []struct {
+		caseName string
+		newFS    func() fs.FS
+	}{
+		{caseName: "memfs", newFS: func() fs.FS { return memfs.New() }},
+		{caseName: "osfs", newFS: func() fs.FS { return osfs.DirFS(s.T().TempDir()) }},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			strg := NewStorageFS(s2.Config{}, tc.newFS())
+			s.Require().NoError(s2test.TestStorageListPaging(context.Background(), strg))
+		})
+	}
 }
 
 func (s *StorageTestSuite) TestS2TestGetPut() {
@@ -463,7 +479,7 @@ func (s *StorageTestSuite) TestListStartAfter() {
 			caseName:     "keeps the prefix holding the key",
 			startAfter:   "cc/c1.txt",
 			want:         []string{},
-			wantPrefixes: []string{"cc"},
+			wantPrefixes: []string{"cc/"},
 		},
 		{
 			caseName:     "drops a prefix sorting before the key",
@@ -546,7 +562,7 @@ func (s *StorageTestSuite) TestListNextAfter() {
 			ctx := context.Background()
 
 			// Limit: 1 forces a new page per object, so a flat listing's
-			// final page (which only has the "cc" CommonPrefix left, no
+			// final page (which only has the "cc/" CommonPrefix left, no
 			// more Objects) is expected to come back empty before
 			// NextAfter finally goes empty too.
 			var got []string

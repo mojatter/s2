@@ -95,5 +95,6 @@ Each section lists whether the data at rest changes, what to do, and, where know
 ## Known differences from S3
 
 - **Multipart ETag:** the ETag of an object assembled from parts is the MD5 of the whole body, not the `md5-of-md5s-N` form. rclone configured with `provider = AWS` reports "Etag differ"; use `provider = Other` or `--s3-use-multipart-etag=false`.
+- **ListObjects groups only by `/`:** any other `delimiter` is treated as `/`, then appended to each `/`-ended common prefix that does not already end in it, so `delimiter=-` returns `dir/-` where S3 would group keys by their first `-`.
 - **`osfs` and `memfs` store a key at its path:** `a` and `a/b` cannot both exist. [docs/backends.md](backends.md#object-names) has the details.
 - [README.md#limitations](../README.md#limitations) lists the S3 features s2 does not implement.

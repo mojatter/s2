@@ -56,6 +56,11 @@ func TestStorageListWithPrefixes(ctx context.Context, strg s2.Storage, prefix st
 	}
 
 	checkPrefixes := func(name string, got []string, want []string) {
+		for _, g := range got {
+			if !strings.HasSuffix(g, "/") {
+				errorf("%s: prefix %q does not end in \"/\"", name, g)
+			}
+		}
 		if len(want) == 0 {
 			return
 		}
@@ -765,12 +770,7 @@ func TestStorageDelete(ctx context.Context, strg s2.Storage) error {
 			errorf("List(prefix=%q) %s failed: %v", parent, step, err)
 			return
 		}
-		// fs reports a prefix without its trailing slash.
-		got := make([]string, len(res.CommonPrefixes))
-		for i, p := range res.CommonPrefixes {
-			got[i] = strings.TrimSuffix(p, "/")
-		}
-		if !slices.Equal(got, want) {
+		if !slices.Equal(res.CommonPrefixes, want) {
 			errorf("List(prefix=%q) %s: prefixes %q, want %q", parent, step, res.CommonPrefixes, want)
 		}
 	}
@@ -779,7 +779,7 @@ func TestStorageDelete(ctx context.Context, strg s2.Storage) error {
 			errorf("Delete(%q) failed: %v", parent+"/"+f, err)
 		}
 	}
-	checkPrefixes("after Delete", parent+"/kept")
+	checkPrefixes("after Delete", parent+"/kept/")
 	if err := s2.Move(ctx, strg, parent+"/kept/c.txt", parent+"/moved.txt"); err != nil {
 		errorf("Move(%q) failed: %v", parent+"/kept/c.txt", err)
 	}
