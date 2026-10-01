@@ -241,7 +241,7 @@ func (ms *MultipartStore) forEachUpload(ctx context.Context, fn func(ctx context
 			return fmt.Errorf("failed to list multipart uploads: %w", err)
 		}
 		for _, id := range res.CommonPrefixes {
-			// Cloud backends end a common prefix in "/" (#315).
+			// A common prefix ends in "/" (#315).
 			fn(ctx, strings.TrimSuffix(id, "/"))
 		}
 		if res.NextAfter == "" {

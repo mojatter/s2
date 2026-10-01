@@ -286,7 +286,7 @@ func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, erro
 			if pastSubtree(name, after) {
 				continue
 			}
-			res.CommonPrefixes = append(res.CommonPrefixes, name)
+			res.CommonPrefixes = append(res.CommonPrefixes, name+"/")
 			continue
 		}
 		if after != "" && name <= after {

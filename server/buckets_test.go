@@ -130,7 +130,7 @@ func (s *BucketsTestSuite) TestNamesPages() {
 			want: []string{"alpha", "beta"},
 		},
 		{
-			caseName: "trailing slash, as s3, gcs and azblob list",
+			caseName: "trailing slash",
 			pages: map[string]s2.ListResult{
 				"": {CommonPrefixes: []string{"alpha/", bucketStateDir + "/"}},
 			},
@@ -237,10 +237,10 @@ func (s *BucketsTestSuite) TestCreateFolder() {
 	s.Require().NoError(err)
 	s.NotEmpty(res.Objects)
 
-	// "sub" should appear as a prefix in directory listing
+	// "sub/" should appear as a prefix in directory listing
 	res, err = strg.List(ctx, s2.ListOptions{})
 	s.Require().NoError(err)
-	s.Contains(res.CommonPrefixes, "sub")
+	s.Contains(res.CommonPrefixes, "sub/")
 }
 
 // A folder must not create the bucket it is written into (#224).

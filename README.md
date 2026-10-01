@@ -360,7 +360,7 @@ type ListOptions struct {
 
 type ListResult struct {
 	Objects        []Object
-	CommonPrefixes []string // empty when Recursive == true
+	CommonPrefixes []string // each ends in "/"; empty when Recursive == true
 	NextAfter      string   // empty when exhausted
 }
 

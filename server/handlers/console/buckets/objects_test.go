@@ -357,36 +357,11 @@ func TestListTruncatedNotice(t *testing.T) {
 	}
 }
 
-// slashedStorage ends each common prefix in "/", as s3, gcs and azblob list them.
-type slashedStorage struct{ s2.Storage }
-
-func (st slashedStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
-	res, err := st.Storage.List(ctx, opts)
-	for i, p := range res.CommonPrefixes {
-		res.CommonPrefixes[i] = p + "/"
-	}
-	return res, err
-}
-
-func (st slashedStorage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
-	sub, err := st.Storage.Sub(ctx, prefix)
-	return slashedStorage{sub}, err
-}
-
-// TestFolderLinksOnCloudBackends checks a folder link carries one "/", not the listed one plus the template's (#315).
-func TestFolderLinksOnCloudBackends(t *testing.T) {
+// TestFolderLinksCarryOneSlash checks a folder link carries one "/", not the listed one plus the template's (#315).
+func TestFolderLinksCarryOneSlash(t *testing.T) {
 	ctx := context.Background()
-	const typeSlashed = s2.Type("slashed")
-	// Built before registering: NewStorage holds the registry lock while it calls the factory.
-	base, err := s2.NewStorage(ctx, s2.Config{Type: s2.TypeMemFS})
-	require.NoError(t, err)
-	s2.RegisterNewStorageFunc(typeSlashed, func(context.Context, s2.Config) (s2.Storage, error) {
-		return slashedStorage{base}, nil
-	})
-	t.Cleanup(func() { s2.UnregisterNewStorageFunc(typeSlashed) })
-
 	cfg := server.DefaultConfig()
-	cfg.Type = typeSlashed
+	cfg.Type = s2.TypeMemFS
 	srv, err := server.NewServer(ctx, cfg)
 	require.NoError(t, err)
 	require.NoError(t, srv.Buckets.Create(ctx, "b"))

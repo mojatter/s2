@@ -47,7 +47,7 @@ type ListResult struct {
 	// may report nil; use Storage.Get for full metadata and a writable map.
 	Objects []Object
 	// CommonPrefixes are the directory-like grouping prefixes (only populated
-	// when ListOptions.Recursive is false).
+	// when ListOptions.Recursive is false). Each ends in "/", as S3 returns it.
 	CommonPrefixes []string
 	// NextAfter is an opaque continuation token. When empty, the listing is
 	// exhausted.
