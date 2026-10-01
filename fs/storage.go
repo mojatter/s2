@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"net/url"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 
@@ -803,19 +804,46 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 			dirs = append(dirs, name)
 			return nil
 		}
+		// Another writer's in-flight temp file goes with its directory, never by a prefix like ".s2".
+		if isTempFile(d.Name()) {
+			return nil
+		}
 		// These names came from the walk, so they are whatever the filesystem
 		// already holds; validating them here would leave the rest behind.
-		return s.delete(name)
+		return s.locked(ctx, func() error { return s.delete(name) })
 	})
 	if err != nil {
 		return err
 	}
-	for _, dir := range dirs {
-		if err := wfs.RemoveAll(s.fsys, dir); err != nil {
-			return fmt.Errorf("failed to remove dir %q: %w", dir, err)
+	// Deepest first, one section each, so writers are never held for the whole run.
+	for _, dir := range slices.Backward(dirs) {
+		if err := s.locked(ctx, func() error { return s.removeDir(dir, prefix) }); err != nil {
+			return err
 		}
 	}
-	pruneEmptyParents(s.fsys, dirName)
+	return s.locked(ctx, func() error {
+		pruneEmptyParents(s.fsys, dirName)
+		return nil
+	})
+}
+
+// removeDir removes dir as the walk saw it, which may be gone or an object by now. Callers hold the lock.
+func (s *storage) removeDir(dir, prefix string) error {
+	info, err := fs.Stat(s.fsys, dir)
+	switch {
+	case isMissingMeta(err):
+		return nil
+	case err != nil:
+		return fmt.Errorf("failed to stat %q: %w", dir, err)
+	case !info.IsDir():
+		if !strings.HasPrefix(dir, prefix) {
+			return nil // the prefix's own name, now an object, which a prefix ending in "/" does not select
+		}
+		return s.delete(dir)
+	}
+	if err := wfs.RemoveAll(s.fsys, dir); err != nil {
+		return fmt.Errorf("failed to remove dir %q: %w", dir, err)
+	}
 	return nil
 }
 

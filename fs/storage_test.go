@@ -2255,6 +2255,7 @@ type writableFS interface {
 	wfs.WriteFileFS
 	wfs.RenameFS
 	wfs.RemoveFileFS
+	RemoveAll(path string) error
 }
 
 // hookFile runs onClose once the temp file is written, outside any locked section.
@@ -2281,6 +2282,7 @@ func (f *hookFile) Close() error {
 type fsHooks struct {
 	closed  map[string]func() error // by the name a temp file replaces; fires once
 	renamed func(oldpath, newpath string) error
+	readDir map[string]func() // by directory, before it is read; fires once. Only the unlocked walk reads directories.
 }
 
 // newHookedStorage returns a storage on base whose temp files and renames go through hooks.
@@ -2288,6 +2290,14 @@ func newHookedStorage(base writableFS, hooks *fsHooks, spy *spyLocker) s2.Storag
 	fsys := wfs.DelegateFS(base)
 	fsys.MkdirAllFunc = base.MkdirAll
 	fsys.RemoveFileFunc = base.RemoveFile
+	fsys.RemoveAllFunc = base.RemoveAll
+	fsys.ReadDirFunc = func(name string) ([]fs.DirEntry, error) {
+		if hook, ok := hooks.readDir[name]; ok {
+			delete(hooks.readDir, name)
+			hook()
+		}
+		return fs.ReadDir(base, name)
+	}
 	fsys.CreateFileFunc = func(name string, mode fs.FileMode) (wfs.WriterFile, error) {
 		f, err := base.CreateFile(name, mode)
 		if err != nil {
@@ -2646,6 +2656,143 @@ func TestConcurrentWritesStress(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestDeleteRecursiveRaces checks DeleteRecursive against writes landing under its prefix while it walks (#317).
+func TestDeleteRecursiveRaces(t *testing.T) {
+	ctx := context.Background()
+	testCases := []struct {
+		caseName string
+		seed     map[string]string
+		// Exactly one of these races: a write of name whose metadata file is closed, or a read of a directory by the walk.
+		write   string
+		readDir string
+		prefix  string // of DeleteRecursive when readDir is set; "a/" if empty
+		race    func(strg s2.Storage) error
+		wantErr bool              // of the write
+		want    map[string]string // name → body; "" means absent
+	}{
+		{
+			caseName: "a put in flight",
+			write:    "d/x",
+			race:     func(strg s2.Storage) error { return strg.DeleteRecursive(ctx, "d/") },
+			wantErr:  true,
+			want:     map[string]string{"d/x": ""},
+		},
+		{
+			caseName: "a prefix that selects only a temp name",
+			write:    "a/x",
+			race:     func(strg s2.Storage) error { return strg.DeleteRecursive(ctx, "a/.s") },
+			want:     map[string]string{"a/x": "xxx"},
+		},
+		{
+			caseName: "an object takes a directory's name",
+			seed:     map[string]string{"a/b/c": "ccc"},
+			readDir:  "a/b",
+			race: func(strg s2.Storage) error {
+				if err := strg.Delete(ctx, "a/b/c"); err != nil {
+					return err
+				}
+				return putText(ctx, strg, "a/b", "bbb", nil)
+			},
+			want: map[string]string{"a/b": "", "a/b/c": ""},
+		},
+		{
+			caseName: "an object takes the prefix's name",
+			seed:     map[string]string{"a/b/c": "ccc"},
+			readDir:  "a/b",
+			race: func(strg s2.Storage) error {
+				if err := strg.Delete(ctx, "a/b/c"); err != nil {
+					return err
+				}
+				return putText(ctx, strg, "a", "aaa", nil)
+			},
+			want: map[string]string{"a": "aaa"},
+		},
+		{
+			caseName: "an object takes a name the prefix selects",
+			seed:     map[string]string{"a/b/c": "ccc"},
+			readDir:  "a/b",
+			prefix:   "a",
+			race: func(strg s2.Storage) error {
+				if err := strg.Delete(ctx, "a/b/c"); err != nil {
+					return err
+				}
+				return putText(ctx, strg, "a", "aaa", nil)
+			},
+			want: map[string]string{"a": ""},
+		},
+	}
+	for _, backend := range []string{"memfs", "osfs"} {
+		for _, tc := range testCases {
+			t.Run(backend+"/"+tc.caseName, func(t *testing.T) {
+				var base writableFS = memfs.New()
+				if backend == "osfs" {
+					base = osfs.DirFS(t.TempDir()).(*osfs.OSFS)
+				}
+				spy := newSpyLocker()
+				hooks := &fsHooks{closed: map[string]func() error{}, readDir: map[string]func(){}}
+				strg := newHookedStorage(base, hooks, spy)
+				for name, body := range tc.seed {
+					require.NoError(t, putText(ctx, strg, name, body, nil))
+				}
+				race := func() {
+					require.False(t, spy.held.Load(), "the race would run inside a section")
+					require.NoError(t, tc.race(strg))
+				}
+
+				if tc.write != "" {
+					hooks.closed[metaPath(tc.write)] = func() error { race(); return nil }
+					err := putText(ctx, strg, tc.write, "xxx", nil)
+					require.Equal(t, tc.wantErr, err != nil, "write error: %v", err)
+				} else {
+					hooks.readDir[tc.readDir] = race
+					prefix := tc.prefix
+					if prefix == "" {
+						prefix = "a/"
+					}
+					require.NoError(t, strg.DeleteRecursive(ctx, prefix))
+				}
+				for name, want := range tc.want {
+					if want == "" {
+						ok, err := strg.Exists(ctx, name)
+						require.NoError(t, err)
+						require.False(t, ok, "%q should be absent", name)
+						continue
+					}
+					require.Equal(t, want, readConsistent(t, strg, name))
+				}
+				require.NoError(t, fs.WalkDir(base, ".", func(name string, d fs.DirEntry, err error) error {
+					require.NoError(t, err)
+					require.False(t, strings.HasPrefix(d.Name(), tmpPrefix), "temp file %q left", name)
+					return nil
+				}))
+			})
+		}
+	}
+}
+
+// TestDeleteRecursiveRemovesOrphanedTemps checks temp files a crash left behind do not keep a directory alive.
+func TestDeleteRecursiveRemovesOrphanedTemps(t *testing.T) {
+	ctx := context.Background()
+	for _, backend := range []string{"memfs", "osfs"} {
+		t.Run(backend, func(t *testing.T) {
+			var base writableFS = memfs.New()
+			if backend == "osfs" {
+				base = osfs.DirFS(t.TempDir()).(*osfs.OSFS)
+			}
+			strg := NewStorageFS(s2.Config{}, base)
+			require.NoError(t, putText(ctx, strg, "d/x", "xxx", nil))
+			for _, name := range []string{"d/" + tmpPrefix + "y.0", "d/.meta/" + tmpPrefix + "y.0"} {
+				_, err := base.WriteFile(name, []byte("partial"), 0o644)
+				require.NoError(t, err)
+			}
+
+			require.NoError(t, strg.DeleteRecursive(ctx, "d/"))
+			_, err := fs.Stat(base, "d")
+			require.ErrorIs(t, err, fs.ErrNotExist)
+		})
 	}
 }
 

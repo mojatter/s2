@@ -128,6 +128,7 @@ func TestWritesHoldTheLock(t *testing.T) {
 		}},
 		{caseName: "move", op: func(ctx context.Context, strg s2.Storage) error { return s2.Move(ctx, strg, "a/b/x", "c/y") }},
 		{caseName: "delete", op: func(ctx context.Context, strg s2.Storage) error { return strg.Delete(ctx, "a/b/x") }},
+		{caseName: "delete recursive", op: func(ctx context.Context, strg s2.Storage) error { return strg.DeleteRecursive(ctx, "a/") }},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
@@ -147,6 +148,7 @@ func TestWritesHoldTheLock(t *testing.T) {
 			fsys.RenameFunc = func(oldpath, newpath string) error { check(); return base.Rename(oldpath, newpath) }
 			fsys.RemoveFileFunc = func(name string) error { check(); return base.RemoveFile(name) }
 			fsys.MkdirAllFunc = func(dir string, mode iofs.FileMode) error { check(); return base.MkdirAll(dir, mode) }
+			fsys.RemoveAllFunc = func(dir string) error { check(); return base.RemoveAll(dir) }
 			strg := NewStorageFS(s2.Config{Type: s2.TypeMemFS}, fsys, WithNameLocker(spy))
 			require.NoError(t, strg.Put(ctx, s2.NewObjectBytes("a/b/x", []byte("x"))))
 
