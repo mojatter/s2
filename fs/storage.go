@@ -883,16 +883,33 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 		return s.lockNames(ctx, []string{name}, func() error { return s.delete(name) })
 	})
 	if err != nil {
+		s.pruneEmptied(ctx, dirs, dirName)
 		return err
 	}
 	// Deepest first, one exclusive section each, so writers are never held for the whole run.
 	for _, dir := range slices.Backward(dirs) {
 		if err := s.lockRoot(ctx, func() error { return s.removeDir(dir, prefix) }); err != nil {
+			s.pruneEmptied(ctx, dirs, dirName)
 			return err
 		}
 	}
 	return s.lockRoot(ctx, func() error {
 		pruneEmptyParents(s.fsys, dirName)
+		return nil
+	})
+}
+
+// pruneEmptied removes the directories left empty inside a failed run's prefix; the prefix's own stays until a run succeeds.
+func (s *storage) pruneEmptied(ctx context.Context, dirs []string, dirName string) {
+	if !slices.ContainsFunc(dirs, func(dir string) bool { return dir != dirName && emptied(s.fsys, dir) }) {
+		return
+	}
+	_ = s.lockRoot(context.WithoutCancel(ctx), func() error {
+		for _, dir := range slices.Backward(dirs) {
+			if dir != dirName {
+				pruneEmptyDir(s.fsys, dir)
+			}
+		}
 		return nil
 	})
 }

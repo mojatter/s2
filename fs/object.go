@@ -193,13 +193,21 @@ func pruneEmptyDirs(fsys fs.FS, dir, stop string) {
 
 // pruneEmptyParents removes the directories, with their .meta, that deleting name left empty, up to the storage root. Callers hold the root exclusively.
 func pruneEmptyParents(fsys fs.FS, name string) {
-	for dir := path.Dir(name); dir != "."; dir = path.Dir(dir) {
-		pruneEmptyDirs(fsys, path.Join(dir, metaDir), dir)
-		// A directory still holding anything, even one a concurrent write just made, stops the walk.
-		if info, err := fs.Stat(fsys, dir); err != nil || !info.IsDir() || wfs.RemoveFile(fsys, dir) != nil {
+	for dir := path.Dir(name); ; dir = path.Dir(dir) {
+		if !pruneEmptyDir(fsys, dir) {
 			return
 		}
 	}
+}
+
+// pruneEmptyDir removes dir, with its .meta, and reports whether it did; one still holding anything, even what a concurrent write just made, stays. Callers hold the root exclusively.
+func pruneEmptyDir(fsys fs.FS, dir string) bool {
+	if dir == "." {
+		return false
+	}
+	pruneEmptyDirs(fsys, path.Join(dir, metaDir), dir)
+	info, err := fs.Stat(fsys, dir)
+	return err == nil && info.IsDir() && wfs.RemoveFile(fsys, dir) == nil
 }
 
 func quotedMD5(h hash.Hash) string {
