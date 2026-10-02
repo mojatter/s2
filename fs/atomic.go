@@ -13,9 +13,7 @@ import (
 	"github.com/mojatter/wfs"
 )
 
-// tmpPrefix is the basename prefix used for in-flight atomic-write files.
-// Entries with this prefix are hidden from listings so partial writes are
-// never observable through Storage.List (in either flat or recursive mode).
+// tmpPrefix is the basename prefix of in-flight atomic-write temp files, which live in a .meta, so no listing shows a partial write.
 const tmpPrefix = ".s2tmp-"
 
 // atomicWrite writes src into name using a temp-file + Sync + Rename pattern
@@ -23,8 +21,7 @@ const tmpPrefix = ".s2tmp-"
 // direct write (which is not crash-safe but keeps behavior well-defined for
 // non-osfs backends that don't implement rename).
 //
-// The temp file is created in the same directory as name so that the final
-// rename is atomic on POSIX-backed filesystems.
+// The temp file lives in the .meta of name's directory, so the rename stays in one filesystem.
 //
 // The write order is Write -> Sync -> Close -> Rename. This order is load
 // bearing: on wfs/memfs, buffered writes are not published to the store
@@ -121,8 +118,7 @@ func directWrite(fsys iofs.FS, name string, src io.Reader) error {
 	return nil
 }
 
-// tempName returns a sibling path suitable for a unique in-flight temp file.
-// For "images/a.png" it returns something like "images/.s2tmp-a.png.ab12cd34".
+// tempName returns a unique temp file path in the .meta of name's directory, such as "images/.meta/.s2tmp-a.png.ab12cd34"; a metadata file's stays in its own.
 func tempName(name string) (string, error) {
 	dir, base := path.Split(name)
 	var buf [8]byte
@@ -130,14 +126,9 @@ func tempName(name string) (string, error) {
 		return "", fmt.Errorf("failed to generate temp name: %w", err)
 	}
 	tmpBase := tmpPrefix + base + "." + hex.EncodeToString(buf[:])
-	if dir == "" {
-		return tmpBase, nil
+	dir = strings.TrimSuffix(dir, "/")
+	if path.Base(dir) != metaDir {
+		dir = path.Join(dir, metaDir)
 	}
 	return path.Join(dir, tmpBase), nil
-}
-
-// isTempFile reports whether a basename is an in-flight atomic-write temp
-// file that should be hidden from listings.
-func isTempFile(basename string) bool {
-	return strings.HasPrefix(basename, tmpPrefix)
 }

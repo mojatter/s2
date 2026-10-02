@@ -47,12 +47,7 @@ func TestAtomicWrite_LeavesNoTempFile(t *testing.T) {
 	obj := s2.NewObjectBytes("hello.txt", []byte("hi"))
 	require.NoError(t, strg.Put(ctx, obj))
 
-	names := readDirNames(t, dir)
-	for _, n := range names {
-		if strings.HasPrefix(n, tmpPrefix) {
-			t.Fatalf("temp file %q was left behind in %v", n, names)
-		}
-	}
+	requireNoTempFile(t, dir)
 	// The committed file should be present.
 	data, err := os.ReadFile(filepath.Join(dir, "hello.txt"))
 	require.NoError(t, err)
@@ -71,29 +66,6 @@ func TestAtomicWrite_Overwrite(t *testing.T) {
 	require.Equal(t, []byte("v2-longer"), data)
 }
 
-func TestAtomicWrite_TempHiddenFromList(t *testing.T) {
-	strg, dir := newOSFSStorage(t)
-	ctx := context.Background()
-
-	// Manually place a temp file as if a crash had left one behind.
-	require.NoError(t, os.WriteFile(
-		filepath.Join(dir, tmpPrefix+"ghost.abcd1234"),
-		[]byte("garbage"),
-		0o644,
-	))
-	require.NoError(t, strg.Put(ctx, s2.NewObjectBytes("real.txt", []byte("ok"))))
-
-	// Flat list must not include the temp file.
-	res, err := strg.List(ctx, s2.ListOptions{Limit: 100})
-	require.NoError(t, err)
-	require.ElementsMatch(t, []string{"real.txt"}, objectNames(res.Objects))
-
-	// Recursive list must also hide it.
-	res, err = strg.List(ctx, s2.ListOptions{Limit: 100, Recursive: true})
-	require.NoError(t, err)
-	require.ElementsMatch(t, []string{"real.txt"}, objectNames(res.Objects))
-}
-
 func TestAtomicWrite_NestedDir(t *testing.T) {
 	strg, dir := newOSFSStorage(t)
 	ctx := context.Background()
@@ -104,14 +76,18 @@ func TestAtomicWrite_NestedDir(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("nested"), data)
 
-	// No temp files should remain in the nested directory.
-	entries, err := os.ReadDir(filepath.Join(dir, "sub", "dir"))
-	require.NoError(t, err)
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), tmpPrefix) {
-			t.Fatalf("temp file %q was left behind", e.Name())
+	requireNoTempFile(t, dir)
+}
+
+// requireNoTempFile fails when a temp file is left anywhere under dir, its .meta directories included.
+func requireNoTempFile(t *testing.T, dir string) {
+	t.Helper()
+	require.NoError(t, filepath.WalkDir(dir, func(name string, d os.DirEntry, err error) error {
+		if err == nil && strings.HasPrefix(d.Name(), tmpPrefix) {
+			t.Fatalf("temp file %q was left behind", name)
 		}
-	}
+		return err
+	}))
 }
 
 func TestAtomicWrite_MoveRenamesInPlace(t *testing.T) {
@@ -137,8 +113,7 @@ func objectNames(objs []s2.Object) []string {
 	return out
 }
 
-// Sanity check: tempName produces unique names with the expected prefix and
-// placement so that the rename target ends up as a sibling of the final file.
+// TestTempName_Unique checks tempName gives unique names in the .meta of the file's directory, or in that .meta itself for a metadata file.
 func TestTempName_Unique(t *testing.T) {
 	a, err := tempName("dir/file.txt")
 	require.NoError(t, err)
@@ -146,7 +121,49 @@ func TestTempName_Unique(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, a, b)
 	require.True(t, strings.HasPrefix(filepath.Base(a), tmpPrefix))
-	require.Equal(t, "dir", filepath.Dir(a))
+	require.Equal(t, "dir/.meta", filepath.Dir(a))
+	m, err := tempName("dir/.meta/file.txt")
+	require.NoError(t, err)
+	require.Equal(t, "dir/.meta", filepath.Dir(m))
+	r, err := tempName("file.txt")
+	require.NoError(t, err)
+	require.Equal(t, ".meta", filepath.Dir(r))
+}
+
+// TestTempNameIsAnObjectName checks a key holding a temp file name is an ordinary object: stored, read, listed and deleted (#268).
+func TestTempNameIsAnObjectName(t *testing.T) {
+	ctx := context.Background()
+	testCases := []struct {
+		caseName string
+		strg     s2.Storage
+	}{
+		{caseName: "memfs", strg: NewStorageMem(s2.Config{})},
+		{caseName: "osfs", strg: NewStorageDir(t.TempDir())},
+	}
+	names := []string{tmpPrefix + "a.txt", "docs/" + tmpPrefix + "a.txt.0123456789abcdef", "a/" + tmpPrefix + "x/b"}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			for _, name := range names {
+				require.NoError(t, tc.strg.Put(ctx, s2.NewObjectBytes(name, []byte("v"), s2.WithMetadata(s2.Metadata{"k": "v"}))))
+				obj, err := tc.strg.Get(ctx, name)
+				require.NoError(t, err)
+				require.Equal(t, s2.Metadata{"k": "v"}, obj.Metadata())
+			}
+			res, err := tc.strg.List(ctx, s2.ListOptions{Recursive: true})
+			require.NoError(t, err)
+			require.ElementsMatch(t, names, objectNames(res.Objects))
+			res, err = tc.strg.List(ctx, s2.ListOptions{})
+			require.NoError(t, err)
+			require.ElementsMatch(t, names[:1], objectNames(res.Objects))
+			require.ElementsMatch(t, []string{"a/", "docs/"}, res.CommonPrefixes)
+
+			require.NoError(t, tc.strg.Delete(ctx, names[0]))
+			require.NoError(t, tc.strg.DeleteRecursive(ctx, "a/"))
+			res, err = tc.strg.List(ctx, s2.ListOptions{Recursive: true})
+			require.NoError(t, err)
+			require.ElementsMatch(t, names[1:2], objectNames(res.Objects))
+		})
+	}
 }
 
 func TestAtomicWrite_FallbackWhenNoRename(t *testing.T) {
@@ -201,7 +218,8 @@ func TestTempFile(t *testing.T) {
 			}
 			tf.discard()
 
-			require.Equal(t, []string{"x"}, readDirNames(t, filepath.Join(dir, "d")))
+			require.Equal(t, []string{metaDir, "x"}, readDirNames(t, filepath.Join(dir, "d")))
+			require.Empty(t, readDirNames(t, filepath.Join(dir, "d", metaDir)))
 			data, err := os.ReadFile(filepath.Join(dir, "d", "x"))
 			require.NoError(t, err)
 			require.Equal(t, tc.wantContent, string(data))

@@ -101,7 +101,7 @@ func (s *storage) migrateMetaDir(ctx context.Context, dir string, blocked *[]str
 func (s *storage) migrateMetaFile(legacy, key string) error {
 	dst := metaPath(key)
 	// A key holding .meta predates v0.18.1 and cannot be told from a metadata file, so neither moves.
-	if rejectMetaDir(key) != nil {
+	if rejectReserved(key) != nil {
 		return nil
 	}
 	body, err := fs.Stat(s.fsys, key)

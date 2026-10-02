@@ -70,6 +70,11 @@ func TestMigrateMeta(t *testing.T) {
 			want:     map[string]string{"photos/.meta/a.txt": "key", ".meta/photos/.meta/a.txt": oldMeta},
 		},
 		{
+			caseName: "a key holding a temp name migrates like any other",
+			seed:     []seedFile{{"photos/.s2tmp-a.txt.0", "key"}, {".meta/photos/.s2tmp-a.txt.0", oldMeta}},
+			want:     map[string]string{"photos/.s2tmp-a.txt.0": "key", "photos/.meta/.s2tmp-a.txt.0": oldMeta},
+		},
+		{
 			caseName: "the new location wins when newer",
 			seed:     []seedFile{{"photos/a.txt", "body"}, {".meta/photos/a.txt", oldMeta}, {"photos/.meta/a.txt", newMeta}},
 			want:     map[string]string{"photos/a.txt": "body", "photos/.meta/a.txt": newMeta},
