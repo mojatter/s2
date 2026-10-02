@@ -70,7 +70,7 @@
     </button>
     <form class="new-folder-form inline-form" hx-post="/buckets/{{.BucketName}}/folders" hx-target="#main-content">
       <input type="hidden" name="prefix" value="{{.CurrentPrefix}}">
-      <input type="text" name="folder_name" placeholder="Folder name..." required>
+      <input type="text" name="folder_name" placeholder="Folder name..." required pattern="(?!\.{1,2}$)[^\/]+" title="A single folder name: no slash, not . or ..">
       <button type="submit">Create</button>
     </form>
 
