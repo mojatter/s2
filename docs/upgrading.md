@@ -25,10 +25,17 @@ The steps below take a root from any version since v0.14.0 to the current one in
 
 Each section lists whether the data at rest changes, what to do, and, where known, what a downgrade does. A version not listed here changes nothing on disk and needs no step; what its responses change is in its release notes.
 
+### v0.21.0
+
+- **Data at rest:** unchanged; downgrading to v0.20.3 is safe. A write's temp files moved into `.meta`, where v0.20.3 already kept its metadata temp files, so a leftover from a crash is treated the same by both versions. An object stored under a `.s2tmp-` name stays on disk and is reachable by name under v0.20.3, but is hidden from its listings, so a DeleteBucket or recursive delete there removes it without showing it.
+- On `osfs` and `memfs`, concurrent writes to one key end consistent: the body, ETag and Content-Type read afterwards come from one write, and a delete pruning the directory it emptied no longer pulls it from under a write ([#329](https://github.com/mojatter/s2/issues/329), [#317](https://github.com/mojatter/s2/issues/317)). A write racing a recursive delete of its own prefix can still fail; retry it. The lock is in-process, so it does not cover several s2-server processes on one root; [docs/backends.md](backends.md#concurrent-writes-on-osfs-and-memfs) lists the limits.
+- On `osfs` and `memfs`, ListObjects with a `delimiter` other than `/` returns `dir/-` instead of `dir-`, as the cloud backends already did.
+- On `osfs`, a temp file a crashed write of an older version left beside its target, `<dir>/.s2tmp-<base>.<16 hex digits>` outside any `.meta`, now lists as an object, as does any object an older version stored under a `.s2tmp-` name and hid. Delete the leftovers like any object; nothing to do before upgrading.
+
 ### v0.20.2
 
 - **Data at rest:** on `osfs` and `memfs`, `Delete`, the source side of a move and a recursive delete remove the directories they leave empty, up to the bucket. An empty directory made outside s2 goes away when a delete runs under it. Nothing else changes; downgrading to v0.20.1 is safe.
-- A write and a delete running at the same time under the same prefix can make the write fail, because the delete may remove the directory the write is using. Retry the write. [#317](https://github.com/mojatter/s2/issues/317) tracks the fix.
+- A write and a delete running at the same time under the same prefix can make the write fail, because the delete may remove the directory the write is using. Retry the write; fixed in [v0.21.0](#v0210) ([#317](https://github.com/mojatter/s2/issues/317)).
 - On `osfs` and `memfs`, with `a.txt` stored, GET and HEAD of `a.txt/sub` answer `404` and DELETE `204` instead of `500`. PUT or copy to `a.txt/sub`, or to a key that is a directory, including an empty one an older version left behind, answers `400 InvalidArgument` instead of `500`.
 - ListBuckets and the console's bucket list no longer stop at the first page of buckets. The console's folder view and search are still bounded and now say so when there may be more.
 
