@@ -2313,10 +2313,11 @@ type fsHooks struct {
 	renamed  func(oldpath, newpath string) error
 	readDir  map[string]func()       // by directory, before it is read. Only the unlocked walk and removeEmptyTree read directories.
 	removing map[string]func() error // by name, before it is removed; an error stands in for the removal's
+	seen     map[string]int          // temp files created so far for a hooked metadata file's name
 }
 
 func newFSHooks() *fsHooks {
-	return &fsHooks{closed: map[string]func() error{}, creating: map[string]func(){}, mkdir: map[string]func(){}, readDir: map[string]func(){}, removing: map[string]func() error{}}
+	return &fsHooks{closed: map[string]func() error{}, creating: map[string]func(){}, mkdir: map[string]func(){}, readDir: map[string]func(){}, removing: map[string]func() error{}, seen: map[string]int{}}
 }
 
 // take pops the hook under key.
@@ -2329,21 +2330,36 @@ func take[H any](h *fsHooks, hooks map[string]H, key string) (H, bool) {
 	return hook, ok
 }
 
-// takeTemp pops the hook of the object name the temp file tmp stands for.
+// takeTemp pops the hook of the object name the temp file tmp stands for; begin creates a body's temp, then its metadata file's, in the same .meta.
 func takeTemp[H any](h *fsHooks, hooks map[string]H, tmp string) (H, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	dir, file := path.Split(tmp)
 	for target, hook := range hooks {
-		tdir, tbase := path.Split(target)
-		if dir == tdir && strings.HasPrefix(file, tmpPrefix+tbase+".") {
-			delete(hooks, target)
-			return hook, true
+		_, tbase := path.Split(target)
+		if dir != tempDirOf(target)+"/" || !strings.HasPrefix(file, tmpPrefix+tbase+".") {
+			continue
 		}
+		if path.Base(path.Dir(target)) == metaDir {
+			if h.seen[target]++; h.seen[target] < 2 {
+				continue
+			}
+		}
+		delete(hooks, target)
+		return hook, true
 	}
 	var none H
 	return none, false
+}
+
+// tempDirOf is the directory tempName puts target's temp file in.
+func tempDirOf(target string) string {
+	dir := path.Dir(target)
+	if path.Base(dir) == metaDir {
+		return dir
+	}
+	return path.Join(dir, metaDir)
 }
 
 // newHookedStorage returns a storage on base whose temp files, directories, renames and removals go through hooks.
@@ -3068,13 +3084,11 @@ func TestDeleteRecursiveRemovesOrphanedTemps(t *testing.T) {
 			}
 			strg := NewStorageFS(s2.Config{}, base)
 			require.NoError(t, putText(ctx, strg, "d/x", "xxx", nil))
-			for _, name := range []string{"d/" + tmpPrefix + "y.0", "d/.meta/" + tmpPrefix + "y.0"} {
-				_, err := base.WriteFile(name, []byte("partial"), 0o644)
-				require.NoError(t, err)
-			}
+			_, err := base.WriteFile("d/.meta/"+tmpPrefix+"y.0", []byte("partial"), 0o644)
+			require.NoError(t, err)
 
 			require.NoError(t, strg.DeleteRecursive(ctx, "d/"))
-			_, err := fs.Stat(base, "d")
+			_, err = fs.Stat(base, "d")
 			require.ErrorIs(t, err, fs.ErrNotExist)
 		})
 	}

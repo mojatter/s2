@@ -150,13 +150,12 @@ func isMetaDir(name string) bool {
 	return name == metaDir
 }
 
-// validateName is [s2.ValidateName] plus the metadata directory: ".meta/x" is
-// the sidecar of the object "x", not an object of its own.
+// validateName is [s2.ValidateName] plus the metadata directory: ".meta/x" is the metadata file of the object "x", not an object of its own.
 func validateName(name string) error {
 	if err := s2.ValidateName(name); err != nil {
 		return err
 	}
-	return rejectMetaDir(name)
+	return rejectReserved(name)
 }
 
 // validatePrefix is [s2.ValidatePrefix] with the same exclusion.
@@ -164,12 +163,11 @@ func validatePrefix(prefix string) error {
 	if err := s2.ValidatePrefix(prefix); err != nil {
 		return err
 	}
-	return rejectMetaDir(prefix)
+	return rejectReserved(prefix)
 }
 
-// rejectMetaDir rejects a name holding the metadata directory as any element.
-// Any, not just the first: every directory keeps its metadata files in one, hidden from both listings.
-func rejectMetaDir(name string) error {
+// rejectReserved rejects a name holding a reserved element, the metadata directory, at any depth: every directory keeps its metadata files in one, hidden from both listings.
+func rejectReserved(name string) error {
 	for elem := range strings.SplitSeq(name, "/") {
 		if isMetaDir(elem) {
 			return fmt.Errorf("%w: %s is reserved for object metadata", s2.ErrInvalidName, name)
@@ -272,7 +270,7 @@ func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, erro
 		if dir != "." {
 			name = path.Join(dir, entry.Name())
 		}
-		if isMetaDir(entry.Name()) || isTempFile(entry.Name()) {
+		if isMetaDir(entry.Name()) {
 			continue
 		}
 		info, err := entry.Info()
@@ -346,9 +344,6 @@ func (s *storage) listRecursive(prefix, after string, limit int) (s2.ListResult,
 			return fmt.Errorf("failed to get info: %w", err)
 		}
 		if info.IsDir() {
-			return nil
-		}
-		if isTempFile(d.Name()) {
 			return nil
 		}
 		objs = append(objs, newObjectFileInfo(s.fsys, name, info))
@@ -872,10 +867,6 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 		}
 		if d.IsDir() {
 			dirs = append(dirs, name)
-			return nil
-		}
-		// Another writer's in-flight temp file goes with its directory, never by a prefix like ".s2".
-		if isTempFile(d.Name()) {
 			return nil
 		}
 		// These names came from the walk, so they are whatever the filesystem
