@@ -769,7 +769,9 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 		filename   string
 		content    []byte
 		omitFile   bool
+		maxUpload  int64 // if non-zero, the upload size limit for this case
 		wantCode   int
+		wantBody   string // if non-empty, the response body must contain it
 		wantKey    string // if non-empty, verify this key landed in the bucket
 		wantAbsent string // if non-empty, verify this key did not land in the bucket
 	}{
@@ -856,11 +858,40 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			omitFile:   true,
 			wantCode:   http.StatusBadRequest,
 		},
+		{
+			// The limit covers the whole body, read before the prefix field (#340).
+			caseName:   "over the upload size limit",
+			setup:      func() { s.createBucket("upl") },
+			bucketName: "upl",
+			prefix:     "docs",
+			filename:   "big.bin",
+			content:    bytes.Repeat([]byte("x"), 4096),
+			maxUpload:  1024,
+			wantCode:   http.StatusRequestEntityTooLarge,
+			wantBody:   "max 1024 bytes",
+			wantAbsent: "docs/big.bin",
+		},
+		{
+			caseName:   "within the upload size limit",
+			setup:      func() { s.createBucket("ups") },
+			bucketName: "ups",
+			prefix:     "docs",
+			filename:   "small.bin",
+			content:    bytes.Repeat([]byte("x"), 16),
+			maxUpload:  1024,
+			wantCode:   http.StatusOK,
+			wantKey:    "docs/small.bin",
+		},
 	}
 
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
 			tc.setup()
+			if tc.maxUpload != 0 {
+				prev := s.server.Config.MaxUploadSize
+				s.server.Config.MaxUploadSize = tc.maxUpload
+				defer func() { s.server.Config.MaxUploadSize = prev }()
+			}
 
 			body := &bytes.Buffer{}
 			mw := multipart.NewWriter(body)
@@ -882,6 +913,9 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			handleUploadFile(s.server, w, req)
 
 			s.Equal(tc.wantCode, w.Code)
+			if tc.wantBody != "" {
+				s.Contains(w.Body.String(), tc.wantBody)
+			}
 			if tc.wantKey != "" {
 				strg, err := s.server.Buckets.Get(context.Background(), tc.bucketName)
 				s.Require().NoError(err)
@@ -1182,6 +1216,42 @@ func (s *ObjectsTestSuite) newBrowser() (context.Context, string) {
 	browserCtx, cancelTimeout := context.WithTimeout(browserCtx, 30*time.Second)
 	s.T().Cleanup(cancelTimeout)
 	return browserCtx, ts.URL
+}
+
+// TestBrowserShowsWhyAnUploadWasRefused uploads past the size limit in Chrome and checks the reason reaches an alert, once per pick (#340).
+func (s *ObjectsTestSuite) TestBrowserShowsWhyAnUploadWasRefused() {
+	browserCtx, consoleURL := s.newBrowser()
+	s.createBucket("big")
+	prev := s.server.Config.MaxUploadSize
+	s.server.Config.MaxUploadSize = 1024
+	defer func() { s.server.Config.MaxUploadSize = prev }()
+
+	file := filepath.Join(s.T().TempDir(), "big.bin")
+	s.Require().NoError(os.WriteFile(file, bytes.Repeat([]byte("x"), 4096), 0o600))
+
+	var alerted string
+	s.Require().NoError(chromedp.Run(browserCtx,
+		chromedp.Navigate(consoleURL+"/buckets/big"),
+		chromedp.WaitReady(`input[name="file"]`, chromedp.ByQuery),
+		// Record alerts instead of opening a dialog headless Chrome would leave open.
+		chromedp.Evaluate(`window.alerts = []; window.alert = m => window.alerts.push(m)`, nil),
+		chromedp.SetUploadFiles(`input[name="file"]`, []string{file}, chromedp.ByQuery),
+		chromedp.Poll(`window.alerts[0]`, &alerted),
+	))
+	s.Contains(alerted, "max 1024 bytes")
+
+	// Picking the same file again fires change only if the form was reset after the refusal.
+	s.Require().NoError(chromedp.Run(browserCtx,
+		chromedp.SetUploadFiles(`input[name="file"]`, []string{file}, chromedp.ByQuery),
+		chromedp.Poll(`window.alerts[1]`, &alerted),
+	))
+	s.Contains(alerted, "max 1024 bytes")
+
+	strg, err := s.server.Buckets.Get(context.Background(), "big")
+	s.Require().NoError(err)
+	exists, err := strg.Exists(context.Background(), "big.bin")
+	s.Require().NoError(err)
+	s.False(exists)
 }
 
 // TestBrowserActsOnTheClickedName clicks a folder and a delete button named with "#" in Chrome, which drops a URL's fragment (#341).

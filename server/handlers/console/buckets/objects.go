@@ -195,21 +195,24 @@ func uploadContentType(header *multipart.FileHeader, key string) string {
 func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	name := r.PathValue("name")
-	prefix := r.FormValue("prefix")
 
+	// Before any form read: FormValue parses the whole body, which the limit must already cover (#340).
 	maxSize := s.Config.EffectiveMaxUploadSize()
 	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		if err.Error() == "http: request body too large" {
-			http.Error(w, fmt.Sprintf("File too large (max %d MB)", maxSize/(1<<20)), http.StatusRequestEntityTooLarge)
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			http.Error(w, fmt.Sprintf("File too large (max %d bytes)", maxSize), http.StatusRequestEntityTooLarge)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	defer func() { _ = file.Close() }()
+
+	prefix := r.FormValue("prefix")
 
 	strg, err := s.Buckets.Get(ctx, name)
 	if err != nil {
