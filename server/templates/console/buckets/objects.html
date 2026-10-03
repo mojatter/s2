@@ -57,10 +57,10 @@
     <h1 title="{{.BucketName}}">{{.BucketName}}</h1>
   </div>
   <div class="breadcrumbs">
-    <a href="/buckets/{{.BucketName}}" hx-get="/buckets/{{.BucketName}}" hx-target="#main-content" hx-push-url="true">root</a>
+    <a href="/buckets/{{pathEscape .BucketName}}" hx-get="/buckets/{{pathEscape .BucketName}}" hx-target="#main-content" hx-push-url="true">root</a>
     {{range .Breadcrumbs}}
     <span class="separator">/</span>
-    <a href="/buckets/{{$.BucketName}}?prefix={{.Prefix}}" hx-get="/buckets/{{$.BucketName}}?prefix={{.Prefix}}" hx-target="#main-content" hx-push-url="true" title="{{.Name}}">{{.Name}}</a>
+    <a href="/buckets/{{pathEscape $.BucketName}}?prefix={{.Prefix | urlquery}}" hx-get="/buckets/{{pathEscape $.BucketName}}?prefix={{.Prefix | urlquery}}" hx-target="#main-content" hx-push-url="true" title="{{.Name}}">{{.Name}}</a>
     {{end}}
   </div>
   <div class="toolbar">
@@ -68,7 +68,7 @@
       <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-folder-new"></use></svg>
       New Folder
     </button>
-    <form class="new-folder-form inline-form" hx-post="/buckets/{{.BucketName}}/folders" hx-target="#main-content">
+    <form class="new-folder-form inline-form" hx-post="/buckets/{{pathEscape .BucketName}}/folders" hx-target="#main-content">
       <input type="hidden" name="prefix" value="{{.CurrentPrefix}}">
       <input type="text" name="folder_name" placeholder="Folder name..." required pattern="(?!\.{1,2}$)[^\/]+" title="A single folder name: no slash, not . or ..">
       <button type="submit">Create</button>
@@ -80,7 +80,7 @@
       <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-upload"></use></svg>
       Upload File
     </button>
-    <form hx-post="/buckets/{{.BucketName}}/upload" hx-encoding="multipart/form-data" hx-target="#main-content" style="display:none;">
+    <form hx-post="/buckets/{{pathEscape .BucketName}}/upload" hx-encoding="multipart/form-data" hx-target="#main-content" style="display:none;">
       <input type="hidden" name="prefix" value="{{.CurrentPrefix}}">
       <input type="file" name="file" onchange="this.form.requestSubmit()">
     </form>
@@ -92,12 +92,12 @@
 <div class="main-view">
   <div class="table-controls">
     <div class="table-controls-left">
-      <form hx-get="/buckets/{{.BucketName}}" hx-target="#main-content" hx-push-url="true" class="search-form">
+      <form hx-get="/buckets/{{pathEscape .BucketName}}" hx-target="#main-content" hx-push-url="true" class="search-form">
         <input type="hidden" name="prefix" value="{{.CurrentPrefix}}">
         <input type="search" name="search" value="{{.Search}}" placeholder="Search by prefix..." class="search-input">
       </form>
       {{if .Search}}
-      <a href="/buckets/{{.BucketName}}?prefix={{.CurrentPrefix}}" hx-get="/buckets/{{.BucketName}}?prefix={{.CurrentPrefix}}" hx-target="#main-content" hx-push-url="true" class="search-chip" title="Clear search">
+      <a href="/buckets/{{pathEscape .BucketName}}?prefix={{.CurrentPrefix | urlquery}}" hx-get="/buckets/{{pathEscape .BucketName}}?prefix={{.CurrentPrefix | urlquery}}" hx-target="#main-content" hx-push-url="true" class="search-chip" title="Clear search">
         {{.Search}} <span>✕</span>
       </a>
       {{end}}
@@ -134,7 +134,7 @@
               <span class="obj-icon">
                 <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-arrow-back"></use></svg>
               </span>
-              <a href="/buckets/{{.BucketName}}?prefix={{.ParentPrefix}}" hx-get="/buckets/{{.BucketName}}?prefix={{.ParentPrefix}}" hx-target="#main-content" hx-push-url="true">.. (Parent Directory)</a>
+              <a href="/buckets/{{pathEscape .BucketName}}?prefix={{.ParentPrefix | urlquery}}" hx-get="/buckets/{{pathEscape .BucketName}}?prefix={{.ParentPrefix | urlquery}}" hx-target="#main-content" hx-push-url="true">.. (Parent Directory)</a>
             </div>
           </td>
           <td>-</td>
@@ -150,7 +150,7 @@
               <span class="obj-icon folder-icon">
                 <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-folder"></use></svg>
               </span>
-              <a href="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-get="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-target="#main-content" hx-push-url="true" title="{{baseName .}}/">{{baseName .}}/</a>
+              <a href="/buckets/{{pathEscape $.BucketName}}?prefix={{. | urlquery}}/" hx-get="/buckets/{{pathEscape $.BucketName}}?prefix={{. | urlquery}}/" hx-target="#main-content" hx-push-url="true" title="{{baseName .}}/">{{baseName .}}/</a>
             </div>
           </td>
           <td>-</td>
@@ -180,7 +180,7 @@
             <div class="actions-cell">
               {{if isPreviewable .Name .Length}}
               <button class="btn btn--view" title="Preview File"
-                hx-get="/buckets/{{$.BucketName}}/preview/{{.Name}}"
+                hx-get="/buckets/{{pathEscape $.BucketName}}/preview/{{pathEscape .Name}}"
                 hx-target="#preview-dialog" hx-swap="innerHTML">
                 <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-eye"></use></svg>
               </button>
@@ -209,7 +209,7 @@
 
   <div id="gallery-view" class="gallery-grid" style="display:none;">
     {{if .HasParent}}
-    <a href="/buckets/{{.BucketName}}?prefix={{.ParentPrefix}}" hx-get="/buckets/{{.BucketName}}?prefix={{.ParentPrefix}}" hx-target="#main-content" hx-push-url="true" class="gallery-card gallery-folder">
+    <a href="/buckets/{{pathEscape .BucketName}}?prefix={{.ParentPrefix | urlquery}}" hx-get="/buckets/{{pathEscape .BucketName}}?prefix={{.ParentPrefix | urlquery}}" hx-target="#main-content" hx-push-url="true" class="gallery-card gallery-folder">
       <div class="gallery-folder-icon">
         <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-arrow-back"></use></svg>
       </div>
@@ -219,7 +219,7 @@
 
     {{range .Prefixes}}
     <div class="gallery-card gallery-folder" data-name="{{baseName .}}/">
-      <a href="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-get="/buckets/{{$.BucketName}}?prefix={{.}}/" hx-target="#main-content" hx-push-url="true" class="gallery-card-body">
+      <a href="/buckets/{{pathEscape $.BucketName}}?prefix={{. | urlquery}}/" hx-get="/buckets/{{pathEscape $.BucketName}}?prefix={{. | urlquery}}/" hx-target="#main-content" hx-push-url="true" class="gallery-card-body">
         <div class="gallery-folder-icon">
           <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-folder"></use></svg>
         </div>
@@ -235,9 +235,9 @@
     {{if isImage .Name}}
     <div class="gallery-card gallery-image" data-name="{{baseName .Name}}">
       <button type="button" class="gallery-card-body"
-        hx-get="/buckets/{{$.BucketName}}/preview/{{.Name}}"
+        hx-get="/buckets/{{pathEscape $.BucketName}}/preview/{{pathEscape .Name}}"
         hx-target="#preview-dialog" hx-swap="innerHTML">
-        <div class="gallery-thumb" data-src="/buckets/{{$.BucketName}}/view/{{.Name}}">
+        <div class="gallery-thumb" data-src="/buckets/{{pathEscape $.BucketName}}/view/{{pathEscape .Name}}">
           <div class="gallery-thumb-placeholder">
             <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-image"></use></svg>
           </div>
@@ -253,7 +253,7 @@
     {{else}}
     <div class="gallery-card gallery-file" data-name="{{baseName .Name}}">
       <button type="button" class="gallery-card-body"
-        {{if isPreviewable .Name .Length}}hx-get="/buckets/{{$.BucketName}}/preview/{{.Name}}"
+        {{if isPreviewable .Name .Length}}hx-get="/buckets/{{pathEscape $.BucketName}}/preview/{{pathEscape .Name}}"
         hx-target="#preview-dialog" hx-swap="innerHTML"{{else}}disabled{{end}}>
         <div class="gallery-file-icon">
           <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-file"></use></svg>

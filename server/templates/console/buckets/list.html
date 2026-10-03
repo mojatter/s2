@@ -2,7 +2,7 @@
   {{range .Buckets}}
   <li>
     <div class="bucket-item-wrap">
-      <a hx-get="/buckets/{{.}}" hx-target="#main-content" hx-push-url="true" class="bucket-item" title="{{.}}"
+      <a hx-get="/buckets/{{pathEscape .}}" hx-target="#main-content" hx-push-url="true" class="bucket-item" title="{{.}}"
         onclick="document.querySelectorAll('.bucket-item').forEach(el => el.classList.remove('active')); this.classList.add('active')">
         <span class="obj-icon">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"
@@ -13,7 +13,7 @@
         <span class="bucket-name">{{.}}</span>
       </a>
       <button class="btn btn--icon btn--danger"
-        hx-delete="/buckets/{{.}}"
+        hx-delete="/buckets/{{pathEscape .}}"
         hx-confirm="Are you sure you want to delete bucket '{{.}}' and all its contents?"
         hx-target="closest .bucket-list"
         hx-swap="outerHTML"

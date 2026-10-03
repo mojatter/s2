@@ -5,12 +5,17 @@ import (
 	"context"
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
 	"fmt"
+	"html"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -476,6 +481,130 @@ func (s *ObjectsTestSuite) TestHandleCreateFolder() {
 		s.Require().NoError(err)
 		s.False(exists)
 	})
+}
+
+// renderObjects returns the objects fragment the console renders for prefix in bucket.
+func (s *ObjectsTestSuite) renderObjects(bucket, prefix string) string {
+	s.T().Helper()
+	req := httptest.NewRequest("GET", "/buckets/"+url.PathEscape(bucket)+"?prefix="+url.QueryEscape(prefix), nil)
+	req.SetPathValue("name", bucket)
+	req.Header.Set("HX-Request", "true")
+	w := httptest.NewRecorder()
+	handleObjects(s.server, w, req)
+	s.Require().Equal(http.StatusOK, w.Code, w.Body.String())
+	return w.Body.String()
+}
+
+// renderBuckets returns the bucket list the console renders for buckets.
+func (s *ObjectsTestSuite) renderBuckets(buckets ...string) string {
+	s.T().Helper()
+	var buf bytes.Buffer
+	s.Require().NoError(s.server.Template.ExecuteTemplate(&buf, "console/buckets/list.html", struct{ Buckets []string }{Buckets: buckets}))
+	return buf.String()
+}
+
+// consoleURLAttr matches a console URL in an href, src or hx-* attribute.
+var consoleURLAttr = regexp.MustCompile(`(?:href|data-src|hx-get|hx-post|hx-delete)="(/buckets/[^"]*)"`)
+
+// renderedURLs parses every console URL the fragment carries; a stray "%" is a parse error, not a dropped value.
+func (s *ObjectsTestSuite) renderedURLs(body string) []*url.URL {
+	s.T().Helper()
+	var urls []*url.URL
+	for _, m := range consoleURLAttr.FindAllStringSubmatch(body, -1) {
+		u, err := url.Parse(html.UnescapeString(m[1]))
+		s.Require().NoError(err)
+		_, err = url.ParseQuery(u.RawQuery)
+		s.Require().NoError(err, m[1])
+		urls = append(urls, u)
+	}
+	return urls
+}
+
+// TestConsoleURLsCarryNamesAsWritten checks every URL the console renders names a bucket, object or folder exactly (#341).
+func (s *ObjectsTestSuite) TestConsoleURLsCarryNamesAsWritten() {
+	testCases := []struct {
+		caseName string
+		name     string
+	}{
+		{caseName: "hash", name: "a#b"},
+		{caseName: "plus", name: "a+b"},
+		{caseName: "ampersand", name: "a&b"},
+		{caseName: "percent", name: "a%b"},
+		{caseName: "question mark", name: "a?b"},
+		{caseName: "space", name: "a b"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			// A directory under the root browses as a bucket whatever its name.
+			bucket := "esc " + tc.name
+			s.Require().NoError(os.Mkdir(filepath.Join(s.server.Config.Root, bucket), 0o755))
+			// A .png renders in the gallery too, so its data-src is checked.
+			file := tc.name + ".png"
+			folder := tc.name + "/"
+			s.putObject(bucket, file, "x")
+			s.putObject(bucket, folder+file, "x")
+
+			// Every key or prefix a URL may carry: the root listing, the folder listing (breadcrumb, parent, delete) and the forms.
+			known := map[string]bool{tc.name: true, folder: true, file: true, folder + file: true}
+			seen := map[string]bool{}
+			bucketList := s.renderedURLs(s.renderBuckets(bucket))
+			s.NotEmpty(bucketList, "bucket list links %q", bucket)
+			for _, u := range slices.Concat(bucketList, s.renderedURLs(s.renderObjects(bucket, "")), s.renderedURLs(s.renderObjects(bucket, folder))) {
+				rest, ok := strings.CutPrefix(u.Path, "/buckets/"+bucket)
+				s.True(ok, "%q names bucket %q", u, bucket)
+				for _, kind := range []string{"/view/", "/preview/"} {
+					if name, ok := strings.CutPrefix(rest, kind); ok {
+						s.True(known[name], "%q names an object", u)
+						seen[kind] = true
+					}
+				}
+				for _, k := range []string{"key", "prefix"} {
+					if v, ok := u.Query()[k]; ok {
+						// Only a prefix may be empty: the root listing's own links.
+						s.True(known[v[0]] || k == "prefix" && v[0] == "", "%q names a %s", u, k)
+						seen[k+"="+v[0]] = true
+					}
+				}
+			}
+			for _, want := range []string{"/view/", "/preview/", "key=" + file, "key=" + folder, "prefix=" + folder} {
+				s.True(seen[want], "a URL carries %s", want)
+			}
+		})
+	}
+}
+
+// TestDeleteButtonDeletesItsOwnObject sends the rendered delete URL of "a#b" and checks "a" survives (#341).
+func (s *ObjectsTestSuite) TestDeleteButtonDeletesItsOwnObject() {
+	s.createBucket("del")
+	s.putObject("del", "a", "keep")
+	s.putObject("del", "a#b", "drop")
+
+	var target string
+	for _, m := range regexp.MustCompile(`hx-delete="([^"]*)" hx-confirm="Are you sure you want to delete file '([^']*)'`).FindAllStringSubmatch(s.renderObjects("del", ""), -1) {
+		if html.UnescapeString(m[2]) == "a#b" {
+			target = html.UnescapeString(m[1])
+		}
+	}
+	s.Require().NotEmpty(target)
+	// A browser drops the fragment before sending, which httptest.NewRequest would keep in the query.
+	u, err := url.Parse(target)
+	s.Require().NoError(err)
+	u.Fragment = ""
+
+	req := httptest.NewRequest("DELETE", u.String(), nil)
+	req.SetPathValue("name", "del")
+	w := httptest.NewRecorder()
+	handleDeleteObject(s.server, w, req)
+	s.Require().Equal(http.StatusOK, w.Code, w.Body.String())
+
+	strg, err := s.server.Buckets.Get(context.Background(), "del")
+	s.Require().NoError(err)
+	exists, err := strg.Exists(context.Background(), "a")
+	s.Require().NoError(err)
+	s.True(exists, "a must survive deleting a#b")
+	exists, err = strg.Exists(context.Background(), "a#b")
+	s.Require().NoError(err)
+	s.False(exists, "a#b must be deleted")
 }
 
 // TestCreateFolderRejectsAFoldingName checks a folder name that is not one path element is refused, not folded (#271).
@@ -1024,24 +1153,14 @@ var tinyPNG = []byte{
 	0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 }
 
-// TestGalleryView_ThumbnailAndPersistenceAcrossReload drives a real headless
-// Chrome against the Web Console to catch the class of bug where gallery
-// thumbnail lazy-loading and view-mode persistence only run on htmx-driven
-// navigation but silently no-op on a full page load/reload. Requires a local
-// Chrome/Chromium; skipped with `go test -short`.
-func (s *ObjectsTestSuite) TestGalleryView_ThumbnailAndPersistenceAcrossReload() {
+// newBrowser serves the console and starts a headless Chrome on it, both closed when the test ends; skipped with `go test -short`.
+func (s *ObjectsTestSuite) newBrowser() (context.Context, string) {
+	s.T().Helper()
 	if testing.Short() {
 		s.T().Skip("skipping browser test in short mode")
 	}
-
-	s.createBucket("gallery")
-	ctx := context.Background()
-	strg, err := s.server.Buckets.Get(ctx, "gallery")
-	s.Require().NoError(err)
-	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("photo.png", tinyPNG)))
-
 	ts := httptest.NewServer(s.server.ConsoleHandler())
-	defer ts.Close()
+	s.T().Cleanup(ts.Close)
 
 	// --no-sandbox avoids Chrome sandbox-init failures seen on some CI
 	// runners; not needed locally but harmless there.
@@ -1055,17 +1174,62 @@ func (s *ObjectsTestSuite) TestGalleryView_ThumbnailAndPersistenceAcrossReload()
 		allocOpts = append(allocOpts, chromedp.ExecPath(p))
 	}
 	allocCtx, cancelAlloc := chromedp.NewExecAllocator(context.Background(), allocOpts...)
-	defer cancelAlloc()
+	s.T().Cleanup(cancelAlloc)
 
 	browserCtx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-	// This deadline covers the whole test (both s.Run subtests share
-	// browserCtx). 15s was enough locally but flaked in CI with "chrome
-	// failed to start: context deadline exceeded" on a busy runner.
+	s.T().Cleanup(cancel)
+	// 30s covers the whole test; 15s flaked in CI with "chrome failed to start: context deadline exceeded".
 	browserCtx, cancelTimeout := context.WithTimeout(browserCtx, 30*time.Second)
-	defer cancelTimeout()
+	s.T().Cleanup(cancelTimeout)
+	return browserCtx, ts.URL
+}
 
-	pageURL := ts.URL + "/buckets/gallery?prefix="
+// TestBrowserActsOnTheClickedName clicks a folder and a delete button named with "#" in Chrome, which drops a URL's fragment (#341).
+func (s *ObjectsTestSuite) TestBrowserActsOnTheClickedName() {
+	browserCtx, consoleURL := s.newBrowser()
+	s.createBucket("hash")
+	s.putObject("hash", "a", "keep")
+	s.putObject("hash", "a#b", "drop")
+	s.putObject("hash", "f#x/inside.txt", "x")
+
+	s.Run("folder link opens the folder", func() {
+		s.Require().NoError(chromedp.Run(browserCtx,
+			chromedp.Navigate(consoleURL+"/buckets/hash"),
+			chromedp.Click(`a[title="f#x/"]`, chromedp.ByQuery),
+			chromedp.WaitVisible(`span.obj-name[title="inside.txt"]`, chromedp.ByQuery),
+		))
+	})
+
+	s.Run("delete button deletes its own object", func() {
+		s.Require().NoError(chromedp.Run(browserCtx,
+			chromedp.Navigate(consoleURL+"/buckets/hash"),
+			chromedp.WaitVisible(`span.obj-name[title="a#b"]`, chromedp.ByQuery),
+			// hx-confirm asks window.confirm, which headless Chrome would leave open.
+			chromedp.Evaluate(`window.confirm = () => true`, nil),
+			chromedp.Evaluate(`document.querySelector('button[title="Delete File"][hx-confirm*="\'a#b\'"]').click()`, nil),
+			chromedp.WaitNotPresent(`span.obj-name[title="a#b"]`, chromedp.ByQuery),
+		))
+		strg, err := s.server.Buckets.Get(context.Background(), "hash")
+		s.Require().NoError(err)
+		exists, err := strg.Exists(context.Background(), "a")
+		s.Require().NoError(err)
+		s.True(exists, "a must survive deleting a#b")
+		exists, err = strg.Exists(context.Background(), "a#b")
+		s.Require().NoError(err)
+		s.False(exists, "a#b must be deleted")
+	})
+}
+
+// TestGalleryView_ThumbnailAndPersistenceAcrossReload checks in Chrome that gallery thumbnails load and the view mode persists on a full page reload, not only on htmx navigation.
+func (s *ObjectsTestSuite) TestGalleryView_ThumbnailAndPersistenceAcrossReload() {
+	browserCtx, consoleURL := s.newBrowser()
+	s.createBucket("gallery")
+	ctx := context.Background()
+	strg, err := s.server.Buckets.Get(ctx, "gallery")
+	s.Require().NoError(err)
+	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("photo.png", tinyPNG)))
+
+	pageURL := consoleURL + "/buckets/gallery?prefix="
 
 	s.Run("thumbnail loads after switching to gallery view", func() {
 		s.Require().NoError(chromedp.Run(browserCtx,

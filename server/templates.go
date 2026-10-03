@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"io/fs"
+	"net/url"
 	"path"
 	"slices"
 	"strings"
@@ -114,7 +115,8 @@ func templateFuncs(cfg *Config) template.FuncMap {
 		"formatTime": func(t time.Time) string {
 			return t.Format("2006-01-02 15:04")
 		},
-		"baseName": path.Base,
+		"baseName":   path.Base,
+		"pathEscape": escapePath,
 		"trimPrefix": func(prefix, key string) string {
 			if prefix == "" {
 				return key
@@ -149,4 +151,13 @@ func templateFuncs(cfg *Config) template.FuncMap {
 			return m, nil
 		},
 	}
+}
+
+// escapePath escapes each "/"-separated element of p for a URL path, so a key holding "#", "?" or "%" reaches the handler as written (#341).
+func escapePath(p string) string {
+	elems := strings.Split(p, "/")
+	for i, e := range elems {
+		elems[i] = url.PathEscape(e)
+	}
+	return strings.Join(elems, "/")
 }

@@ -339,6 +339,17 @@ func (s *ViewTestSuite) TestHandlePreview() {
 			wantContains: []string{"author", "tester"},
 		},
 		{
+			caseName: "view URL escapes the bucket and the key (#341)",
+			setup: func() {
+				s.createBucket("prv#h")
+				s.putObject("prv#h", "a#b.png", []byte("fake-png-bytes"))
+			},
+			bucketName:   "prv#h",
+			objectName:   "a#b.png",
+			wantCode:     http.StatusOK,
+			wantContains: []string{`src="/buckets/prv%23h/view/a%23b.png"`},
+		},
+		{
 			caseName:   "nonexistent bucket",
 			setup:      func() {},
 			bucketName: "nope",
