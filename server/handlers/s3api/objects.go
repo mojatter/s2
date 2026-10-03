@@ -367,6 +367,13 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// HEAD sends no body, so it does not open one: an Open refusing a replaced body (#349) must not fail it.
+	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Length", strconv.FormatUint(obj.Length(), 10))
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	rc, err := obj.Open()
 	if err != nil {
 		code, msg, status := s2ErrorToS3Error(err)
@@ -377,10 +384,7 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Length", strconv.FormatUint(obj.Length(), 10))
 	w.WriteHeader(http.StatusOK)
-
-	if r.Method != http.MethodHead {
-		_, _ = io.Copy(w, rc)
-	}
+	_, _ = io.Copy(w, rc)
 }
 
 // parseRangeHeader parses an RFC 7233 byte-range header against a total
