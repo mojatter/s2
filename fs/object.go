@@ -43,8 +43,25 @@ func (o *object) Name() string {
 	return o.name
 }
 
+// errModified is what Open returns once the body changed after Get: its length or modification time differs from what Get saw.
+var errModified = errors.New("object modified since Get")
+
+// Open refuses a body of another length or modification time than Get saw, so a Put since Get cannot pair it with what Get returned (#349).
 func (o *object) Open() (io.ReadCloser, error) {
-	return o.fsys.Open(o.name)
+	f, err := o.fsys.Open(o.name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if info.IsDir() || s2.MustUint64(info.Size()) != o.length || !info.ModTime().Equal(o.lastModified) {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: %s", errModified, o.name)
+	}
+	return f, nil
 }
 
 // load reads the sidecar once; List results call it lazily, Get eagerly.
