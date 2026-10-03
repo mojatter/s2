@@ -43,8 +43,25 @@ func (o *object) Name() string {
 	return o.name
 }
 
+// errReplaced is what Open returns once a Put has given the key a body of another length than Get saw.
+var errReplaced = errors.New("object replaced since Get")
+
+// Open refuses a body of another length than Get saw, so a Put since Get cannot pair it with that length (#349).
 func (o *object) Open() (io.ReadCloser, error) {
-	return o.fsys.Open(o.name)
+	f, err := o.fsys.Open(o.name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if info.IsDir() || s2.MustUint64(info.Size()) != o.length {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: %s", errReplaced, o.name)
+	}
+	return f, nil
 }
 
 // load reads the sidecar once; List results call it lazily, Get eagerly.

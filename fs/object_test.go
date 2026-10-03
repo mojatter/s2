@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"context"
 	"io"
 	"io/fs"
 	"sync"
@@ -42,8 +43,9 @@ func (s *ObjectTestSuite) TestOpen() {
 		{
 			caseName: "typical",
 			obj: &object{
-				fsys: fsys,
-				name: "test.txt",
+				fsys:   fsys,
+				name:   "test.txt",
+				length: 4,
 			},
 		},
 		{
@@ -222,10 +224,94 @@ func (s *ObjectTestSuite) TestObjectAccessorsAreConcurrencySafe() {
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {
+			rc, err := obj.Open()
+			s.NoError(err)
+			s.NoError(rc.Close())
 			s.Nil(obj.Metadata())
 			s.Equal(`"1234-5"`, obj.ETag())
 			s.Empty(obj.ContentType())
+			s.Equal(uint64(5), obj.Length())
 		})
 	}
 	wg.Wait()
+}
+
+// TestOpenRefusesAReplacedBody checks Open serves the body Get saw or fails, never another length under that length (#349).
+func (s *ObjectTestSuite) TestOpenRefusesAReplacedBody() {
+	ctx := context.Background()
+	backends := []struct {
+		name       string
+		newStorage func() s2.Storage
+	}{
+		{name: "memfs", newStorage: func() s2.Storage { return NewStorageMem(s2.Config{}) }},
+		{name: "osfs", newStorage: func() s2.Storage { return NewStorageDir(s.T().TempDir()) }},
+	}
+	testCases := []struct {
+		caseName string
+		replace  func(strg s2.Storage) error
+		wantBody string
+	}{
+		{caseName: "same length", replace: putBody("k", "xyz"), wantBody: "xyz"},
+		{caseName: "shorter", replace: putBody("k", "x")},
+		{caseName: "longer", replace: putBody("k", "wxyz")},
+		{caseName: "a directory", replace: func(strg s2.Storage) error {
+			if err := strg.Delete(ctx, "k"); err != nil {
+				return err
+			}
+			return putBody("k/x", "abc")(strg)
+		}},
+	}
+	for _, b := range backends {
+		for _, tc := range testCases {
+			s.Run(b.name+"/"+tc.caseName, func() {
+				strg := b.newStorage()
+				s.Require().NoError(putBody("k", "abc")(strg))
+				obj, err := strg.Get(ctx, "k")
+				s.Require().NoError(err)
+				s.Require().NoError(tc.replace(strg))
+
+				rc, err := obj.Open()
+				if tc.wantBody == "" {
+					s.ErrorIs(err, errReplaced)
+					return
+				}
+				s.Require().NoError(err)
+				body, err := io.ReadAll(rc)
+				s.Require().NoError(err)
+				s.Require().NoError(rc.Close())
+				s.Equal(tc.wantBody, string(body))
+				s.Equal(uint64(len(body)), obj.Length())
+			})
+		}
+	}
+}
+
+// TestOpenRangeRefusesAReplacedBody checks a range resolved before a shrinking Put fails instead of reading short (#349).
+func (s *ObjectTestSuite) TestOpenRangeRefusesAReplacedBody() {
+	ctx := context.Background()
+	testCases := []struct {
+		caseName string
+		strg     s2.Storage
+	}{
+		{caseName: "memfs", strg: NewStorageMem(s2.Config{})},
+		{caseName: "osfs", strg: NewStorageDir(s.T().TempDir())},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.Require().NoError(putBody("k", "0123456789")(tc.strg))
+			obj, err := tc.strg.Get(ctx, "k")
+			s.Require().NoError(err)
+			s.Require().NoError(putBody("k", "012")(tc.strg))
+
+			_, err = obj.OpenRange(1, 8)
+			s.ErrorIs(err, errReplaced)
+		})
+	}
+}
+
+// putBody returns a step that stores body under name.
+func putBody(name, body string) func(strg s2.Storage) error {
+	return func(strg s2.Storage) error {
+		return strg.Put(context.Background(), s2.NewObjectBytes(name, []byte(body)))
+	}
 }
