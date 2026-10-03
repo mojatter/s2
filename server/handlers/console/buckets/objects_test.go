@@ -478,6 +478,52 @@ func (s *ObjectsTestSuite) TestHandleCreateFolder() {
 	})
 }
 
+// TestCreateFolderRejectsAFoldingName checks a folder name that is not one path element is refused, not folded (#271).
+func (s *ObjectsTestSuite) TestCreateFolderRejectsAFoldingName() {
+	s.createBucket("fold")
+	s.Require().NoError(s.server.Buckets.CreateFolder(context.Background(), "fold", "photos/2024"))
+	strg, err := s.server.Buckets.Get(context.Background(), "fold")
+	s.Require().NoError(err)
+	keys := func() []string {
+		res, err := strg.List(context.Background(), s2.ListOptions{Recursive: true})
+		s.Require().NoError(err)
+		var names []string
+		for _, obj := range res.Objects {
+			names = append(names, obj.Name())
+		}
+		return names
+	}
+	before := keys()
+
+	testCases := []struct {
+		caseName   string
+		prefix     string
+		folderName string
+	}{
+		{caseName: "parent then name", prefix: "photos/2024", folderName: "../evil"},
+		{caseName: "parent", prefix: "photos/2024", folderName: ".."},
+		{caseName: "current", prefix: "photos/2024", folderName: "."},
+		{caseName: "nested", prefix: "photos/2024", folderName: "a/b"},
+		{caseName: "trailing slash", prefix: "photos/2024", folderName: "evil/"},
+		{caseName: "leading slash", prefix: "", folderName: "/escape"},
+		// A hand-crafted prefix is not folded either: the joined key fails s2.ValidateName, and nothing is written.
+		{caseName: "folding prefix", prefix: "photos/../x", folderName: "evil"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			form := url.Values{"prefix": {tc.prefix}, "folder_name": {tc.folderName}}
+			req := httptest.NewRequest("POST", "/buckets/fold/folders", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.SetPathValue("name", "fold")
+			w := httptest.NewRecorder()
+			handleCreateFolder(s.server, w, req)
+
+			s.Equal(http.StatusBadRequest, w.Code, w.Body.String())
+			s.Equal(before, keys())
+		})
+	}
+}
+
 func (s *ObjectsTestSuite) TestConsoleBucketSegmentIsOnePathElement() {
 	ctx := context.Background()
 	s.createBucket("b1")
@@ -542,10 +588,11 @@ func (s *ObjectsTestSuite) TestConsoleAnswers400ForARefusedName() {
 			},
 		},
 		{
-			caseName: "create an escaping folder",
+			// The key passes isPathElement and s2.ValidateName; the fs storage refuses its reserved metadata directory.
+			caseName: "create a folder named the metadata directory",
 			call:     func(w http.ResponseWriter, r *http.Request) { handleCreateFolder(s.server, w, r) },
 			req: func() *http.Request {
-				form := url.Values{"prefix": {""}, "folder_name": {"/escape"}}
+				form := url.Values{"prefix": {""}, "folder_name": {".meta"}}
 				r := httptest.NewRequest("POST", "/buckets/rej/folders", strings.NewReader(form.Encode()))
 				r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 				return r
@@ -595,6 +642,7 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 		omitFile   bool
 		wantCode   int
 		wantKey    string // if non-empty, verify this key landed in the bucket
+		wantAbsent string // if non-empty, verify this key did not land in the bucket
 	}{
 		{
 			caseName:   "success at root",
@@ -640,6 +688,38 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			wantCode:   http.StatusBadRequest,
 		},
 		{
+			// A name the console would fold onto the prefix's parent is refused (#271).
+			caseName:   "parent as the file name",
+			setup:      func() { s.createBucket("upd") },
+			bucketName: "upd",
+			prefix:     "notyet/sub",
+			filename:   "..",
+			content:    []byte("x"),
+			wantCode:   http.StatusBadRequest,
+			wantAbsent: "notyet",
+		},
+		{
+			caseName:   "current as the file name",
+			setup:      func() { s.createBucket("upc") },
+			bucketName: "upc",
+			prefix:     "notyet/sub",
+			filename:   ".",
+			content:    []byte("x"),
+			wantCode:   http.StatusBadRequest,
+			wantAbsent: "notyet/sub",
+		},
+		{
+			// A hand-crafted prefix is not folded either: the joined key fails s2.ValidateName, and nothing is written.
+			caseName:   "folding prefix",
+			setup:      func() { s.createBucket("upf") },
+			bucketName: "upf",
+			prefix:     "photos/../x",
+			filename:   "evil.txt",
+			content:    []byte("x"),
+			wantCode:   http.StatusBadRequest,
+			wantAbsent: "x/evil.txt",
+		},
+		{
 			caseName:   "missing file field",
 			setup:      func() { s.createBucket("upn") },
 			bucketName: "upn",
@@ -679,6 +759,13 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 				exists, err := strg.Exists(context.Background(), tc.wantKey)
 				s.Require().NoError(err)
 				s.True(exists, "object %q should exist after upload", tc.wantKey)
+			}
+			if tc.wantAbsent != "" {
+				strg, err := s.server.Buckets.Get(context.Background(), tc.bucketName)
+				s.Require().NoError(err)
+				exists, err := strg.Exists(context.Background(), tc.wantAbsent)
+				s.Require().NoError(err)
+				s.False(exists, "object %q should not exist after upload", tc.wantAbsent)
 			}
 		})
 	}

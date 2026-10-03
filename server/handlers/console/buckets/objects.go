@@ -151,8 +151,17 @@ func handleCreateFolder(s *server.Server, w http.ResponseWriter, r *http.Request
 		http.Error(w, "folder name is required", http.StatusBadRequest)
 		return
 	}
+	if !isPathElement(folderName) {
+		http.Error(w, "folder name must be a single path element", http.StatusBadRequest)
+		return
+	}
 
-	key := path.Join(prefix, folderName)
+	key := joinKey(prefix, folderName)
+	// Check the key before authorizing it, so the key authorized is the key written whatever the storage.
+	if err := s2.ValidateName(key); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	// Both: the marker is what is written, and a Deny on the folder's own
 	// name is meant to stop the folder from existing at all.
 	user := server.UserFromContext(ctx)
@@ -208,7 +217,15 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	key := path.Join(prefix, header.Filename)
+	if !isPathElement(header.Filename) {
+		http.Error(w, "file name must be a single path element", http.StatusBadRequest)
+		return
+	}
+	key := joinKey(prefix, header.Filename)
+	if err := s2.ValidateName(key); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if !server.DenyUnlessAllowedS3Action(w, server.UserFromContext(ctx), server.ActionPutObject, name, key) {
 		return
 	}
@@ -300,6 +317,19 @@ func init() {
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/folders", middleware.BasicAuth(handleCreateFolder))
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/upload", middleware.BasicAuth(handleUploadFile))
 	server.RegisterConsoleHandleFunc("DELETE /buckets/{name}/objects", middleware.BasicAuth(handleDeleteObject))
+}
+
+// isPathElement reports whether name is one path element, so the console writes the name as typed (#271).
+func isPathElement(name string) bool {
+	return name != "" && name != "." && name != ".." && !strings.Contains(name, "/")
+}
+
+// joinKey puts name under prefix as given, so s2.ValidateName refuses an unclean key where path.Join would fold it (#271).
+func joinKey(prefix, name string) string {
+	if prefix == "" {
+		return name
+	}
+	return prefix + "/" + name
 }
 
 // maxSearchFetches bounds the folder scan behind a search term the storage
