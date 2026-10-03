@@ -99,7 +99,6 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 
 	ext := strings.ToLower(path.Ext(objectName))
-	viewURL := fmt.Sprintf("/buckets/%s/view/%s", bucketName, objectName)
 	previewType := server.PreviewType(ext)
 
 	var textContent string
@@ -120,8 +119,9 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := struct {
+		Bucket       string
+		Key          string
 		Filename     string
-		ViewURL      string
 		ContentType  string
 		Size         uint64
 		LastModified string
@@ -129,8 +129,9 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		PreviewType  string
 		TextContent  string
 	}{
+		Bucket:       bucketName,
+		Key:          objectName,
 		Filename:     path.Base(objectName),
-		ViewURL:      viewURL,
 		ContentType:  server.ResolveContentType(obj, objectName),
 		Size:         obj.Length(),
 		LastModified: obj.LastModified().Format("2006-01-02 15:04:05"),
