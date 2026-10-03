@@ -80,7 +80,7 @@
       <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-upload"></use></svg>
       Upload File
     </button>
-    <form hx-post="/buckets/{{pathEscape .BucketName}}/upload" hx-encoding="multipart/form-data" hx-target="#main-content" style="display:none;">
+    <form hx-post="/buckets/{{pathEscape .BucketName}}/upload" hx-encoding="multipart/form-data" hx-target="#main-content" hx-on::response-error="alert(event.detail.xhr.responseText);this.reset()" style="display:none;">
       <input type="hidden" name="prefix" value="{{.CurrentPrefix}}">
       <input type="file" name="file" onchange="this.form.requestSubmit()">
     </form>
