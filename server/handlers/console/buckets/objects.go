@@ -47,13 +47,14 @@ func objectsData(ctx context.Context, s *server.Server, bucket, prefix, search s
 			// find the dotfiles. One the storage will not take as a prefix is
 			// matched here against the folder's own listing instead. The
 			// folder is a path, so a bad one is still a bad request.
-			res, err = searchFolder(ctx, strg, folder, listPrefix)
+			res.Objects, truncated, err = searchFolder(ctx, strg, folder, listPrefix)
+		} else {
+			truncated = res.NextAfter != ""
 		}
 		if err != nil {
 			return nil, err
 		}
 		objs = server.FilterKeep(res.Objects)
-		truncated = res.NextAfter != ""
 	} else {
 		res, err := strg.List(ctx, s2.ListOptions{Prefix: prefix})
 		if err != nil {
@@ -339,29 +340,32 @@ func joinKey(prefix, name string) string {
 // will not take as a prefix: a match may sort past the first backend page.
 const maxSearchFetches = 10
 
-// searchFolder lists folder and keeps the names beginning with listPrefix,
-// the filtering the storage would refuse to do itself.
-func searchFolder(ctx context.Context, strg s2.Storage, folder, listPrefix string) (s2.ListResult, error) {
-	var (
-		out   s2.ListResult
-		after string
-	)
+// maxSearchMatches caps the fallback at one backend page, as many as a pushed-down search returns (#270).
+const maxSearchMatches = 1000
+
+// searchFolder keeps the names in folder beginning with listPrefix, which the storage refuses to filter; more reports keys left unread.
+func searchFolder(ctx context.Context, strg s2.Storage, folder, listPrefix string) (objs []s2.Object, more bool, err error) {
+	var after string
 	for range maxSearchFetches {
 		res, err := strg.List(ctx, s2.ListOptions{Prefix: folder, After: after, Recursive: true})
 		if err != nil {
-			return s2.ListResult{}, err
+			return nil, false, err
 		}
 		for _, obj := range res.Objects {
-			if strings.HasPrefix(obj.Name(), listPrefix) {
-				out.Objects = append(out.Objects, obj)
+			if !strings.HasPrefix(obj.Name(), listPrefix) {
+				continue
 			}
+			if len(objs) == maxSearchMatches {
+				return objs, true, nil
+			}
+			objs = append(objs, obj)
 		}
 		// Names come back sorted, so nothing beyond the term's range matches.
 		if n := len(res.Objects); n > 0 && pastSearchRange(res.Objects[n-1].Name(), listPrefix) {
-			return out, nil
+			return objs, false, nil
 		}
 		if res.NextAfter == "" {
-			return out, nil
+			return objs, false, nil
 		}
 		if res.NextAfter == after {
 			break
@@ -369,8 +373,7 @@ func searchFolder(ctx context.Context, strg s2.Storage, folder, listPrefix strin
 		after = res.NextAfter
 	}
 	// Keys left unread: say so, as a single page does.
-	out.NextAfter = after
-	return out, nil
+	return objs, true, nil
 }
 
 // pastSearchRange reports whether name sorts beyond every key listPrefix can

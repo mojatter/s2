@@ -324,13 +324,20 @@ func TestListTruncatedNotice(t *testing.T) {
 		key        string
 		count      int
 		url        string
+		extra      string
 		wantNotice string
+		wantShown  string
+		wantGone   string
 	}{
 		{caseName: "small folder", key: "k%04d", count: 10, url: "/buckets/b"},
 		{caseName: "folder past one page", key: "k%04d", count: 1001, url: "/buckets/b", wantNotice: "there may be more entries."},
 		{caseName: "search past one page", key: "k%04d", count: 1001, url: "/buckets/b?search=k", wantNotice: "more objects may match."},
-		// A term the storage refuses as a prefix scans the folder, up to maxSearchFetches pages.
-		{caseName: "refused term past the scan", key: ".d%05d", count: maxSearchFetches*1000 + 1, url: "/buckets/b?search=.", wantNotice: "more objects may match."},
+		// The fallback keeps one page of matches, as the pushed-down search does (#270).
+		{caseName: "refused term past one page of matches", key: ".d%04d", count: maxSearchMatches + 1, url: "/buckets/b?search=.", wantNotice: "more objects may match.", wantShown: ".d0999", wantGone: ".d1000"},
+		// The bucket's .keep is a match too, so this is exactly one page: no notice.
+		{caseName: "refused term filling one page of matches", key: ".d%04d", count: maxSearchMatches - 1, url: "/buckets/b?search=."},
+		// A refused term scans at most maxSearchFetches pages; "!" sorts below ".", so none of them holds the match.
+		{caseName: "refused term past the scan", key: "!%05d", count: maxSearchFetches * 1000, extra: ".hit", url: "/buckets/b?search=.", wantNotice: "more objects may match.", wantGone: ".hit"},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
@@ -345,6 +352,9 @@ func TestListTruncatedNotice(t *testing.T) {
 			for i := range tc.count {
 				require.NoError(t, strg.Put(ctx, s2.NewObjectBytes(fmt.Sprintf(tc.key, i), []byte("x"))))
 			}
+			if tc.extra != "" {
+				require.NoError(t, strg.Put(ctx, s2.NewObjectBytes(tc.extra, []byte("x"))))
+			}
 
 			req := httptest.NewRequest("GET", tc.url, nil)
 			req.SetPathValue("name", "b")
@@ -358,6 +368,12 @@ func TestListTruncatedNotice(t *testing.T) {
 				return
 			}
 			require.Contains(t, w.Body.String(), tc.wantNotice)
+			if tc.wantShown != "" {
+				require.Contains(t, w.Body.String(), tc.wantShown)
+			}
+			if tc.wantGone != "" {
+				require.NotContains(t, w.Body.String(), tc.wantGone)
+			}
 		})
 	}
 }
