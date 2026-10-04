@@ -1181,7 +1181,7 @@ func (s *ObjectsTestSuite) TestPutObject_AWSChunked() {
 	}
 }
 
-// uploadLimitRequest builds a PUT of size bytes to target, aws-chunked when chunked; decoded overrides X-Amz-Decoded-Content-Length and length -1 hides the length.
+// uploadLimitRequest builds a PUT of size bytes to target, aws-chunked when chunked; decoded overrides X-Amz-Decoded-Content-Length ("-" omits it) and length -1 hides the length.
 func uploadLimitRequest(target string, size int, chunked bool, decoded string, length int64) *http.Request {
 	body := bytes.Repeat([]byte("x"), size)
 	if chunked {
@@ -1190,7 +1190,9 @@ func uploadLimitRequest(target string, size int, chunked bool, decoded string, l
 	req := httptest.NewRequest("PUT", target, bytes.NewReader(body))
 	if chunked {
 		req.Header.Set("Content-Encoding", "aws-chunked")
-		req.Header.Set("X-Amz-Decoded-Content-Length", cmp.Or(decoded, strconv.Itoa(size)))
+		if decoded != "-" {
+			req.Header.Set("X-Amz-Decoded-Content-Length", cmp.Or(decoded, strconv.Itoa(size)))
+		}
 	}
 	if length != 0 {
 		req.ContentLength = length
