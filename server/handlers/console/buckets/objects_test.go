@@ -6,6 +6,7 @@ import (
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
 	"fmt"
 	"html"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -787,6 +788,7 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 		omitFile   bool
 		maxUpload  int64 // if non-zero, the upload size limit for this case
 		wantCode   int
+		wantShort  bool   // if set, the body read must stop at the limit plus the framing allowance (#340)
 		wantBody   string // if non-empty, the response body must contain it
 		wantKey    string // if non-empty, verify this key landed in the bucket
 		wantAbsent string // if non-empty, verify this key did not land in the bucket
@@ -875,17 +877,42 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			wantCode:   http.StatusBadRequest,
 		},
 		{
-			// The limit covers the whole body, read before the prefix field (#340).
-			caseName:   "over the upload size limit",
-			setup:      func() { s.createBucket("upl") },
-			bucketName: "upl",
+			// A file of exactly the limit lands.
+			caseName:   "exactly the upload size limit",
+			setup:      func() { s.createBucket("upe") },
+			bucketName: "upe",
 			prefix:     "docs",
-			filename:   "big.bin",
-			content:    bytes.Repeat([]byte("x"), 4096),
+			filename:   "exact.bin",
+			content:    bytes.Repeat([]byte("x"), 1024),
+			maxUpload:  1024,
+			wantCode:   http.StatusOK,
+			wantKey:    "docs/exact.bin",
+		},
+		{
+			caseName:   "one byte over the upload size limit",
+			setup:      func() { s.createBucket("upo") },
+			bucketName: "upo",
+			prefix:     "docs",
+			filename:   "over.bin",
+			content:    bytes.Repeat([]byte("x"), 1025),
 			maxUpload:  1024,
 			wantCode:   http.StatusRequestEntityTooLarge,
 			wantBody:   "max 1024 bytes",
-			wantAbsent: "docs/big.bin",
+			wantAbsent: "docs/over.bin",
+		},
+		{
+			// Past the framing allowance the body read itself stops, before the file ends (#340).
+			caseName:   "far over the upload size limit",
+			setup:      func() { s.createBucket("upf2") },
+			bucketName: "upf2",
+			prefix:     "docs",
+			filename:   "huge.bin",
+			content:    bytes.Repeat([]byte("x"), 2<<20),
+			maxUpload:  1024,
+			wantCode:   http.StatusRequestEntityTooLarge,
+			wantShort:  true,
+			wantBody:   "max 1024 bytes",
+			wantAbsent: "docs/huge.bin",
 		},
 		{
 			caseName:   "within the upload size limit",
@@ -921,7 +948,9 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 
 			s.Require().NoError(mw.Close())
 
-			req := httptest.NewRequest("POST", "/buckets/"+tc.bucketName+"/upload", body)
+			read := &bytes.Buffer{}
+			req := httptest.NewRequest("POST", "/buckets/"+tc.bucketName+"/upload", io.TeeReader(body, read))
+			req.ContentLength = int64(body.Len()) // as a browser sends it; TeeReader hides the length from NewRequest
 			req.Header.Set("Content-Type", mw.FormDataContentType())
 			req.Header.Set("HX-Request", "true")
 			req.SetPathValue("name", tc.bucketName)
@@ -929,6 +958,10 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			handleUploadFile(s.server, w, req)
 
 			s.Equal(tc.wantCode, w.Code)
+			if tc.wantShort {
+				// MaxBytesReader reads at most one byte past its limit.
+				s.LessOrEqual(int64(read.Len()), tc.maxUpload+uploadFormOverhead+1, "the body read should stop at the limit plus the framing allowance")
+			}
 			if tc.wantBody != "" {
 				s.Contains(w.Body.String(), tc.wantBody)
 			}

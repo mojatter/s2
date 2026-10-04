@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"path"
@@ -199,12 +200,12 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 
 	// Before any form read: FormValue parses the whole body, which the limit must already cover (#340).
 	maxSize := s.Config.EffectiveMaxUploadSize()
-	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
+	r.Body = http.MaxBytesReader(w, r.Body, maxSize+min(uploadFormOverhead, math.MaxInt64-maxSize))
 
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
+		var maxBytes *http.MaxBytesError
+		if errors.As(err, &maxBytes) {
 			http.Error(w, fmt.Sprintf("File too large (max %d bytes)", maxSize), http.StatusRequestEntityTooLarge)
 			return
 		}
@@ -212,6 +213,12 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	defer func() { _ = file.Close() }()
+
+	// The limit is on the file, so a file of exactly maxSize lands; the body cap above only bounds the read.
+	if header.Size > maxSize {
+		http.Error(w, fmt.Sprintf("File too large (max %d bytes)", maxSize), http.StatusRequestEntityTooLarge)
+		return
+	}
 
 	prefix := r.FormValue("prefix")
 
@@ -322,6 +329,9 @@ func init() {
 	server.RegisterConsoleHandleFunc("POST /buckets/{name}/upload", middleware.BasicAuth(handleUploadFile))
 	server.RegisterConsoleHandleFunc("DELETE /buckets/{name}/objects", middleware.BasicAuth(handleDeleteObject))
 }
+
+// uploadFormOverhead is what an upload's multipart framing and prefix field may add to the file before the body read stops.
+const uploadFormOverhead = 1 << 20
 
 // isPathElement reports whether name is one path element, so the console writes the name as typed (#271).
 func isPathElement(name string) bool {
