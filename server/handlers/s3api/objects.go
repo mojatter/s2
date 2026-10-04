@@ -481,13 +481,11 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	bucketName := r.PathValue("bucket")
 	key := r.PathValue("key")
 
-	// Enforce upload size limit
 	maxSize := s.Config.EffectiveMaxUploadSize()
-	if r.ContentLength > maxSize {
-		writeError(w, r, "EntityTooLarge", fmt.Sprintf("Your proposed upload exceeds the maximum allowed size (%d bytes)", maxSize), http.StatusBadRequest)
+	body, contentLength, ok := uploadBody(w, r, maxSize)
+	if !ok {
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
@@ -496,17 +494,14 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body := unwrapAWSChunkedBody(r)
-	contentLength := r.ContentLength
-	if v := r.Header.Get("X-Amz-Decoded-Content-Length"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			contentLength = n
-		}
-	}
 	// An absent Content-Type stays unstored; readers resolve it (#210).
 	obj := s2.NewObjectReader(key, io.NopCloser(body), s2.MustUint64(contentLength),
 		s2.WithContentType(requestContentType(r)), s2.WithMetadata(parseMetadataHeaders(r)))
 	res, err := s2.Upload(ctx, strg, obj, s2.UploadOptions{})
+	if tooLarge := (*http.MaxBytesError)(nil); errors.As(err, &tooLarge) {
+		writeEntityTooLarge(w, r, maxSize)
+		return
+	}
 	if err != nil {
 		code, msg, status := uploadErrorToS3Error(err)
 		writeError(w, r, code, msg, status)

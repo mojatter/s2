@@ -2,6 +2,7 @@ package s3api
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
@@ -1176,6 +1177,78 @@ func (s *ObjectsTestSuite) TestPutObject_AWSChunked() {
 			s.Require().Equal(http.StatusOK, getW.Code)
 			s.Equal(strconv.Itoa(len(payload)), getW.Header().Get("Content-Length"))
 			s.Equal(len(payload), getW.Body.Len())
+		})
+	}
+}
+
+// uploadLimitRequest builds a PUT of size bytes to target, aws-chunked when chunked; decoded overrides X-Amz-Decoded-Content-Length ("-" omits it) and length -1 hides the length.
+func uploadLimitRequest(target string, size int, chunked bool, decoded string, length int64) *http.Request {
+	body := bytes.Repeat([]byte("x"), size)
+	if chunked {
+		body = buildAWSChunkedBody(body, 256)
+	}
+	req := httptest.NewRequest("PUT", target, bytes.NewReader(body))
+	if chunked {
+		req.Header.Set("Content-Encoding", "aws-chunked")
+		if decoded != "-" {
+			req.Header.Set("X-Amz-Decoded-Content-Length", cmp.Or(decoded, strconv.Itoa(size)))
+		}
+	}
+	if length != 0 {
+		req.ContentLength = length
+	}
+	return req
+}
+
+// wantErrorCode is the S3 error code a refused upload carries for each status.
+var wantErrorCode = map[int]string{
+	http.StatusBadRequest:     "EntityTooLarge",
+	http.StatusLengthRequired: "MissingContentLength",
+}
+
+func (s *ObjectsTestSuite) TestPutObjectUploadLimit() {
+	const maxSize = 1024
+	s.server.Config.MaxUploadSize = maxSize
+	s.createBucket("limit")
+
+	testCases := []struct {
+		caseName string
+		size     int
+		chunked  bool
+		decoded  string
+		length   int64
+		wantCode int
+	}{
+		{caseName: "exactly the limit", size: maxSize, wantCode: http.StatusOK},
+		{caseName: "past the limit", size: maxSize + 1, wantCode: http.StatusBadRequest},
+		{caseName: "aws-chunked exactly the limit", size: maxSize, chunked: true, wantCode: http.StatusOK},
+		{caseName: "aws-chunked declared past the limit", size: maxSize + 1, chunked: true, wantCode: http.StatusBadRequest},
+		{caseName: "aws-chunked sending more than declared", size: maxSize + 1, chunked: true, decoded: strconv.Itoa(maxSize), wantCode: http.StatusBadRequest},
+		{caseName: "aws-chunked raw length past the framing allowance", size: maxSize, chunked: true, length: maxSize + chunkedOverhead(maxSize) + 1, wantCode: http.StatusBadRequest},
+		{caseName: "no length", size: maxSize, length: -1, wantCode: http.StatusLengthRequired},
+		{caseName: "aws-chunked with no decoded length", size: maxSize, chunked: true, decoded: "-", wantCode: http.StatusLengthRequired},
+		{caseName: "aws-chunked with a negative decoded length", size: maxSize, chunked: true, decoded: "-5", wantCode: http.StatusLengthRequired},
+	}
+	for i, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			key := fmt.Sprintf("o%d", i)
+			req := uploadLimitRequest("/limit/"+key, tc.size, tc.chunked, tc.decoded, tc.length)
+			req.SetPathValue("bucket", "limit")
+			req.SetPathValue("key", key)
+			w := httptest.NewRecorder()
+			handlePutObject(s.server, w, req)
+			s.Require().Equal(tc.wantCode, w.Code, w.Body.String())
+
+			strg, err := s.server.Buckets.Get(context.Background(), "limit")
+			s.Require().NoError(err)
+			obj, err := strg.Get(context.Background(), key)
+			if tc.wantCode != http.StatusOK {
+				s.Contains(w.Body.String(), "<Code>"+wantErrorCode[tc.wantCode]+"</Code>")
+				s.ErrorIs(err, s2.ErrNotExist)
+				return
+			}
+			s.Require().NoError(err)
+			s.Equal(uint64(tc.size), obj.Length())
 		})
 	}
 }

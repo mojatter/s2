@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -99,6 +100,41 @@ func unwrapAWSChunkedBody(r *http.Request) io.ReadCloser {
 	return io.NopCloser(&awsChunkedReader{br: bufio.NewReader(r.Body)})
 }
 
+// chunkedOverhead bounds aws-chunked framing: under 1/32 of the payload in 8 KiB chunks, AWS's minimum, plus the trailer.
+func chunkedOverhead(maxSize int64) int64 {
+	return maxSize/32 + 64<<10
+}
+
+// uploadBody caps r's payload at maxSize, counted after aws-chunked decoding, and returns its declared size; it answers and returns false when that size is absent or past the limit.
+func uploadBody(w http.ResponseWriter, r *http.Request, maxSize int64) (io.Reader, int64, bool) {
+	chunked := isAWSChunkedRequest(r)
+	declared, bodyLimit := r.ContentLength, maxSize
+	if chunked {
+		bodyLimit = maxSize + min(chunkedOverhead(maxSize), math.MaxInt64-maxSize)
+		declared = -1
+		if n, err := strconv.ParseInt(r.Header.Get("X-Amz-Decoded-Content-Length"), 10, 64); err == nil {
+			declared = n
+		}
+	}
+	if declared < 0 {
+		writeError(w, r, "MissingContentLength", "You must provide the Content-Length HTTP header (X-Amz-Decoded-Content-Length for an aws-chunked body).", http.StatusLengthRequired)
+		return nil, 0, false
+	}
+	if declared > maxSize || r.ContentLength > bodyLimit {
+		writeEntityTooLarge(w, r, maxSize)
+		return nil, 0, false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
+	if !chunked {
+		return r.Body, declared, true
+	}
+	return http.MaxBytesReader(w, unwrapAWSChunkedBody(r), maxSize), declared, true
+}
+
+func writeEntityTooLarge(w http.ResponseWriter, r *http.Request, maxSize int64) {
+	writeError(w, r, "EntityTooLarge", fmt.Sprintf("Your proposed upload exceeds the maximum allowed size (%d bytes)", maxSize), http.StatusBadRequest)
+}
+
 func isAWSChunkedRequest(r *http.Request) bool {
 	if strings.EqualFold(r.Header.Get("Content-Encoding"), "aws-chunked") {
 		return true
@@ -134,7 +170,7 @@ func (r *awsChunkedReader) Read(p []byte) (int, error) {
 		// Extract hex size before the semicolon
 		sizeStr, _, _ := strings.Cut(line, ";")
 		size, err := strconv.ParseInt(sizeStr, 16, 64)
-		if err != nil {
+		if err != nil || size < 0 {
 			return 0, fmt.Errorf("invalid aws-chunked size: %q", sizeStr)
 		}
 		if size == 0 {

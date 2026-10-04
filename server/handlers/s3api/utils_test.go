@@ -1,9 +1,12 @@
 package s3api
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mojatter/s2"
@@ -117,6 +120,22 @@ func (s *UtilsTestSuite) TestParseMetadataHeaders() {
 			}
 			got := parseMetadataHeaders(req)
 			s.Equal(tc.want, got)
+		})
+	}
+}
+
+func (s *UtilsTestSuite) TestAWSChunkedReaderRejectsBadSize() {
+	testCases := []struct {
+		caseName string
+		body     string
+	}{
+		{caseName: "negative size", body: "-1;chunk-signature=x\r\nabc\r\n0;chunk-signature=x\r\n\r\n"},
+		{caseName: "non-hex size", body: "zz;chunk-signature=x\r\n"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			_, err := io.ReadAll(&awsChunkedReader{br: bufio.NewReader(strings.NewReader(tc.body))})
+			s.Error(err)
 		})
 	}
 }
