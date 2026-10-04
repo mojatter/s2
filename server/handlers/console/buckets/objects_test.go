@@ -2,11 +2,11 @@ package buckets
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
 	"fmt"
 	"html"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -786,11 +786,13 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 		filename   string
 		content    []byte
 		omitFile   bool
-		maxUpload  int64 // if non-zero, the upload size limit for this case
+		partName   string // if non-empty, the file part's name instead of "file"
+		maxUpload  int64  // if non-zero, the upload size limit for this case
 		wantCode   int
 		wantShort  bool   // if set, the body read must stop at the limit plus the framing allowance (#340)
 		declared   int64  // if non-zero, the Content-Length the request declares; -1 is chunked
 		wantUnread bool   // if set, the handler must not read the body at all
+		wantNoTemp bool   // if set, no multipart-* temp file may remain once the handler returns
 		wantBody   string // if non-empty, the response body must contain it
 		wantKey    string // if non-empty, verify this key landed in the bucket
 		wantAbsent string // if non-empty, verify this key did not land in the bucket
@@ -933,6 +935,34 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			wantUnread: true,
 		},
 		{
+			// Past multipart's 32 MiB memory cap the file is spooled to disk; the handler removes it, since net/http never sees BasicAuth's request copy.
+			caseName:   "spooled to disk leaves no temp file",
+			setup:      func() { s.createBucket("upsp") },
+			bucketName: "upsp",
+			prefix:     "docs",
+			filename:   "spool.bin",
+			content:    bytes.Repeat([]byte("x"), 32<<20+1),
+			maxUpload:  64 << 20,
+			wantCode:   http.StatusOK,
+			wantKey:    "docs/spool.bin",
+			wantNoTemp: true,
+		},
+		{
+			// The form parses, so its spool file exists, before the missing part is reported.
+			caseName:   "spooled part under another name leaves no temp file",
+			setup:      func() { s.createBucket("upsn") },
+			bucketName: "upsn",
+			prefix:     "docs",
+			filename:   "spool.bin",
+			partName:   "other",
+			content:    bytes.Repeat([]byte("x"), 32<<20+1),
+			maxUpload:  64 << 20,
+			wantCode:   http.StatusBadRequest,
+			wantBody:   http.ErrMissingFile.Error(),
+			wantAbsent: "docs/spool.bin",
+			wantNoTemp: true,
+		},
+		{
 			caseName:   "within the upload size limit",
 			setup:      func() { s.createBucket("ups") },
 			bucketName: "ups",
@@ -958,7 +988,7 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			mw := multipart.NewWriter(body)
 			s.Require().NoError(mw.WriteField("prefix", tc.prefix))
 			if !tc.omitFile {
-				fw, err := mw.CreateFormFile("file", tc.filename)
+				fw, err := mw.CreateFormFile(cmp.Or(tc.partName, "file"), tc.filename)
 				s.Require().NoError(err)
 				_, err = fw.Write(tc.content)
 				s.Require().NoError(err)
@@ -966,9 +996,11 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 
 			s.Require().NoError(mw.Close())
 
-			read := &bytes.Buffer{}
-			req := httptest.NewRequest("POST", "/buckets/"+tc.bucketName+"/upload", io.TeeReader(body, read))
-			req.ContentLength = int64(body.Len()) // as a browser sends it; TeeReader hides the length from NewRequest
+			if tc.wantNoTemp {
+				s.T().Setenv("TMPDIR", s.T().TempDir()) // where multipart spools; the recorder runs none of net/http's cleanup
+			}
+			sent := body.Len() // what the handler consumes is what is gone from the buffer afterwards
+			req := httptest.NewRequest("POST", "/buckets/"+tc.bucketName+"/upload", body)
 			if tc.declared != 0 {
 				req.ContentLength = tc.declared
 			}
@@ -979,15 +1011,21 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			handleUploadFile(s.server, w, req)
 
 			s.Equal(tc.wantCode, w.Code)
+			read := int64(sent - body.Len())
 			if tc.wantUnread {
-				s.Zero(read.Len(), "a declared length past the cap must be refused unread")
+				s.Zero(read, "a declared length past the cap must be refused unread")
 			}
 			if tc.wantShort {
 				// MaxBytesReader reads at most one byte past its limit.
-				s.LessOrEqual(int64(read.Len()), tc.maxUpload+uploadFormOverhead+1, "the body read should stop at the limit plus the framing allowance")
+				s.LessOrEqual(read, tc.maxUpload+uploadFormOverhead+1, "the body read should stop at the limit plus the framing allowance")
 			}
 			if tc.wantBody != "" {
 				s.Contains(w.Body.String(), tc.wantBody)
+			}
+			if tc.wantNoTemp {
+				left, err := filepath.Glob(filepath.Join(os.TempDir(), "multipart-*"))
+				s.Require().NoError(err)
+				s.Empty(left, "the spooled form must be removed")
 			}
 			if tc.wantKey != "" {
 				strg, err := s.server.Buckets.Get(context.Background(), tc.bucketName)

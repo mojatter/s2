@@ -208,6 +208,13 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
 
+	// With auth on, BasicAuth hands the handler a copy of the request, so net/http's own cleanup misses the spooled form.
+	defer func() {
+		if r.MultipartForm != nil {
+			_ = r.MultipartForm.RemoveAll()
+		}
+	}()
+
 	file, header, err := r.FormFile("file")
 	if err != nil {
 		var maxBytes *http.MaxBytesError
