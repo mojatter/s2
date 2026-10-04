@@ -200,7 +200,13 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 
 	// Before any form read: FormValue parses the whole body, which the limit must already cover (#340).
 	maxSize := s.Config.EffectiveMaxUploadSize()
-	r.Body = http.MaxBytesReader(w, r.Body, maxSize+min(uploadFormOverhead, math.MaxInt64-maxSize))
+	bodyLimit := maxSize + min(uploadFormOverhead, math.MaxInt64-maxSize)
+	// A declared length past the cap is refused before a byte is read, as the S3 API does.
+	if r.ContentLength > bodyLimit {
+		http.Error(w, fmt.Sprintf("File too large (max %d bytes)", maxSize), http.StatusRequestEntityTooLarge)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
 
 	file, header, err := r.FormFile("file")
 	if err != nil {

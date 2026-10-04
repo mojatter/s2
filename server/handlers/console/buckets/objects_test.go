@@ -789,6 +789,8 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 		maxUpload  int64 // if non-zero, the upload size limit for this case
 		wantCode   int
 		wantShort  bool   // if set, the body read must stop at the limit plus the framing allowance (#340)
+		declared   int64  // if non-zero, the Content-Length the request declares; -1 is chunked
+		wantUnread bool   // if set, the handler must not read the body at all
 		wantBody   string // if non-empty, the response body must contain it
 		wantKey    string // if non-empty, verify this key landed in the bucket
 		wantAbsent string // if non-empty, verify this key did not land in the bucket
@@ -909,10 +911,26 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			filename:   "huge.bin",
 			content:    bytes.Repeat([]byte("x"), 2<<20),
 			maxUpload:  1024,
+			declared:   -1, // chunked, so the bounded read, not the length check, refuses it
 			wantCode:   http.StatusRequestEntityTooLarge,
 			wantShort:  true,
 			wantBody:   "max 1024 bytes",
 			wantAbsent: "docs/huge.bin",
+		},
+		{
+			// A declared length past the cap is refused before the body is read.
+			caseName:   "declared length over the upload size limit",
+			setup:      func() { s.createBucket("upd2") },
+			bucketName: "upd2",
+			prefix:     "docs",
+			filename:   "declared.bin",
+			content:    bytes.Repeat([]byte("x"), 16),
+			maxUpload:  1024,
+			declared:   1024 + uploadFormOverhead + 1,
+			wantCode:   http.StatusRequestEntityTooLarge,
+			wantBody:   "max 1024 bytes",
+			wantAbsent: "docs/declared.bin",
+			wantUnread: true,
 		},
 		{
 			caseName:   "within the upload size limit",
@@ -951,6 +969,9 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			read := &bytes.Buffer{}
 			req := httptest.NewRequest("POST", "/buckets/"+tc.bucketName+"/upload", io.TeeReader(body, read))
 			req.ContentLength = int64(body.Len()) // as a browser sends it; TeeReader hides the length from NewRequest
+			if tc.declared != 0 {
+				req.ContentLength = tc.declared
+			}
 			req.Header.Set("Content-Type", mw.FormDataContentType())
 			req.Header.Set("HX-Request", "true")
 			req.SetPathValue("name", tc.bucketName)
@@ -958,6 +979,9 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			handleUploadFile(s.server, w, req)
 
 			s.Equal(tc.wantCode, w.Code)
+			if tc.wantUnread {
+				s.Zero(read.Len(), "a declared length past the cap must be refused unread")
+			}
 			if tc.wantShort {
 				// MaxBytesReader reads at most one byte past its limit.
 				s.LessOrEqual(int64(read.Len()), tc.maxUpload+uploadFormOverhead+1, "the body read should stop at the limit plus the framing allowance")
