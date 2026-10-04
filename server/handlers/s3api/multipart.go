@@ -131,9 +131,15 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	}
 
 	maxSize := s.Config.EffectiveMaxUploadSize()
-	r.Body = http.MaxBytesReader(w, r.Body, maxSize)
-
-	data, err := io.ReadAll(unwrapAWSChunkedBody(r))
+	body, ok := uploadBody(w, r, maxSize)
+	if !ok {
+		return
+	}
+	data, err := io.ReadAll(body)
+	if tooLarge := (*http.MaxBytesError)(nil); errors.As(err, &tooLarge) {
+		writeEntityTooLarge(w, r, maxSize)
+		return
+	}
 	if err != nil {
 		writeError(w, r, "InternalError", "Failed to read part data", http.StatusInternalServerError)
 		return

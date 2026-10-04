@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -208,6 +209,42 @@ func (s *MultipartTestSuite) uploadPart(bucket, key, uploadID string, partNumber
 	handleUploadPart(s.server, w, req)
 	s.Require().Equal(http.StatusOK, w.Code, w.Body.String())
 	return CompletePart{PartNumber: partNumber, ETag: w.Header().Get("ETag")}
+}
+
+func (s *MultipartTestSuite) TestUploadPartLimit() {
+	const maxSize = 1024
+	s.server.Config.MaxUploadSize = maxSize
+	s.createBucket("limit")
+	uploadID := s.initiateUpload("limit", "k", nil)
+
+	testCases := []struct {
+		caseName string
+		size     int
+		chunked  bool
+		decoded  string
+		length   int64
+		wantCode int
+	}{
+		{caseName: "exactly the limit", size: maxSize, wantCode: http.StatusOK},
+		{caseName: "past the limit", size: maxSize + 1, wantCode: http.StatusBadRequest},
+		{caseName: "past the limit with no length", size: maxSize + 1, length: -1, wantCode: http.StatusBadRequest},
+		{caseName: "aws-chunked exactly the limit", size: maxSize, chunked: true, wantCode: http.StatusOK},
+		{caseName: "aws-chunked sending more than declared", size: maxSize + 1, chunked: true, decoded: strconv.Itoa(maxSize), wantCode: http.StatusBadRequest},
+	}
+	for i, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			target := fmt.Sprintf("/limit/k?partNumber=%d&uploadId=%s", i+1, uploadID)
+			req := uploadLimitRequest(target, tc.size, tc.chunked, tc.decoded, tc.length)
+			req.SetPathValue("bucket", "limit")
+			req.SetPathValue("key", "k")
+			w := httptest.NewRecorder()
+			handleUploadPart(s.server, w, req)
+			s.Require().Equal(tc.wantCode, w.Code, w.Body.String())
+			if tc.wantCode != http.StatusOK {
+				s.Contains(w.Body.String(), "<Code>EntityTooLarge</Code>")
+			}
+		})
+	}
 }
 
 func completeBody(parts ...CompletePart) string {
