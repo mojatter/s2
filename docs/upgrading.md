@@ -25,6 +25,13 @@ The steps below take a root from any version since v0.14.0 to the current one in
 
 Each section lists whether the data at rest changes, what to do, and, where known, what a downgrade does. A version not listed here changes nothing on disk and needs no step; what its responses change is in its release notes.
 
+### v0.21.1
+
+- **Data at rest:** unchanged; downgrading to v0.21.0 is safe, but brings back the console bugs below.
+- Before v0.21.1, the console put names into its URLs unescaped, so a name holding `#`, `?`, `&`, `+` or `%` reached the server as another name: the delete button of `a#b` deleted the object `a`, and a folder named `f#x` opened as `f` ([#341](https://github.com/mojatter/s2/issues/341)). Every earlier version has this bug. If the console was used to delete such objects, list the names still there with `aws s3 ls s3://<bucket> --recursive | grep -E '[#?&+%]'` and check that the objects their deletes could have hit, such as `a` beside `a#b`, still exist; restore them from a backup if not.
+- Creating a folder or uploading a file from the console with a name that is not one path element, such as one holding `/` or equal to `..`, answers `400` instead of storing it under another key ([#271](https://github.com/mojatter/s2/issues/271)).
+- Console uploads obey `S2_SERVER_MAX_UPLOAD_SIZE` and answer `413` past it ([#340](https://github.com/mojatter/s2/issues/340)). In v0.21.1 the limit counts the whole form, so a file of exactly the limit is refused; v0.21.2 counts the file alone.
+
 ### v0.21.0
 
 - **Data at rest:** unchanged; downgrading to v0.20.3 is safe. A write's temp files moved into `.meta`, where v0.20.3 already kept its metadata temp files, so a leftover from a crash is treated the same by both versions. An object stored under a `.s2tmp-` name stays on disk and is reachable by name under v0.20.3, but is hidden from its listings, so a DeleteBucket or recursive delete there removes it without showing it.
