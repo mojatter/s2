@@ -25,6 +25,13 @@ The steps below take a root from any version since v0.14.0 to the current one in
 
 Each section lists whether the data at rest changes, what to do, and, where known, what a downgrade does. A version not listed here changes nothing on disk and needs no step; what its responses change is in its release notes.
 
+### v0.21.2
+
+- **Data at rest:** unchanged; downgrading to v0.21.1 is safe.
+- From v0.13.0 through v0.21.1, with authentication on, every console upload of a file larger than 32 MiB that was not refused as too large left the file's spooled copy behind as a `multipart-*` file in the server's temp directory: the one the server's `$TMPDIR` named, or `/tmp` when it was unset ([#353](https://github.com/mojatter/s2/pull/353)). In v0.21.1 this needs `S2_SERVER_MAX_UPLOAD_SIZE` above 32 MiB, so the 16 MiB `memfs` default left none. Remove them any time after upgrading with `find <dir> -maxdepth 1 -name 'multipart-*' -delete`, where `<dir>` is the server's temp directory, not your shell's `$TMPDIR`; this need not run before the new version starts. Other Go programs name their spooled uploads the same way, so where one shares the directory, pick s2's by owner or modification time instead.
+- The Docker image has no `/tmp` and sets no `TMPDIR`, so a console upload of a file larger than 32 MiB has always failed there with `400` and left nothing behind; v0.21.2 does not change this ([#358](https://github.com/mojatter/s2/issues/358)). With a directory mounted on `/tmp` those uploads work, and the files above are in that directory.
+- PutObject and UploadPart without `Content-Length`, or aws-chunked without `X-Amz-Decoded-Content-Length`, answer `411 MissingContentLength`, as S3 does ([#355](https://github.com/mojatter/s2/pull/355)). UploadPart used to accept the request; PutObject without a length closed the connection with no response, and aws-chunked without a decoded length stored the framed body length as the object's.
+
 ### v0.21.1
 
 - **Data at rest:** unchanged; downgrading to v0.21.0 is safe, but brings back the console bugs below.
