@@ -117,7 +117,7 @@ func uploadBody(w http.ResponseWriter, r *http.Request, maxSize int64) (io.Reade
 		}
 	}
 	if declared < 0 {
-		writeError(w, r, "MissingContentLength", "You must provide the Content-Length HTTP header.", http.StatusLengthRequired)
+		writeError(w, r, "MissingContentLength", "You must provide the Content-Length HTTP header (X-Amz-Decoded-Content-Length for an aws-chunked body).", http.StatusLengthRequired)
 		return nil, 0, false
 	}
 	if declared > maxSize || r.ContentLength > bodyLimit {
@@ -170,7 +170,7 @@ func (r *awsChunkedReader) Read(p []byte) (int, error) {
 		// Extract hex size before the semicolon
 		sizeStr, _, _ := strings.Cut(line, ";")
 		size, err := strconv.ParseInt(sizeStr, 16, 64)
-		if err != nil {
+		if err != nil || size < 0 {
 			return 0, fmt.Errorf("invalid aws-chunked size: %q", sizeStr)
 		}
 		if size == 0 {

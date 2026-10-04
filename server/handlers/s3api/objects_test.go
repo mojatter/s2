@@ -1222,6 +1222,7 @@ func (s *ObjectsTestSuite) TestPutObjectUploadLimit() {
 		{caseName: "aws-chunked exactly the limit", size: maxSize, chunked: true, wantCode: http.StatusOK},
 		{caseName: "aws-chunked declared past the limit", size: maxSize + 1, chunked: true, wantCode: http.StatusBadRequest},
 		{caseName: "aws-chunked sending more than declared", size: maxSize + 1, chunked: true, decoded: strconv.Itoa(maxSize), wantCode: http.StatusBadRequest},
+		{caseName: "aws-chunked raw length past the framing allowance", size: maxSize, chunked: true, length: maxSize + chunkedOverhead(maxSize) + 1, wantCode: http.StatusBadRequest},
 		{caseName: "no length", size: maxSize, length: -1, wantCode: http.StatusLengthRequired},
 		{caseName: "aws-chunked with no decoded length", size: maxSize, chunked: true, decoded: "-", wantCode: http.StatusLengthRequired},
 		{caseName: "aws-chunked with a negative decoded length", size: maxSize, chunked: true, decoded: "-5", wantCode: http.StatusLengthRequired},
