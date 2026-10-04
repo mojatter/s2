@@ -227,7 +227,7 @@ func (s *MultipartTestSuite) TestUploadPartLimit() {
 	}{
 		{caseName: "exactly the limit", size: maxSize, wantCode: http.StatusOK},
 		{caseName: "past the limit", size: maxSize + 1, wantCode: http.StatusBadRequest},
-		{caseName: "past the limit with no length", size: maxSize + 1, length: -1, wantCode: http.StatusBadRequest},
+		{caseName: "no length", size: maxSize, length: -1, wantCode: http.StatusLengthRequired},
 		{caseName: "aws-chunked exactly the limit", size: maxSize, chunked: true, wantCode: http.StatusOK},
 		{caseName: "aws-chunked sending more than declared", size: maxSize + 1, chunked: true, decoded: strconv.Itoa(maxSize), wantCode: http.StatusBadRequest},
 	}
@@ -241,7 +241,7 @@ func (s *MultipartTestSuite) TestUploadPartLimit() {
 			handleUploadPart(s.server, w, req)
 			s.Require().Equal(tc.wantCode, w.Code, w.Body.String())
 			if tc.wantCode != http.StatusOK {
-				s.Contains(w.Body.String(), "<Code>EntityTooLarge</Code>")
+				s.Contains(w.Body.String(), "<Code>"+wantErrorCode[tc.wantCode]+"</Code>")
 			}
 		})
 	}

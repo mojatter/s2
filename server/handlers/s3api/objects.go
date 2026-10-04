@@ -482,7 +482,7 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 
 	maxSize := s.Config.EffectiveMaxUploadSize()
-	body, ok := uploadBody(w, r, maxSize)
+	body, contentLength, ok := uploadBody(w, r, maxSize)
 	if !ok {
 		return
 	}
@@ -494,12 +494,6 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	contentLength := r.ContentLength
-	if v := r.Header.Get("X-Amz-Decoded-Content-Length"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			contentLength = n
-		}
-	}
 	// An absent Content-Type stays unstored; readers resolve it (#210).
 	obj := s2.NewObjectReader(key, io.NopCloser(body), s2.MustUint64(contentLength),
 		s2.WithContentType(requestContentType(r)), s2.WithMetadata(parseMetadataHeaders(r)))

@@ -105,22 +105,30 @@ func chunkedOverhead(maxSize int64) int64 {
 	return maxSize/32 + 64<<10
 }
 
-// uploadBody caps r's payload at maxSize, counted after aws-chunked decoding; it answers EntityTooLarge and returns false when the declared size is past it.
-func uploadBody(w http.ResponseWriter, r *http.Request, maxSize int64) (io.Reader, bool) {
+// uploadBody caps r's payload at maxSize, counted after aws-chunked decoding, and returns its declared size; it answers and returns false when that size is absent or past the limit.
+func uploadBody(w http.ResponseWriter, r *http.Request, maxSize int64) (io.Reader, int64, bool) {
+	chunked := isAWSChunkedRequest(r)
 	declared, bodyLimit := r.ContentLength, maxSize
-	if isAWSChunkedRequest(r) {
+	if chunked {
 		bodyLimit = maxSize + min(chunkedOverhead(maxSize), math.MaxInt64-maxSize)
 		declared = -1
 		if n, err := strconv.ParseInt(r.Header.Get("X-Amz-Decoded-Content-Length"), 10, 64); err == nil {
 			declared = n
 		}
 	}
+	if declared < 0 {
+		writeError(w, r, "MissingContentLength", "You must provide the Content-Length HTTP header.", http.StatusLengthRequired)
+		return nil, 0, false
+	}
 	if declared > maxSize || r.ContentLength > bodyLimit {
 		writeEntityTooLarge(w, r, maxSize)
-		return nil, false
+		return nil, 0, false
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
-	return http.MaxBytesReader(w, unwrapAWSChunkedBody(r), maxSize), true
+	if !chunked {
+		return r.Body, declared, true
+	}
+	return http.MaxBytesReader(w, unwrapAWSChunkedBody(r), maxSize), declared, true
 }
 
 func writeEntityTooLarge(w http.ResponseWriter, r *http.Request, maxSize int64) {

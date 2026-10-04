@@ -131,7 +131,7 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	}
 
 	maxSize := s.Config.EffectiveMaxUploadSize()
-	body, ok := uploadBody(w, r, maxSize)
+	body, _, ok := uploadBody(w, r, maxSize)
 	if !ok {
 		return
 	}
