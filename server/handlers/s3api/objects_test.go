@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -1218,12 +1219,19 @@ func (s *ObjectsTestSuite) TestPutObjectUploadLimit() {
 		decoded  string
 		length   int64
 		wantCode int
+		wantErr  string // if non-empty, the S3 error code instead of the one wantErrorCode gives for wantCode
+		cut      bool   // if set, the body ends early with io.ErrUnexpectedEOF, as net/http reports it
 	}{
+		{caseName: "one under the limit", size: maxSize - 1, wantCode: http.StatusOK},
 		{caseName: "exactly the limit", size: maxSize, wantCode: http.StatusOK},
 		{caseName: "past the limit", size: maxSize + 1, wantCode: http.StatusBadRequest},
+		{caseName: "aws-chunked one under the limit", size: maxSize - 1, chunked: true, wantCode: http.StatusOK},
 		{caseName: "aws-chunked exactly the limit", size: maxSize, chunked: true, wantCode: http.StatusOK},
 		{caseName: "aws-chunked declared past the limit", size: maxSize + 1, chunked: true, wantCode: http.StatusBadRequest},
-		{caseName: "aws-chunked sending more than declared", size: maxSize + 1, chunked: true, decoded: strconv.Itoa(maxSize), wantCode: http.StatusBadRequest},
+		{caseName: "aws-chunked sending more than declared", size: maxSize + 1, chunked: true, decoded: strconv.Itoa(maxSize), wantCode: http.StatusBadRequest, wantErr: "IncompleteBody"},
+		{caseName: "aws-chunked sending more than declared under the limit", size: 10, chunked: true, decoded: "5", wantCode: http.StatusBadRequest, wantErr: "IncompleteBody"},
+		{caseName: "aws-chunked sending less than declared", size: 5, chunked: true, decoded: "10", wantCode: http.StatusBadRequest, wantErr: "IncompleteBody"},
+		{caseName: "body cut short of its length", size: 10, cut: true, wantCode: http.StatusBadRequest, wantErr: "IncompleteBody"},
 		{caseName: "aws-chunked raw length past the framing allowance", size: maxSize, chunked: true, length: maxSize + chunkedOverhead(maxSize) + 1, wantCode: http.StatusBadRequest},
 		{caseName: "no length", size: maxSize, length: -1, wantCode: http.StatusLengthRequired},
 		{caseName: "aws-chunked with no decoded length", size: maxSize, chunked: true, decoded: "-", wantCode: http.StatusLengthRequired},
@@ -1233,6 +1241,9 @@ func (s *ObjectsTestSuite) TestPutObjectUploadLimit() {
 		s.Run(tc.caseName, func() {
 			key := fmt.Sprintf("o%d", i)
 			req := uploadLimitRequest("/limit/"+key, tc.size, tc.chunked, tc.decoded, tc.length)
+			if tc.cut {
+				req.Body = io.NopCloser(io.MultiReader(io.LimitReader(req.Body, 5), iotest.ErrReader(io.ErrUnexpectedEOF)))
+			}
 			req.SetPathValue("bucket", "limit")
 			req.SetPathValue("key", key)
 			w := httptest.NewRecorder()
@@ -1243,7 +1254,7 @@ func (s *ObjectsTestSuite) TestPutObjectUploadLimit() {
 			s.Require().NoError(err)
 			obj, err := strg.Get(context.Background(), key)
 			if tc.wantCode != http.StatusOK {
-				s.Contains(w.Body.String(), "<Code>"+wantErrorCode[tc.wantCode]+"</Code>")
+				s.Contains(w.Body.String(), "<Code>"+cmp.Or(tc.wantErr, wantErrorCode[tc.wantCode])+"</Code>")
 				s.ErrorIs(err, s2.ErrNotExist)
 				return
 			}
