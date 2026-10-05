@@ -275,7 +275,8 @@ run_test "ConsoleUploadSpooledToTmp" sh -c '
   status=$(curl -sS -o /dev/null -w "%{http_code}" -u testkey:testsecret -H "HX-Request: true" \
     -F "prefix=" -F "file=@/tmp/console-big.bin" http://s2:9001/buckets/test-bucket/upload)
   [ "$status" = "200" ]
-  aws s3api --endpoint-url "'"$ENDPOINT"'" head-object --bucket test-bucket --key console-big.bin
+  size=$(aws s3api --endpoint-url "'"$ENDPOINT"'" head-object --bucket test-bucket --key console-big.bin --query ContentLength --output text)
+  [ "$size" = "34603008" ]
 '
 
 # === Memfs backend ===

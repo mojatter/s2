@@ -1011,11 +1011,12 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 
 			s.Require().NoError(mw.Close())
 
-			if tc.wantNoTemp {
-				s.T().Setenv("TMPDIR", s.T().TempDir()) // where multipart spools; the recorder runs none of net/http's cleanup
-			}
-			if tc.noSpoolDir {
-				s.T().Setenv("TMPDIR", filepath.Join(s.T().TempDir(), "missing"))
+			if tc.wantNoTemp || tc.noSpoolDir {
+				dir := s.T().TempDir() // where multipart spools; the recorder runs none of net/http's cleanup
+				if tc.noSpoolDir {
+					dir = filepath.Join(dir, "missing")
+				}
+				s.T().Setenv("TMPDIR", dir)
 			}
 			sent := body.Len() // what the handler consumes is what is gone from the buffer afterwards
 			req := httptest.NewRequest("POST", "/buckets/"+tc.bucketName+"/upload", body)
