@@ -978,6 +978,17 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			wantAbsent: "docs/spool.bin",
 		},
 		{
+			caseName:   "one byte under the upload size limit",
+			setup:      func() { s.createBucket("upu1") },
+			bucketName: "upu1",
+			prefix:     "docs",
+			filename:   "under.bin",
+			content:    bytes.Repeat([]byte("x"), 1023),
+			maxUpload:  1024,
+			wantCode:   http.StatusOK,
+			wantKey:    "docs/under.bin",
+		},
+		{
 			caseName:   "within the upload size limit",
 			setup:      func() { s.createBucket("ups") },
 			bucketName: "ups",
