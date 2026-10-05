@@ -126,9 +126,20 @@ func uploadBody(w http.ResponseWriter, r *http.Request, maxSize int64) (io.Reade
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
 	if !chunked {
-		return r.Body, declared, true
+		return shortBody{r.Body}, declared, true
 	}
 	return http.MaxBytesReader(w, unwrapAWSChunkedBody(r, declared), maxSize), declared, true
+}
+
+// shortBody marks the request body ending before its Content-Length, which net/http reports as io.ErrUnexpectedEOF.
+type shortBody struct{ r io.Reader }
+
+func (b shortBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return n, fmt.Errorf("%w: body ended before its Content-Length", errIncompleteBody)
+	}
+	return n, err
 }
 
 // incompleteBodyError is S3's answer to a body that does not match its declared length.
@@ -185,7 +196,7 @@ func (r *awsChunkedReader) Read(p []byte) (int, error) {
 		sizeStr, _, _ := strings.Cut(line, ";")
 		size, err := strconv.ParseInt(sizeStr, 16, 64)
 		if err != nil || size < 0 {
-			return 0, fmt.Errorf("%w: invalid chunk size %q", errIncompleteBody, sizeStr)
+			return 0, fmt.Errorf("%w: invalid chunk size %.32q", errIncompleteBody, sizeStr)
 		}
 		if size > r.declared-r.decoded {
 			return 0, fmt.Errorf("%w: chunk size %d with %d of %d bytes decoded", errIncompleteBody, size, r.decoded, r.declared)
@@ -240,10 +251,6 @@ func uploadErrorToS3Error(err error) (string, string, int) {
 	}
 	if errors.Is(err, s2.ErrUnknownETag) {
 		return "InternalError", err.Error(), http.StatusInternalServerError
-	}
-	// net/http reports a body that ends before its Content-Length this way.
-	if errors.Is(err, io.ErrUnexpectedEOF) {
-		return incompleteBodyError(err)
 	}
 	return s2ErrorToS3Error(err)
 }
