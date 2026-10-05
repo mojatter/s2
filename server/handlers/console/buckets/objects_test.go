@@ -793,6 +793,7 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 		declared   int64  // if non-zero, the Content-Length the request declares; -1 is chunked
 		wantUnread bool   // if set, the handler must not read the body at all
 		wantNoTemp bool   // if set, no multipart-* temp file may remain once the handler returns
+		noSpoolDir bool   // if set, the temp directory multipart spools to does not exist
 		wantBody   string // if non-empty, the response body must contain it
 		wantKey    string // if non-empty, verify this key landed in the bucket
 		wantAbsent string // if non-empty, verify this key did not land in the bucket
@@ -963,6 +964,20 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			wantNoTemp: true,
 		},
 		{
+			// Failing to spool is the server's fault, as on a read-only root or the pre-#358 Docker image.
+			caseName:   "no temp directory to spool to",
+			setup:      func() { s.createBucket("upnt") },
+			bucketName: "upnt",
+			prefix:     "docs",
+			filename:   "spool.bin",
+			content:    bytes.Repeat([]byte("x"), 32<<20+1),
+			maxUpload:  64 << 20,
+			noSpoolDir: true,
+			wantCode:   http.StatusInternalServerError,
+			wantBody:   "no such file or directory",
+			wantAbsent: "docs/spool.bin",
+		},
+		{
 			caseName:   "within the upload size limit",
 			setup:      func() { s.createBucket("ups") },
 			bucketName: "ups",
@@ -996,8 +1011,12 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 
 			s.Require().NoError(mw.Close())
 
-			if tc.wantNoTemp {
-				s.T().Setenv("TMPDIR", s.T().TempDir()) // where multipart spools; the recorder runs none of net/http's cleanup
+			if tc.wantNoTemp || tc.noSpoolDir {
+				dir := s.T().TempDir() // where multipart spools; the recorder runs none of net/http's cleanup
+				if tc.noSpoolDir {
+					dir = filepath.Join(dir, "missing")
+				}
+				s.T().Setenv("TMPDIR", dir)
 			}
 			sent := body.Len() // what the handler consumes is what is gone from the buffer afterwards
 			req := httptest.NewRequest("POST", "/buckets/"+tc.bucketName+"/upload", body)

@@ -18,11 +18,14 @@ RUN GOOS=linux CGO_ENABLED=0 GOWORK=${GOWORK} \
       -o /s2-server .
 
 FROM busybox AS init
-RUN mkdir -p /var/lib/s2
+# /tmp is where net/http spools a large console upload; scratch has none (#358).
+RUN mkdir -p /var/lib/s2 /rootfs/tmp && chmod 1777 /rootfs/tmp
 
 FROM scratch
 COPY --from=builder /s2-server /usr/sbin/s2-server
 COPY --from=init /var/lib/s2 /var/lib/s2
+# Copying /rootfs/ keeps /tmp at 1777, which COPY of /tmp itself would not.
+COPY --from=init /rootfs/ /
 VOLUME /var/lib/s2
 EXPOSE 9000 9001
 ENTRYPOINT ["/usr/sbin/s2-server"]

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -220,6 +221,12 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		var maxBytes *http.MaxBytesError
 		if errors.As(err, &maxBytes) {
 			http.Error(w, fmt.Sprintf("File too large (max %d bytes)", maxSize), http.StatusRequestEntityTooLarge)
+			return
+		}
+		// A file error is the server failing to spool the form, not a bad request (#358).
+		var pathErr *fs.PathError
+		if errors.As(err, &pathErr) {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
