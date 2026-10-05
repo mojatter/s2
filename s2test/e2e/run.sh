@@ -268,6 +268,16 @@ run_test "PresignedGetObject_TamperedSignatureRejected" sh -c '
   [ "$status" = "403" ]
 '
 
+# A console upload past net/http's 32 MiB form memory is spooled to /tmp, which the image must provide (#358).
+run_test "ConsoleUploadSpooledToTmp" sh -c '
+  set -e
+  head -c 34603008 /dev/zero > /tmp/console-big.bin
+  status=$(curl -sS -o /dev/null -w "%{http_code}" -u testkey:testsecret -H "HX-Request: true" \
+    -F "prefix=" -F "file=@/tmp/console-big.bin" http://s2:9001/buckets/test-bucket/upload)
+  [ "$status" = "200" ]
+  aws s3api --endpoint-url "'"$ENDPOINT"'" head-object --bucket test-bucket --key console-big.bin
+'
+
 # === Memfs backend ===
 # Verify that the memfs default upload cap (16 MiB) is enforced end-to-end,
 # and that the streaming CompleteMultipartUpload assembly works on the
