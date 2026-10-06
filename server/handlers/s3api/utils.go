@@ -93,11 +93,11 @@ func (e *ErrNoSuchBucket) Error() string {
 // minio-go, used by warp) rely solely on X-Amz-Content-Sha256 being set
 // to one of the STREAMING-* payload markers. We accept both so the raw
 // chunk framing never leaks into stored object bodies.
-func unwrapAWSChunkedBody(r *http.Request) io.ReadCloser {
+func unwrapAWSChunkedBody(r *http.Request, declared int64) io.ReadCloser {
 	if !isAWSChunkedRequest(r) {
 		return r.Body
 	}
-	return io.NopCloser(&awsChunkedReader{br: bufio.NewReader(r.Body)})
+	return io.NopCloser(&awsChunkedReader{br: bufio.NewReader(r.Body), declared: declared})
 }
 
 // chunkedOverhead bounds aws-chunked framing: under 1/32 of the payload in 8 KiB chunks, AWS's minimum, plus the trailer.
@@ -126,9 +126,25 @@ func uploadBody(w http.ResponseWriter, r *http.Request, maxSize int64) (io.Reade
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
 	if !chunked {
-		return r.Body, declared, true
+		return shortBody{r.Body}, declared, true
 	}
-	return http.MaxBytesReader(w, unwrapAWSChunkedBody(r), maxSize), declared, true
+	return http.MaxBytesReader(w, unwrapAWSChunkedBody(r, declared), maxSize), declared, true
+}
+
+// shortBody marks the request body ending before its Content-Length, which net/http reports as io.ErrUnexpectedEOF.
+type shortBody struct{ r io.Reader }
+
+func (b shortBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return n, fmt.Errorf("%w: body ended before its Content-Length", errIncompleteBody)
+	}
+	return n, err
+}
+
+// incompleteBodyError is S3's answer to a body that does not match its declared length.
+func incompleteBodyError(err error) (string, string, int) {
+	return "IncompleteBody", err.Error(), http.StatusBadRequest
 }
 
 func writeEntityTooLarge(w http.ResponseWriter, r *http.Request, maxSize int64) {
@@ -150,9 +166,14 @@ func isAWSChunkedRequest(r *http.Request) bool {
 	return false
 }
 
+// errIncompleteBody reports a body that is malformed, cut short, or not the length it declared.
+var errIncompleteBody = errors.New("incomplete body")
+
 type awsChunkedReader struct {
 	br        *bufio.Reader
-	remaining int
+	declared  int64 // X-Amz-Decoded-Content-Length; the decoded bytes must add up to it
+	decoded   int64
+	remaining int64
 	done      bool
 }
 
@@ -162,35 +183,62 @@ func (r *awsChunkedReader) Read(p []byte) (int, error) {
 	}
 	if r.remaining == 0 {
 		// Read chunk header: "<hex-size>;chunk-signature=<sig>\r\n"
-		line, err := r.br.ReadString('\n')
-		if err != nil {
-			return 0, err
+		// ReadSlice, not ReadString: a header is bounded by the buffer, so a body without a newline is not held in memory.
+		raw, err := r.br.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			return 0, fmt.Errorf("%w: chunk header longer than %d bytes", errIncompleteBody, r.br.Size())
 		}
-		line = strings.TrimRight(line, "\r\n")
+		if err != nil {
+			return 0, chunkedReadError(err)
+		}
+		line := strings.TrimRight(string(raw), "\r\n")
 		// Extract hex size before the semicolon
 		sizeStr, _, _ := strings.Cut(line, ";")
 		size, err := strconv.ParseInt(sizeStr, 16, 64)
 		if err != nil || size < 0 {
-			return 0, fmt.Errorf("invalid aws-chunked size: %q", sizeStr)
+			return 0, fmt.Errorf("%w: invalid chunk size %.32q", errIncompleteBody, sizeStr)
+		}
+		if size > r.declared-r.decoded {
+			return 0, fmt.Errorf("%w: chunk size %d with %d of %d bytes decoded", errIncompleteBody, size, r.decoded, r.declared)
 		}
 		if size == 0 {
+			if r.decoded != r.declared {
+				return 0, fmt.Errorf("%w: %d of %d bytes decoded", errIncompleteBody, r.decoded, r.declared)
+			}
 			r.done = true
 			return 0, io.EOF
 		}
-		r.remaining = int(size)
+		r.remaining = size
 	}
 
 	toRead := len(p)
-	if toRead > r.remaining {
-		toRead = r.remaining
+	if int64(toRead) > r.remaining {
+		toRead = int(r.remaining)
 	}
 	n, err := r.br.Read(p[:toRead])
-	r.remaining -= n
-	if r.remaining == 0 {
-		// Consume trailing \r\n after chunk data
-		_, _ = r.br.ReadString('\n')
+	r.remaining -= int64(n)
+	r.decoded += int64(n)
+	if err != nil {
+		return n, chunkedReadError(err)
 	}
-	return n, err
+	if r.remaining == 0 {
+		var crlf [2]byte
+		if _, err := io.ReadFull(r.br, crlf[:]); err != nil {
+			return n, chunkedReadError(err)
+		}
+		if crlf != [2]byte{'\r', '\n'} {
+			return n, fmt.Errorf("%w: chunk data not followed by CRLF", errIncompleteBody)
+		}
+	}
+	return n, nil
+}
+
+// chunkedReadError turns the body ending before the zero-size chunk into errIncompleteBody and passes other errors through.
+func chunkedReadError(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return fmt.Errorf("%w: body ended before the final chunk", errIncompleteBody)
+	}
+	return err
 }
 
 // uploadErrorToS3Error maps a failure from s2.Upload. ErrUnknownETag means the
@@ -198,6 +246,9 @@ func (r *awsChunkedReader) Read(p []byte) (int, error) {
 // NoSuchKey: that would tell the client its write did not land. A retry of the
 // same request converges, since the write is idempotent.
 func uploadErrorToS3Error(err error) (string, string, int) {
+	if errors.Is(err, errIncompleteBody) {
+		return incompleteBodyError(err)
+	}
 	if errors.Is(err, s2.ErrUnknownETag) {
 		return "InternalError", err.Error(), http.StatusInternalServerError
 	}

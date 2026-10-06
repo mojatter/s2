@@ -140,6 +140,11 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		writeEntityTooLarge(w, r, maxSize)
 		return
 	}
+	if errors.Is(err, errIncompleteBody) {
+		code, msg, status := incompleteBodyError(err)
+		writeError(w, r, code, msg, status)
+		return
+	}
 	if err != nil {
 		writeError(w, r, "InternalError", "Failed to read part data", http.StatusInternalServerError)
 		return

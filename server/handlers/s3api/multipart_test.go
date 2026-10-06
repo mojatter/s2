@@ -1,6 +1,7 @@
 package s3api
 
 import (
+	"cmp"
 	"context"
 	"crypto/md5" // #nosec G501 -- MD5 is used here only to mirror S3 multipart ETag semantics under test.
 	"encoding/xml"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -224,24 +226,36 @@ func (s *MultipartTestSuite) TestUploadPartLimit() {
 		decoded  string
 		length   int64
 		wantCode int
+		wantErr  string // if non-empty, the S3 error code instead of the one wantErrorCode gives for wantCode
+		cut      bool   // if set, the body ends early with io.ErrUnexpectedEOF, as net/http reports it
 	}{
+		{caseName: "one under the limit", size: maxSize - 1, wantCode: http.StatusOK},
 		{caseName: "exactly the limit", size: maxSize, wantCode: http.StatusOK},
 		{caseName: "past the limit", size: maxSize + 1, wantCode: http.StatusBadRequest},
 		{caseName: "no length", size: maxSize, length: -1, wantCode: http.StatusLengthRequired},
+		{caseName: "aws-chunked one under the limit", size: maxSize - 1, chunked: true, wantCode: http.StatusOK},
 		{caseName: "aws-chunked exactly the limit", size: maxSize, chunked: true, wantCode: http.StatusOK},
-		{caseName: "aws-chunked sending more than declared", size: maxSize + 1, chunked: true, decoded: strconv.Itoa(maxSize), wantCode: http.StatusBadRequest},
+		{caseName: "aws-chunked declared past the limit", size: maxSize + 1, chunked: true, wantCode: http.StatusBadRequest},
+		{caseName: "aws-chunked raw length past the framing allowance", size: maxSize, chunked: true, length: maxSize + chunkedOverhead(maxSize) + 1, wantCode: http.StatusBadRequest},
+		{caseName: "aws-chunked sending more than declared", size: maxSize + 1, chunked: true, decoded: strconv.Itoa(maxSize), wantCode: http.StatusBadRequest, wantErr: "IncompleteBody"},
+		{caseName: "aws-chunked sending more than declared under the limit", size: 10, chunked: true, decoded: "5", wantCode: http.StatusBadRequest, wantErr: "IncompleteBody"},
+		{caseName: "aws-chunked sending less than declared", size: 5, chunked: true, decoded: "10", wantCode: http.StatusBadRequest, wantErr: "IncompleteBody"},
+		{caseName: "body cut short of its length", size: 10, cut: true, wantCode: http.StatusBadRequest, wantErr: "IncompleteBody"},
 	}
 	for i, tc := range testCases {
 		s.Run(tc.caseName, func() {
 			target := fmt.Sprintf("/limit/k?partNumber=%d&uploadId=%s", i+1, uploadID)
 			req := uploadLimitRequest(target, tc.size, tc.chunked, tc.decoded, tc.length)
+			if tc.cut {
+				req.Body = io.NopCloser(io.MultiReader(io.LimitReader(req.Body, 5), iotest.ErrReader(io.ErrUnexpectedEOF)))
+			}
 			req.SetPathValue("bucket", "limit")
 			req.SetPathValue("key", "k")
 			w := httptest.NewRecorder()
 			handleUploadPart(s.server, w, req)
 			s.Require().Equal(tc.wantCode, w.Code, w.Body.String())
 			if tc.wantCode != http.StatusOK {
-				s.Contains(w.Body.String(), "<Code>"+wantErrorCode[tc.wantCode]+"</Code>")
+				s.Contains(w.Body.String(), "<Code>"+cmp.Or(tc.wantErr, wantErrorCode[tc.wantCode])+"</Code>")
 			}
 		})
 	}

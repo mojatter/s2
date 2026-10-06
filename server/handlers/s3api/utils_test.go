@@ -2,12 +2,14 @@ package s3api
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/server"
@@ -124,18 +126,71 @@ func (s *UtilsTestSuite) TestParseMetadataHeaders() {
 	}
 }
 
-func (s *UtilsTestSuite) TestAWSChunkedReaderRejectsBadSize() {
+func (s *UtilsTestSuite) TestUploadErrorToS3Error() {
 	testCases := []struct {
-		caseName string
-		body     string
+		caseName   string
+		err        error
+		wantCode   string
+		wantStatus int
 	}{
-		{caseName: "negative size", body: "-1;chunk-signature=x\r\nabc\r\n0;chunk-signature=x\r\n\r\n"},
-		{caseName: "non-hex size", body: "zz;chunk-signature=x\r\n"},
+		{caseName: "incomplete request body", err: fmt.Errorf("failed to write temp file: %w", errIncompleteBody), wantCode: "IncompleteBody", wantStatus: http.StatusBadRequest},
+		// A storage read cut short, as in CopyObject or CompleteMultipartUpload, is the server's and stays retryable.
+		{caseName: "storage read cut short", err: fmt.Errorf("failed to write temp file: %w", io.ErrUnexpectedEOF), wantCode: "InternalError", wantStatus: http.StatusInternalServerError},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			_, err := io.ReadAll(&awsChunkedReader{br: bufio.NewReader(strings.NewReader(tc.body))})
-			s.Error(err)
+			code, _, status := uploadErrorToS3Error(tc.err)
+			s.Equal(tc.wantCode, code)
+			s.Equal(tc.wantStatus, status)
+		})
+	}
+}
+
+func (s *UtilsTestSuite) TestAWSChunkedReader() {
+	testCases := []struct {
+		caseName string
+		body     string
+		declared int64
+		bufSize  int    // if non-zero, the bufio buffer size instead of the default
+		readErr  error  // if set, the source fails with it after body, and the read must pass it through
+		want     string // the decoded body, when the read must succeed
+		wantErr  bool   // if set, the read must fail with errIncompleteBody
+	}{
+		{caseName: "two chunks", body: "3;chunk-signature=x\r\nabc\r\n2;chunk-signature=x\r\nde\r\n0;chunk-signature=x\r\n\r\n", declared: 5, want: "abcde"},
+		{caseName: "negative size", body: "-1;chunk-signature=x\r\nabc\r\n0;chunk-signature=x\r\n\r\n", declared: 3, wantErr: true},
+		{caseName: "non-hex size", body: "zz;chunk-signature=x\r\n", declared: 3, wantErr: true},
+		{caseName: "size past what was declared", body: "7fffffffffffffff;chunk-signature=x\r\nabc\r\n", declared: 3, wantErr: true},
+		{caseName: "cut off mid-chunk", body: "a;chunk-signature=x\r\nabc", declared: 10, wantErr: true},
+		{caseName: "no final chunk", body: "3;chunk-signature=x\r\nabc\r\n", declared: 3, wantErr: true},
+		{caseName: "less than declared", body: "3;chunk-signature=x\r\nabc\r\n0;chunk-signature=x\r\n\r\n", declared: 5, wantErr: true},
+		{caseName: "more than declared", body: "3;chunk-signature=x\r\nabc\r\n2;chunk-signature=x\r\nde\r\n0;chunk-signature=x\r\n\r\n", declared: 3, wantErr: true},
+		{caseName: "chunk data not followed by CRLF", body: "3;chunk-signature=x\r\nabcX0;chunk-signature=x\r\n\r\n", declared: 3, wantErr: true},
+		{caseName: "chunk data followed by one byte", body: "3;chunk-signature=x\r\nabc\r", declared: 3, wantErr: true},
+		{caseName: "chunk header longer than the buffer", body: strings.Repeat("a", 65) + ";chunk-signature=x\r\n", declared: 3, bufSize: 64, wantErr: true},
+		{caseName: "a read error is not an incomplete body", body: "3;chunk-signature=x\r\nabc", declared: 3, readErr: errors.New("connection reset")},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			var src io.Reader = strings.NewReader(tc.body)
+			if tc.readErr != nil {
+				src = io.MultiReader(src, iotest.ErrReader(tc.readErr))
+			}
+			br := bufio.NewReader(src)
+			if tc.bufSize != 0 {
+				br = bufio.NewReaderSize(src, tc.bufSize)
+			}
+			got, err := io.ReadAll(&awsChunkedReader{br: br, declared: tc.declared})
+			if tc.readErr != nil {
+				s.ErrorIs(err, tc.readErr)
+				s.NotErrorIs(err, errIncompleteBody)
+				return
+			}
+			if tc.wantErr {
+				s.ErrorIs(err, errIncompleteBody)
+				return
+			}
+			s.Require().NoError(err)
+			s.Equal(tc.want, string(got))
 		})
 	}
 }
