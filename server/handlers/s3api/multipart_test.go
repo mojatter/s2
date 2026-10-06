@@ -238,6 +238,7 @@ func (s *MultipartTestSuite) TestUploadPartLimit() {
 		{caseName: "aws-chunked declared past the limit", size: maxSize + 1, chunked: true, wantCode: http.StatusBadRequest},
 		{caseName: "aws-chunked raw length past the framing allowance", size: maxSize, chunked: true, length: maxSize + chunkedOverhead(maxSize) + 1, wantCode: http.StatusBadRequest},
 		{caseName: "aws-chunked sending more than declared", size: maxSize + 1, chunked: true, decoded: strconv.Itoa(maxSize), wantCode: http.StatusBadRequest, wantErr: "IncompleteBody"},
+		{caseName: "aws-chunked sending more than declared under the limit", size: 10, chunked: true, decoded: "5", wantCode: http.StatusBadRequest, wantErr: "IncompleteBody"},
 		{caseName: "aws-chunked sending less than declared", size: 5, chunked: true, decoded: "10", wantCode: http.StatusBadRequest, wantErr: "IncompleteBody"},
 		{caseName: "body cut short of its length", size: 10, cut: true, wantCode: http.StatusBadRequest, wantErr: "IncompleteBody"},
 	}
