@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -230,8 +231,8 @@ func (o *mockGCSObject) newRangeReader(_ context.Context, offset, length int64) 
 	return io.NopCloser(bytes.NewReader(body[offset:end])), nil
 }
 
-func (o *mockGCSObject) newWriter(_ context.Context, metadata map[string]string, contentType string) gcsWriter {
-	return &mockWriter{client: o.client, bucket: o.bucket, key: o.key, metadata: metadata, contentType: contentType}
+func (o *mockGCSObject) newWriter(ctx context.Context, metadata map[string]string, contentType string) gcsWriter {
+	return &mockWriter{ctx: ctx, client: o.client, bucket: o.bucket, key: o.key, metadata: metadata, contentType: contentType}
 }
 
 func (o *mockGCSObject) patch(_ context.Context, p objectPatch) error {
@@ -303,6 +304,7 @@ func (o *mockGCSObject) delete(_ context.Context) error {
 }
 
 type mockWriter struct {
+	ctx         context.Context
 	client      *mockGCSClient
 	bucket      string
 	key         string
@@ -316,7 +318,11 @@ func (w *mockWriter) Write(p []byte) (int, error) {
 	return w.buf.Write(p)
 }
 
+// Close mirrors the SDK: a cancelled context aborts the upload instead of committing it.
 func (w *mockWriter) Close() error {
+	if err := w.ctx.Err(); err != nil {
+		return err
+	}
 	w.client.put(w.bucket, w.key, w.buf.Bytes(), w.metadata)
 	if obj, ok := w.client.get(w.bucket, w.key); ok {
 		obj.contentType = w.contentType
@@ -795,6 +801,19 @@ func (s *StorageTestSuite) TestPut() {
 			s.Equal("new content", string(body))
 		})
 	}
+}
+
+func (s *StorageTestSuite) TestPutAbortsOnReadError() {
+	_, strg := s.testMockStorage()
+	ctx := context.Background()
+
+	body := io.MultiReader(strings.NewReader("part"), iotest.ErrReader(errors.New("connection reset")))
+	err := strg.Put(ctx, s2.NewObjectReader("cut.txt", io.NopCloser(body), 10))
+	s.Require().Error(err)
+
+	exists, err := strg.Exists(ctx, "cut.txt")
+	s.Require().NoError(err)
+	s.False(exists, "a body that fails mid-way must not be committed")
 }
 
 func (s *StorageTestSuite) TestDelete() {
