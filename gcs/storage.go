@@ -238,9 +238,14 @@ func (s *gcsStorage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOptio
 	}
 	defer func() { _ = rc.Close() }()
 
-	w := s.client.bucket(s.bucket).object(s.key(obj.Name())).newWriter(ctx, obj.Metadata(), obj.ContentType())
+	// Cancelling the writer's context aborts the upload; Close alone would commit what was read.
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	w := s.client.bucket(s.bucket).object(s.key(obj.Name())).newWriter(wctx, obj.Metadata(), obj.ContentType())
 
 	if _, err := io.Copy(w, rc); err != nil {
+		cancel()
 		_ = w.Close()
 		return s2.UploadResult{}, fmt.Errorf("gcs: put %q: %w", obj.Name(), err)
 	}
