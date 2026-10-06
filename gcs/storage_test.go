@@ -804,16 +804,46 @@ func (s *StorageTestSuite) TestPut() {
 }
 
 func (s *StorageTestSuite) TestPutAbortsOnReadError() {
-	_, strg := s.testMockStorage()
-	ctx := context.Background()
+	readErr := errors.New("connection reset")
+	testCases := []struct {
+		caseName string
+		key      string
+		prefix   string // what the body yields before it fails
+		existing string // if non-empty, the object's content before the Put
+	}{
+		{caseName: "fails after some bytes", key: "cut.txt", prefix: "part"},
+		{caseName: "fails before the first byte", key: "empty.txt"},
+		{caseName: "fails while overwriting", key: "keep.txt", prefix: "part", existing: "old content"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			_, strg := s.testMockStorage()
+			ctx := context.Background()
+			if tc.existing != "" {
+				s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes(tc.key, []byte(tc.existing))))
+			}
 
-	body := io.MultiReader(strings.NewReader("part"), iotest.ErrReader(errors.New("connection reset")))
-	err := strg.Put(ctx, s2.NewObjectReader("cut.txt", io.NopCloser(body), 10))
-	s.Require().Error(err)
+			body := io.MultiReader(strings.NewReader(tc.prefix), iotest.ErrReader(readErr))
+			err := strg.Put(ctx, s2.NewObjectReader(tc.key, io.NopCloser(body), 10))
+			s.ErrorIs(err, readErr, "the read error must reach the caller, which maps it to a status")
 
-	exists, err := strg.Exists(ctx, "cut.txt")
-	s.Require().NoError(err)
-	s.False(exists, "a body that fails mid-way must not be committed")
+			if tc.existing == "" {
+				exists, err := strg.Exists(ctx, tc.key)
+				s.Require().NoError(err)
+				s.False(exists, "a body that fails mid-way must not be committed")
+				return
+			}
+			got, err := strg.Get(ctx, tc.key)
+			s.Require().NoError(err)
+			rc, err := got.Open()
+			s.Require().NoError(err)
+			defer rc.Close()
+
+			data, err := io.ReadAll(rc)
+			s.Require().NoError(err)
+			s.Equal(tc.existing, string(data), "a failed overwrite must leave the object as it was")
+		})
+	}
 }
 
 func (s *StorageTestSuite) TestDelete() {
