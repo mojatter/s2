@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	iofs "io/fs"
-	"os"
 	"path"
 	"strings"
 
@@ -59,7 +58,7 @@ func createTemp(fsys iofs.FS, name string) (*tempFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := wfs.CreateFile(fsys, tmp, os.ModePerm)
+	f, err := wfs.CreateFile(fsys, tmp, 0o666)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -107,7 +106,7 @@ func (t *tempFile) discard() {
 // directWrite writes src to name without atomicity, used as a fallback for
 // filesystems that do not implement wfs.RenameFS.
 func directWrite(fsys iofs.FS, name string, src io.Reader) error {
-	f, err := wfs.CreateFile(fsys, name, os.ModePerm)
+	f, err := wfs.CreateFile(fsys, name, 0o666)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
