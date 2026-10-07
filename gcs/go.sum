@@ -63,8 +63,8 @@ github.com/googleapis/enterprise-certificate-proxy v0.3.22 h1:NU4XpII6jD+Dxcot94
 github.com/googleapis/enterprise-certificate-proxy v0.3.22/go.mod h1:L3D/IQExI6LqEjBdXcZQ1WluSgigQmSwBboFstVPM4w=
 github.com/googleapis/gax-go/v2 v2.24.1 h1:AtqTN21IXMMWo99LiEVAiBfNNQmO40d8xUfZI640mc0=
 github.com/googleapis/gax-go/v2 v2.24.1/go.mod h1:bWeBei0NVwaNZKb2y1HUBS7gLXIF3/Tu3pq7j8D2Tb0=
-github.com/mojatter/wfs v0.7.1 h1:XR88VtbNJpp6CMQMxoXKDilPJK+LhARm1MusCxuCkMM=
-github.com/mojatter/wfs v0.7.1/go.mod h1:PlxShpeTA90XFUWkWWi9DmXG7tgFd4v64hPDqrf1n7c=
+github.com/mojatter/wfs v0.8.0 h1:wZpgKl0lVGn10Cq06pvu2dF8CudUKbkKjP8ux758Kww=
+github.com/mojatter/wfs v0.8.0/go.mod h1:PlxShpeTA90XFUWkWWi9DmXG7tgFd4v64hPDqrf1n7c=
 github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 h1:GFCKgmp0tecUJ0sJuv4pzYCqS9+RGSn52M3FUwPs+uo=
 github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10/go.mod h1:t/avpk3KcrXxUnYOhZhMXJlSEyie6gQbtLq5NM3loB8=
 github.com/spiffe/go-spiffe/v2 v2.8.1 h1:eXZMLsu+3MLEPJyGJkolqtVrteZfQdUpOWj6LTiDl/E=

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	iofs "io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"testing/iotest"
 
 	"github.com/mojatter/s2"
+	"github.com/mojatter/wfs"
 	"github.com/mojatter/wfs/osfs"
 	"github.com/stretchr/testify/require"
 )
@@ -183,6 +185,56 @@ func TestAtomicWrite_FallbackWhenNoRename(t *testing.T) {
 	data, err := io.ReadAll(rc)
 	require.NoError(t, err)
 	require.Equal(t, []byte("v"), data)
+}
+
+// noRenameFS hides osfs's Rename so Storage.Put takes the direct-write path.
+type noRenameFS struct{ wfs.WriteFileFS }
+
+// TestWrittenFileMode checks a stored body or metadata file is not created executable.
+func TestWrittenFileMode(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		write    func(fsys iofs.FS, name string) error
+	}{
+		{caseName: "temp file then rename", write: func(fsys iofs.FS, name string) error {
+			tf, err := createTemp(fsys, name)
+			if err != nil {
+				return err
+			}
+			defer tf.discard()
+
+			if err := tf.write(strings.NewReader("v")); err != nil {
+				return err
+			}
+			return tf.publish()
+		}},
+		{caseName: "direct write", write: func(fsys iofs.FS, name string) error {
+			return directWrite(fsys, name, strings.NewReader("v"))
+		}},
+		{caseName: "Storage.Put", write: func(fsys iofs.FS, name string) error {
+			return NewStorageFS(s2.Config{}, fsys).Put(context.Background(), s2.NewObjectBytes(name, []byte("v")))
+		}},
+		{caseName: "Storage.Put without rename", write: func(fsys iofs.FS, name string) error {
+			return NewStorageFS(s2.Config{}, noRenameFS{fsys.(wfs.WriteFileFS)}).Put(context.Background(), s2.NewObjectBytes(name, []byte("v")))
+		}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(dir, "d"), 0o755))
+			require.NoError(t, tc.write(osfs.DirFS(dir), "d/x"))
+
+			require.NoError(t, filepath.WalkDir(dir, func(name string, d os.DirEntry, err error) error {
+				if err != nil || d.IsDir() {
+					return err
+				}
+				info, err := d.Info()
+				require.NoError(t, err)
+				require.Zero(t, info.Mode().Perm()&0o111, "%s mode %v", name, info.Mode())
+				return nil
+			}))
+		})
+	}
 }
 
 // TestTempFile checks each step leaves name and the temp file as the next section expects.
