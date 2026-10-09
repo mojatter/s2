@@ -435,15 +435,23 @@ func (s *storage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOptions)
 // write stores what open yields under name; open runs inside the first section, which holds locks.
 func (s *storage) write(ctx context.Context, locks []string, name string, open func() (io.Reader, meta, error)) (string, error) {
 	if _, ok := s.fsys.(wfs.RenameFS); !ok {
-		var etag string
+		var (
+			etag string
+			ran  bool
+		)
 		err := s.lockNames(ctx, locks, func() error {
 			src, m, err := open()
 			if err != nil {
 				return err
 			}
+			ran = true
 			etag, err = s.uploadDirect(name, src, m)
 			return err
 		})
+		// Like abandon, prune only after a write that may have made directories.
+		if err != nil && ran {
+			s.pruneIfEmpty(ctx, name)
+		}
 		return etag, err
 	}
 	var (
@@ -472,7 +480,7 @@ func (s *storage) write(ctx context.Context, locks []string, name string, open f
 	return etag, nil
 }
 
-// uploadDirect writes name in place for a filesystem without rename. Callers hold name's lock.
+// uploadDirect stores name through atomicWrite's fallback for a filesystem without rename. Callers hold name's lock.
 func (s *storage) uploadDirect(name string, src io.Reader, m meta) (string, error) {
 	if err := s.checkTree(name); err != nil {
 		return "", err
@@ -482,6 +490,10 @@ func (s *storage) uploadDirect(name string, src io.Reader, m meta) (string, erro
 	}
 	h := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
 	if err := atomicWrite(s.fsys, name, io.TeeReader(src, h)); err != nil {
+		if errors.Is(err, errTruncated) {
+			// The body is gone, so a stale metadata file must not describe it.
+			s.dropMeta(name)
+		}
 		return "", err
 	}
 	m.ETag = quotedMD5(h)

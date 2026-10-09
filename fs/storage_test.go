@@ -3202,3 +3202,32 @@ func TestFailedWriteClosesItsTemps(t *testing.T) {
 	require.Equal(t, int32(2), created.Load())
 	require.Equal(t, created.Load(), closed.Load())
 }
+
+// TestFailedWriteKeepsDirsWithoutRename checks a write failing before it starts leaves an existing empty directory, as the rename path does.
+func TestFailedWriteKeepsDirsWithoutRename(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	testCases := []struct {
+		caseName string
+		write    func(strg s2.Storage) error
+		wantErr  error
+	}{
+		{caseName: "Copy from a missing source", write: func(strg s2.Storage) error {
+			return strg.Copy(context.Background(), "missing", "d/k")
+		}, wantErr: s2.ErrNotExist},
+		{caseName: "Put with a canceled context", write: func(strg s2.Storage) error {
+			return strg.Put(canceled, s2.NewObjectBytes("d/k", []byte("v")))
+		}, wantErr: context.Canceled},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			dir := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(dir, "d"), 0o755))
+			strg := NewStorageFS(s2.Config{}, noRenameFS{osfs.DirFS(dir).(writeRemoveFS)})
+
+			require.ErrorIs(t, tc.write(strg), tc.wantErr)
+			_, err := os.Stat(filepath.Join(dir, "d"))
+			require.NoError(t, err)
+		})
+	}
+}
