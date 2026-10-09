@@ -131,26 +131,15 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	}
 
 	maxSize := s.Config.EffectiveMaxUploadSize()
-	body, _, ok := uploadBody(w, r, maxSize)
+	body, length, ok := uploadBody(w, r, maxSize)
 	if !ok {
 		return
 	}
-	data, err := io.ReadAll(body)
+	etag, err := s.Multipart.PutPart(ctx, uploadID, partNumber, body, s2.MustUint64(length))
 	if tooLarge := (*http.MaxBytesError)(nil); errors.As(err, &tooLarge) {
 		writeEntityTooLarge(w, r, maxSize)
 		return
 	}
-	if errors.Is(err, errIncompleteBody) {
-		code, msg, status := incompleteBodyError(err)
-		writeError(w, r, code, msg, status)
-		return
-	}
-	if err != nil {
-		writeError(w, r, "InternalError", "Failed to read part data", http.StatusInternalServerError)
-		return
-	}
-
-	etag, err := s.Multipart.PutPart(ctx, uploadID, partNumber, data)
 	if err != nil {
 		code, msg, status := uploadErrorToS3Error(err)
 		writeError(w, r, code, msg, status)

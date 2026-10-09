@@ -844,7 +844,7 @@ func (s *MultipartTestSuite) TestMultipartStateLifecycle() {
 func (s *MultipartTestSuite) TestCompleteMultipartUploadRejectsPartWithoutETag() {
 	s.createBucket("mp-noetag")
 	uploadID := s.initiateUpload("mp-noetag", "file.bin", nil)
-	_, err := s.server.Multipart.PutPart(context.Background(), uploadID, 1, []byte("hello"))
+	_, err := s.server.Multipart.PutPart(context.Background(), uploadID, 1, strings.NewReader("hello"), 5)
 	s.Require().NoError(err)
 
 	w := s.complete("mp-noetag", "file.bin", uploadID, CompletePart{PartNumber: 1, ETag: ""})
