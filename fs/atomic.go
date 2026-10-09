@@ -3,6 +3,7 @@ package fs
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	iofs "io/fs"
@@ -16,9 +17,8 @@ import (
 const tmpPrefix = ".s2tmp-"
 
 // atomicWrite writes src into name using a temp-file + Sync + Rename pattern
-// when the filesystem implements wfs.RenameFS. Otherwise it falls back to a
-// direct write (which is not crash-safe but keeps behavior well-defined for
-// non-osfs backends that don't implement rename).
+// when the filesystem implements wfs.RenameFS. Otherwise it falls back to
+// directWrite, which is not crash-safe.
 //
 // The temp file lives in the .meta of name's directory, so the rename stays in one filesystem.
 //
@@ -103,16 +103,63 @@ func (t *tempFile) discard() {
 	}
 }
 
-// directWrite writes src to name without atomicity, used as a fallback for
-// filesystems that do not implement wfs.RenameFS.
+// directWrite copies src over name once read in full into a temp file, so a failed src leaves name as it was; without RemoveFileFS it writes in place.
 func directWrite(fsys iofs.FS, name string, src io.Reader) error {
+	if _, ok := fsys.(wfs.RemoveFileFS); !ok {
+		// A temp file that cannot be removed would pile up, so write in place.
+		return copyTo(fsys, name, src)
+	}
+	t, err := createTemp(fsys, name)
+	if err != nil {
+		return err
+	}
+	defer t.discard()
+
+	if err := t.write(src); err != nil {
+		return err
+	}
+	f, err := fsys.Open(t.tmp)
+	if err != nil {
+		return fmt.Errorf("failed to open temp file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	err = copyTo(fsys, name, f)
+	if errors.Is(err, errTruncated) {
+		_ = wfs.RemoveFile(fsys, name)
+	}
+	return err
+}
+
+// errTruncated marks a write that failed after truncating its target, which then holds a partial body.
+var errTruncated = errors.New("target truncated")
+
+// truncatedError is a write failure past truncation; it is errTruncated but reads as its cause.
+type truncatedError struct{ error }
+
+func (e truncatedError) Unwrap() error { return e.error }
+
+func (truncatedError) Is(target error) bool { return target == errTruncated }
+
+// copyTo truncates name and copies src into it, joining a Close error with a copy error.
+func copyTo(fsys iofs.FS, name string, src io.Reader) error {
 	f, err := wfs.CreateFile(fsys, name, 0o666)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
-	defer func() { _ = f.Close() }()
 	if _, err := io.Copy(f, src); err != nil {
-		return fmt.Errorf("failed to write file: %w", err)
+		return truncatedError{errors.Join(fmt.Errorf("failed to write file: %w", err), closeErr(f))}
+	}
+	if err := closeErr(f); err != nil {
+		return truncatedError{err}
+	}
+	return nil
+}
+
+// closeErr closes f and describes a failure.
+func closeErr(f io.Closer) error {
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("failed to close file: %w", err)
 	}
 	return nil
 }

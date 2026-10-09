@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"strconv"
 	"strings"
@@ -196,5 +197,81 @@ func TestWithOpaqueETagAllowsRotationOnPutMetadata(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "after PutMetadata") {
 		t.Errorf("want the stability error, got: %v", err)
+	}
+}
+
+// failedPutStorage reads a Put's body itself and hands a failed one to onFail, standing in for a backend that is not atomic per object.
+type failedPutStorage struct {
+	s2.Storage
+	onFail func(ctx context.Context, strg s2.Storage, name string, read []byte, err error) error
+}
+
+func (s *failedPutStorage) Put(ctx context.Context, obj s2.Object) error {
+	rc, err := obj.Open()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rc.Close() }()
+
+	b, err := io.ReadAll(rc)
+	if err != nil {
+		return s.onFail(ctx, s.Storage, obj.Name(), b, err)
+	}
+	return s.Storage.Put(ctx, s2.NewObjectBytes(obj.Name(), b, s2.WithContentType(obj.ContentType()), s2.WithMetadata(obj.Metadata())))
+}
+
+func TestStorageGetPutRejectsAFailedPut(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		onFail   func(ctx context.Context, strg s2.Storage, name string, read []byte, err error) error
+		wantErr  string
+	}{
+		{
+			caseName: "stores the bytes read",
+			onFail: func(ctx context.Context, strg s2.Storage, name string, read []byte, err error) error {
+				return errors.Join(err, strg.Put(ctx, s2.NewObjectBytes(name, read)))
+			},
+			wantErr: `after a failed Put = "part"`,
+		},
+		{
+			caseName: "removes the existing object",
+			onFail: func(ctx context.Context, strg s2.Storage, name string, read []byte, err error) error {
+				return errors.Join(err, strg.Delete(ctx, name))
+			},
+			wantErr: "after a failed Put: s2: object not exist",
+		},
+		{
+			caseName: "drops the metadata",
+			onFail: func(ctx context.Context, strg s2.Storage, name string, read []byte, err error) error {
+				obj, gerr := strg.Get(ctx, name)
+				if gerr != nil {
+					return err
+				}
+				prev, gerr := readBody(obj)
+				if gerr != nil {
+					return err
+				}
+				return errors.Join(err, strg.Put(ctx, s2.NewObjectBytes(name, []byte(prev))))
+			},
+			wantErr: "ContentType() after a failed Put",
+		},
+		{
+			caseName: "drops the body's error",
+			onFail: func(ctx context.Context, strg s2.Storage, name string, read []byte, err error) error {
+				return errors.New("failed")
+			},
+			wantErr: "want an error wrapping the body's",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			err := TestStorageGetPut(t.Context(), &failedPutStorage{Storage: newMemFS(t), onFail: tc.onFail})
+			if err == nil {
+				t.Fatal("a Put that is not atomic per object must fail")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("want an error containing %q, got: %v", tc.wantErr, err)
+			}
+		})
 	}
 }

@@ -168,27 +168,136 @@ func TestTempNameIsAnObjectName(t *testing.T) {
 	}
 }
 
+// TestAtomicWrite_FallbackWhenNoRename checks a Put over a filesystem without rename stores a full body and leaves a failed one unseen (#370).
 func TestAtomicWrite_FallbackWhenNoRename(t *testing.T) {
-	// Use a memfs storage and assert that even without a RenameFS the file
-	// ends up with the expected contents. MemFS does implement RenameFS so
-	// this is really exercising the happy path on memfs; the fallback path
-	// is covered by writing through a plain fs.FS directly.
-	strg := NewStorageMem(s2.Config{})
 	ctx := context.Background()
-	require.NoError(t, strg.Put(ctx, s2.NewObjectBytes("k", []byte("v"))))
+	errBody := errors.New("body failed")
+	noRename := func(fsys writeRemoveFS) iofs.FS { return noRenameFS{fsys} }
+	testCases := []struct {
+		caseName string
+		fsys     func(writeRemoveFS) iofs.FS
+		existing string
+		body     io.Reader
+		wantErr  error
+		wantBody string
+	}{
+		{caseName: "new key", fsys: noRename, body: strings.NewReader("v"), wantBody: "v"},
+		{caseName: "overwrite", fsys: noRename, existing: "old", body: strings.NewReader("new"), wantBody: "new"},
+		{caseName: "new key without RemoveFile", fsys: func(fsys writeRemoveFS) iofs.FS { return noRemoveFS{fsys} }, body: strings.NewReader("v"), wantBody: "v"},
+		{caseName: "failed body on a new key", fsys: noRename, body: io.MultiReader(strings.NewReader("part"), iotest.ErrReader(errBody)), wantErr: errBody},
+		{caseName: "failed body keeps the existing object", fsys: noRename, existing: "old", body: io.MultiReader(strings.NewReader("part"), iotest.ErrReader(errBody)), wantErr: errBody, wantBody: "old"},
+		{caseName: "failed copy over a new key", fsys: func(fsys writeRemoveFS) iofs.FS { return failTargetFS{fsys} }, body: strings.NewReader("new"), wantErr: errWrite},
+		{caseName: "failed copy over an existing key", fsys: func(fsys writeRemoveFS) iofs.FS { return failTargetFS{fsys} }, existing: "old", body: strings.NewReader("new"), wantErr: errWrite},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			dir := t.TempDir()
+			base := osfs.DirFS(dir).(writeRemoveFS)
+			if tc.existing != "" {
+				require.NoError(t, NewStorageFS(s2.Config{}, noRenameFS{base}).Put(ctx, s2.NewObjectBytes("d/k", []byte(tc.existing))))
+			}
+			strg := NewStorageFS(s2.Config{}, tc.fsys(base))
 
-	obj, err := strg.Get(ctx, "k")
-	require.NoError(t, err)
-	rc, err := obj.Open()
-	require.NoError(t, err)
-	defer rc.Close()
-	data, err := io.ReadAll(rc)
-	require.NoError(t, err)
-	require.Equal(t, []byte("v"), data)
+			err := strg.Put(ctx, s2.NewObjectReader("d/k", io.NopCloser(tc.body), 10))
+			require.ErrorIs(t, err, tc.wantErr)
+			if tc.wantBody == "" {
+				_, err := strg.Get(ctx, "d/k")
+				require.ErrorIs(t, err, s2.ErrNotExist)
+				_, err = os.Stat(filepath.Join(dir, "d", metaDir, "k"))
+				require.ErrorIs(t, err, iofs.ErrNotExist)
+				res, err := strg.List(ctx, s2.ListOptions{})
+				require.NoError(t, err)
+				require.Empty(t, res.CommonPrefixes)
+			} else {
+				obj, err := strg.Get(ctx, "d/k")
+				require.NoError(t, err)
+				rc, err := obj.Open()
+				require.NoError(t, err)
+				defer rc.Close()
+
+				data, err := io.ReadAll(rc)
+				require.NoError(t, err)
+				require.Equal(t, tc.wantBody, string(data))
+			}
+			requireNoTempFile(t, dir)
+		})
+	}
+}
+
+// noRemoveFS has neither Rename nor RemoveFile, so Storage.Put writes in place.
+type noRemoveFS struct{ wfs.WriteFileFS }
+
+// failTargetFS fails every write to a file outside .meta after its first byte, as a full disk would.
+type failTargetFS struct{ writeRemoveFS }
+
+func (f failTargetFS) CreateFile(name string, mode iofs.FileMode) (wfs.WriterFile, error) {
+	w, err := f.writeRemoveFS.CreateFile(name, mode)
+	if err != nil || strings.Contains(name, metaDir+"/") {
+		return w, err
+	}
+	return failWriteFile{w}, nil
+}
+
+var errWrite = errors.New("write failed")
+
+type failWriteFile struct{ wfs.WriterFile }
+
+func (f failWriteFile) Write(p []byte) (int, error) {
+	n, _ := f.WriterFile.Write(p[:min(len(p), 1)])
+	return n, errWrite
+}
+
+// failCloseFS fails Close on every file it creates.
+type failCloseFS struct{ writeRemoveFS }
+
+func (f failCloseFS) CreateFile(name string, mode iofs.FileMode) (wfs.WriterFile, error) {
+	w, err := f.writeRemoveFS.CreateFile(name, mode)
+	if err != nil {
+		return nil, err
+	}
+	return failCloseFile{w}, nil
+}
+
+type failCloseFile struct{ wfs.WriterFile }
+
+func (f failCloseFile) Close() error {
+	_ = f.WriterFile.Close()
+	return errClose
+}
+
+var errClose = errors.New("close failed")
+
+// TestCopyTo checks copyTo reports a Close failure, joined with a copy failure.
+func TestCopyTo(t *testing.T) {
+	errBody := errors.New("body failed")
+	testCases := []struct {
+		caseName string
+		src      io.Reader
+		wantErrs []error
+	}{
+		{caseName: "close fails", src: strings.NewReader("v"), wantErrs: []error{errClose, errTruncated}},
+		{caseName: "copy and close fail", src: iotest.ErrReader(errBody), wantErrs: []error{errBody, errClose, errTruncated}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			fsys := failCloseFS{osfs.DirFS(t.TempDir()).(writeRemoveFS)}
+			err := copyTo(fsys, "k", tc.src)
+			for _, want := range tc.wantErrs {
+				require.ErrorIs(t, err, want)
+			}
+		})
+	}
+}
+
+// writeRemoveFS is what osfs offers but Rename.
+type writeRemoveFS interface {
+	wfs.WriteFileFS
+	RemoveFile(name string) error
+	RemoveAll(name string) error
 }
 
 // noRenameFS hides osfs's Rename so Storage.Put takes the direct-write path.
-type noRenameFS struct{ wfs.WriteFileFS }
+type noRenameFS struct{ writeRemoveFS }
 
 // TestWrittenFileMode checks a stored body or metadata file is not created executable.
 func TestWrittenFileMode(t *testing.T) {
@@ -215,7 +324,7 @@ func TestWrittenFileMode(t *testing.T) {
 			return NewStorageFS(s2.Config{}, fsys).Put(context.Background(), s2.NewObjectBytes(name, []byte("v")))
 		}},
 		{caseName: "Storage.Put without rename", write: func(fsys iofs.FS, name string) error {
-			return NewStorageFS(s2.Config{}, noRenameFS{fsys.(wfs.WriteFileFS)}).Put(context.Background(), s2.NewObjectBytes(name, []byte("v")))
+			return NewStorageFS(s2.Config{}, noRenameFS{fsys.(writeRemoveFS)}).Put(context.Background(), s2.NewObjectBytes(name, []byte("v")))
 		}},
 	}
 	for _, tc := range testCases {

@@ -20,6 +20,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"testing/iotest"
 
 	"github.com/mojatter/s2"
 )
@@ -357,7 +358,7 @@ func TestStorageListDefaultPage(ctx context.Context, strg s2.Storage) error {
 	return nil
 }
 
-// TestStorageGetPut validates that Put writes an object and Get reads it back with its metadata, Content-Type and ETag.
+// TestStorageGetPut validates that Put writes an object and Get reads it back with its metadata, Content-Type and ETag, and that a failed Put leaves no new key and keeps an existing one.
 func TestStorageGetPut(ctx context.Context, strg s2.Storage, opts ...Option) error {
 	o := newOptions(opts)
 	var errs []string
@@ -430,6 +431,39 @@ func TestStorageGetPut(ctx context.Context, strg s2.Storage, opts ...Option) err
 	}
 	if !listed {
 		errorf("List(%q) did not return the object", name)
+	}
+
+	// Put is atomic per object: a body failing mid-way leaves no new key and keeps an existing one.
+	errBody := errors.New("s2test: body failed")
+	failed := "s2test-getput-failed.txt"
+	// A key left by an earlier run against a non-atomic backend would fail this check for good.
+	_ = strg.Delete(ctx, failed)
+	for _, key := range []string{failed, name} {
+		partial := s2.NewObjectReader(key, io.NopCloser(io.MultiReader(strings.NewReader("part"), iotest.ErrReader(errBody))), 10)
+		if err := strg.Put(ctx, partial); !errors.Is(err, errBody) {
+			errorf("Put(%q) with a failing body = %v, want an error wrapping the body's", key, err)
+		}
+	}
+	if _, err := strg.Get(ctx, failed); !errors.Is(err, s2.ErrNotExist) {
+		errorf("Get(%q) after a failed Put = %v, want s2.ErrNotExist", failed, err)
+	}
+	if kept, err := strg.Get(ctx, name); err != nil {
+		errorf("Get(%q) after a failed Put: %v", name, err)
+	} else {
+		if b, err := readBody(kept); err != nil {
+			errorf("Get(%q) after a failed Put: %v", name, err)
+		} else if b != string(body) {
+			errorf("Get(%q) after a failed Put = %q, want the previous %q", name, b, string(body))
+		}
+		if ct := kept.ContentType(); ct != "text/plain" {
+			errorf("Get(%q).ContentType() after a failed Put = %q, want %q", name, ct, "text/plain")
+		}
+		if v, _ := kept.Metadata().Get("testkey"); v != "test-val" {
+			errorf("Get(%q) metadata %q after a failed Put = %q, want %q", name, "testkey", v, "test-val")
+		}
+		if e := kept.ETag(); e != etag {
+			errorf("Get(%q).ETag() after a failed Put = %q, want the previous %q", name, e, etag)
+		}
 	}
 
 	// A body larger than one upload block must still get an ETag.
@@ -1016,20 +1050,26 @@ func TestStorageNameEscape(ctx context.Context, strg s2.Storage) error {
 	return nil
 }
 
-// checkDecoy reports how obj differs from the decoy TestStorageNameEscape wrote.
-func checkDecoy(obj s2.Object, body string) error {
+// readBody returns obj's body.
+func readBody(obj s2.Object) (string, error) {
 	rc, err := obj.Open()
 	if err != nil {
-		return fmt.Errorf("Open failed: %w", err)
+		return "", err
 	}
 	defer func() { _ = rc.Close() }()
 
 	b, err := io.ReadAll(rc)
+	return string(b), err
+}
+
+// checkDecoy reports how obj differs from the decoy TestStorageNameEscape wrote.
+func checkDecoy(obj s2.Object, body string) error {
+	b, err := readBody(obj)
 	if err != nil {
 		return fmt.Errorf("read failed: %w", err)
 	}
-	if string(b) != body {
-		return fmt.Errorf("body is %q, want %q", string(b), body)
+	if b != body {
+		return fmt.Errorf("body is %q, want %q", b, body)
 	}
 	if ct := obj.ContentType(); ct != "text/plain" {
 		return fmt.Errorf("ContentType() is %q, want %q", ct, "text/plain")
