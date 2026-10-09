@@ -46,9 +46,13 @@ func (o *object) Name() string {
 // errModified is what Open returns once the body changed after Get: its length or modification time differs from what Get saw.
 var errModified = errors.New("object modified since Get")
 
-// Open refuses a body of another length or modification time than Get saw, so a Put since Get cannot pair it with what Get returned (#349).
+// Open refuses a body of another length or modification time than Get saw, so a Put since Get cannot pair it with what Get returned (#349); a deleted one, or a directory, is s2.ErrNotExist.
 func (o *object) Open() (io.ReadCloser, error) {
 	f, err := o.fsys.Open(o.name)
+	// ENOTDIR: a Put since Get made a parent a file, so the key is gone as well.
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+		return nil, fmt.Errorf("%w: %w", s2.ErrNotExist, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +61,12 @@ func (o *object) Open() (io.ReadCloser, error) {
 		_ = f.Close()
 		return nil, err
 	}
-	if info.IsDir() || s2.MustUint64(info.Size()) != o.length || !info.ModTime().Equal(o.lastModified) {
+	if info.IsDir() {
+		// Get reports a directory as no object, so a key turned directory since Get is gone.
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, o.name)
+	}
+	if s2.MustUint64(info.Size()) != o.length || !info.ModTime().Equal(o.lastModified) {
 		_ = f.Close()
 		return nil, fmt.Errorf("%w: %s", errModified, o.name)
 	}

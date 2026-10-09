@@ -55,7 +55,7 @@ func (s *ObjectTestSuite) TestOpen() {
 				fsys: fsys,
 				name: "not-found.txt",
 			},
-			wantErr: "Open not-found.txt: file does not exist",
+			wantErr: "s2: object not exist: Open not-found.txt: file does not exist",
 		},
 	}
 	for _, tc := range testCases {
@@ -250,7 +250,7 @@ func (s *ObjectTestSuite) TestOpenRefusesAReplacedBody() {
 			dir := s.T().TempDir()
 			return NewStorageDir(dir), func() {
 				old := time.Now().Add(-time.Hour)
-				s.Require().NoError(os.Chtimes(filepath.Join(dir, "k"), old, old))
+				s.Require().NoError(os.Chtimes(filepath.Join(dir, "d", "k"), old, old))
 			}
 		}},
 	}
@@ -258,33 +258,43 @@ func (s *ObjectTestSuite) TestOpenRefusesAReplacedBody() {
 		caseName string
 		replace  func(strg s2.Storage) error
 		wantBody string
+		wantErr  error
 	}{
-		{caseName: "same length", replace: putBody("k", "xyz")},
+		{caseName: "same length", replace: putBody("d/k", "xyz"), wantErr: errModified},
 		{caseName: "metadata only", replace: func(strg s2.Storage) error {
-			return strg.PutMetadata(ctx, "k", s2.Metadata{"a": "b"})
+			return strg.PutMetadata(ctx, "d/k", s2.Metadata{"a": "b"})
 		}, wantBody: "abc"},
-		{caseName: "shorter", replace: putBody("k", "x")},
-		{caseName: "longer", replace: putBody("k", "wxyz")},
+		{caseName: "shorter", replace: putBody("d/k", "x"), wantErr: errModified},
+		{caseName: "longer", replace: putBody("d/k", "wxyz"), wantErr: errModified},
 		{caseName: "a directory", replace: func(strg s2.Storage) error {
-			if err := strg.Delete(ctx, "k"); err != nil {
+			if err := strg.Delete(ctx, "d/k"); err != nil {
 				return err
 			}
-			return putBody("k/x", "abc")(strg)
-		}},
+			return putBody("d/k/x", "abc")(strg)
+		}, wantErr: s2.ErrNotExist},
+		{caseName: "under a new object", replace: func(strg s2.Storage) error {
+			if err := strg.Delete(ctx, "d/k"); err != nil {
+				return err
+			}
+			return putBody("d", "abc")(strg)
+		}, wantErr: s2.ErrNotExist},
+		{caseName: "deleted", replace: func(strg s2.Storage) error {
+			return strg.Delete(ctx, "d/k")
+		}, wantErr: s2.ErrNotExist},
 	}
 	for _, b := range backends {
 		for _, tc := range testCases {
 			s.Run(b.caseName+"/"+tc.caseName, func() {
 				strg, age := b.newStorage()
-				s.Require().NoError(putBody("k", "abc")(strg))
+				s.Require().NoError(putBody("d/k", "abc")(strg))
 				age()
-				obj, err := strg.Get(ctx, "k")
+				obj, err := strg.Get(ctx, "d/k")
 				s.Require().NoError(err)
 				s.Require().NoError(tc.replace(strg))
 
 				rc, err := obj.Open()
-				if tc.wantBody == "" {
-					s.ErrorIs(err, errModified)
+				if tc.wantErr != nil {
+					s.ErrorIs(err, tc.wantErr)
 					return
 				}
 				s.Require().NoError(err)
