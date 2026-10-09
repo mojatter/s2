@@ -3204,6 +3204,14 @@ func (o replacingObject) Open() (io.ReadCloser, error) {
 	return o.Object.Open()
 }
 
+// OpenRange lands a longer body first, as Open does.
+func (o replacingObject) OpenRange(offset, length uint64) (io.ReadCloser, error) {
+	if err := o.strg.Put(context.Background(), s2.NewObjectBytes(o.Name(), []byte("longer body"))); err != nil {
+		return nil, err
+	}
+	return o.Object.OpenRange(offset, length)
+}
+
 // TestHeadObjectDoesNotOpenTheBody checks HEAD answers from Get alone, so a body replaced since Get fails only a GET (#349).
 func (s *ObjectsTestSuite) TestHeadObjectDoesNotOpenTheBody() {
 	root := s.T().TempDir()
@@ -3233,16 +3241,21 @@ func (s *ObjectsTestSuite) TestHeadObjectDoesNotOpenTheBody() {
 	testCases := []struct {
 		caseName   string
 		method     string
+		rangeSpec  string
 		wantStatus int
 	}{
 		{caseName: "HEAD", method: http.MethodHead, wantStatus: http.StatusOK},
 		{caseName: "GET", method: http.MethodGet, wantStatus: http.StatusInternalServerError},
+		{caseName: "ranged GET", method: http.MethodGet, rangeSpec: "bytes=0-1", wantStatus: http.StatusInternalServerError},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
 			s.Require().NoError(base.Put(context.Background(), s2.NewObjectBytes("rb/a.txt", []byte("short"))))
 			req, err := http.NewRequest(tc.method, ts.URL+"/rb/a.txt", nil)
 			s.Require().NoError(err)
+			if tc.rangeSpec != "" {
+				req.Header.Set("Range", tc.rangeSpec)
+			}
 			resp, err := ts.Client().Do(req)
 			s.Require().NoError(err)
 			defer func() { _ = resp.Body.Close() }()
@@ -3250,7 +3263,12 @@ func (s *ObjectsTestSuite) TestHeadObjectDoesNotOpenTheBody() {
 			s.Equal(tc.wantStatus, resp.StatusCode)
 			if tc.wantStatus == http.StatusOK {
 				s.Equal("5", resp.Header.Get("Content-Length"))
+				s.NotEmpty(resp.Header.Get("ETag"))
+				return
 			}
+			// An error for a body replaced since Get describes no version of it.
+			s.Empty(resp.Header.Get("ETag"))
+			s.Empty(resp.Header.Get("Last-Modified"))
 		})
 	}
 }

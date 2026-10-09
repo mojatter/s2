@@ -354,23 +354,15 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write user metadata as x-amz-meta-* headers
-	for k, v := range obj.Metadata() {
-		w.Header().Set("x-amz-meta-"+k, v)
-	}
-	w.Header().Set("Last-Modified", obj.LastModified().Format(http.TimeFormat))
-	w.Header().Set("ETag", obj.ETag())
-	w.Header().Set("Content-Type", server.ResolveContentType(obj, key))
-
 	// HEAD sends no body, so it does not open one: an Open refusing a replaced body (#349) must not fail it.
 	if r.Method == http.MethodHead {
-		w.Header().Set("Content-Length", strconv.FormatUint(obj.Length(), 10))
+		setObjectHeaders(w, obj, key)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
 
 	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
-		handleRangeRequest(w, r, obj, rangeHeader)
+		handleRangeRequest(w, r, obj, key, rangeHeader)
 		return
 	}
 
@@ -382,9 +374,20 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = rc.Close() }()
 
-	w.Header().Set("Content-Length", strconv.FormatUint(obj.Length(), 10))
+	setObjectHeaders(w, obj, key)
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, rc)
+}
+
+// setObjectHeaders describes obj, once its body has opened, so an error answered for a body replaced since Get carries none of them (#349).
+func setObjectHeaders(w http.ResponseWriter, obj s2.Object, key string) {
+	for k, v := range obj.Metadata() {
+		w.Header().Set("x-amz-meta-"+k, v)
+	}
+	w.Header().Set("Last-Modified", obj.LastModified().Format(http.TimeFormat))
+	w.Header().Set("ETag", obj.ETag())
+	w.Header().Set("Content-Type", server.ResolveContentType(obj, key))
+	w.Header().Set("Content-Length", strconv.FormatUint(obj.Length(), 10))
 }
 
 // parseRangeHeader parses an RFC 7233 byte-range header against a total
@@ -437,7 +440,7 @@ func writeRangeNotSatisfiable(w http.ResponseWriter, r *http.Request, total uint
 	writeError(w, r, "InvalidRange", "The requested range is not satisfiable", http.StatusRequestedRangeNotSatisfiable)
 }
 
-func handleRangeRequest(w http.ResponseWriter, r *http.Request, obj s2.Object, rangeHeader string) {
+func handleRangeRequest(w http.ResponseWriter, r *http.Request, obj s2.Object, key, rangeHeader string) {
 	total := obj.Length()
 	start, end, ok := parseRangeHeader(rangeHeader, total)
 	if !ok {
@@ -454,6 +457,7 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, obj s2.Object, r
 	}
 	defer func() { _ = rc.Close() }()
 
+	setObjectHeaders(w, obj, key)
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
 	w.Header().Set("Content-Length", strconv.FormatUint(length, 10))
 	w.WriteHeader(http.StatusPartialContent)
