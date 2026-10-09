@@ -3203,6 +3203,12 @@ func TestFailedWriteClosesItsTemps(t *testing.T) {
 	require.Equal(t, created.Load(), closed.Load())
 }
 
+// TestStorageWithoutRenameConforms runs s2test's Put checks over a filesystem without rename.
+func TestStorageWithoutRenameConforms(t *testing.T) {
+	strg := NewStorageFS(s2.Config{}, noRenameFS{osfs.DirFS(t.TempDir()).(writeRemoveFS)})
+	require.NoError(t, s2test.TestStorageGetPut(context.Background(), strg))
+}
+
 // TestFailedWriteKeepsDirsWithoutRename checks a write failing before it starts leaves an existing empty directory, as the rename path does.
 func TestFailedWriteKeepsDirsWithoutRename(t *testing.T) {
 	canceled, cancel := context.WithCancel(context.Background())
