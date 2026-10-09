@@ -3167,3 +3167,108 @@ func (s *ObjectsTestSuite) TestWriteAnswersTheStoredETag() {
 		s.Equal(completed.ETag, head.Header.Get("ETag"))
 	})
 }
+
+const typeReplacing = s2.Type("replacing-test")
+
+// replacingStorage hands out objects whose body a Put of another length replaces before it is opened (#349).
+type replacingStorage struct {
+	s2.Storage
+}
+
+func (r replacingStorage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
+	sub, err := r.Storage.Sub(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return replacingStorage{sub}, nil
+}
+
+func (r replacingStorage) Get(ctx context.Context, name string) (s2.Object, error) {
+	obj, err := r.Storage.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return replacingObject{Object: obj, strg: r.Storage}, nil
+}
+
+type replacingObject struct {
+	s2.Object
+	strg s2.Storage
+}
+
+// Open lands a longer body first, as a Put racing the request would.
+func (o replacingObject) Open() (io.ReadCloser, error) {
+	if err := o.strg.Put(context.Background(), s2.NewObjectBytes(o.Name(), []byte("longer body"))); err != nil {
+		return nil, err
+	}
+	return o.Object.Open()
+}
+
+// OpenRange lands a longer body first, as Open does.
+func (o replacingObject) OpenRange(offset, length uint64) (io.ReadCloser, error) {
+	if err := o.strg.Put(context.Background(), s2.NewObjectBytes(o.Name(), []byte("longer body"))); err != nil {
+		return nil, err
+	}
+	return o.Object.OpenRange(offset, length)
+}
+
+// TestHeadObjectDoesNotOpenTheBody checks HEAD answers from Get alone, so a body replaced since Get fails only a GET (#349).
+func (s *ObjectsTestSuite) TestHeadObjectDoesNotOpenTheBody() {
+	root := s.T().TempDir()
+	base, err := s2.NewStorage(context.Background(), s2.Config{Type: s2.TypeOSFS, Root: root})
+	s.Require().NoError(err)
+	s2.RegisterNewStorageFunc(typeReplacing, func(context.Context, s2.Config) (s2.Storage, error) {
+		return replacingStorage{base}, nil
+	})
+	s.T().Cleanup(func() { s2.UnregisterNewStorageFunc(typeReplacing) })
+
+	cfg := server.DefaultConfig()
+	cfg.Root = root
+	cfg.Type = typeReplacing
+	srv, err := server.NewServer(context.Background(), cfg)
+	s.Require().NoError(err)
+	s.Require().NoError(srv.Buckets.Create(context.Background(), "rb"))
+	ts := httptest.NewServer(srv.S3Handler())
+	defer ts.Close()
+
+	put, err := http.NewRequest(http.MethodPut, ts.URL+"/rb/a.txt", strings.NewReader("short"))
+	s.Require().NoError(err)
+	resp, err := ts.Client().Do(put)
+	s.Require().NoError(err)
+	s.Require().NoError(resp.Body.Close())
+	s.Require().Equal(http.StatusOK, resp.StatusCode)
+
+	testCases := []struct {
+		caseName   string
+		method     string
+		rangeSpec  string
+		wantStatus int
+	}{
+		{caseName: "HEAD", method: http.MethodHead, wantStatus: http.StatusOK},
+		{caseName: "GET", method: http.MethodGet, wantStatus: http.StatusInternalServerError},
+		{caseName: "ranged GET", method: http.MethodGet, rangeSpec: "bytes=0-1", wantStatus: http.StatusInternalServerError},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.Require().NoError(base.Put(context.Background(), s2.NewObjectBytes("rb/a.txt", []byte("short"))))
+			req, err := http.NewRequest(tc.method, ts.URL+"/rb/a.txt", nil)
+			s.Require().NoError(err)
+			if tc.rangeSpec != "" {
+				req.Header.Set("Range", tc.rangeSpec)
+			}
+			resp, err := ts.Client().Do(req)
+			s.Require().NoError(err)
+			defer func() { _ = resp.Body.Close() }()
+
+			s.Equal(tc.wantStatus, resp.StatusCode)
+			if tc.wantStatus == http.StatusOK {
+				s.Equal("5", resp.Header.Get("Content-Length"))
+				s.NotEmpty(resp.Header.Get("ETag"))
+				return
+			}
+			// An error for a body replaced since Get describes no version of it.
+			s.Empty(resp.Header.Get("ETag"))
+			s.Empty(resp.Header.Get("Last-Modified"))
+		})
+	}
+}

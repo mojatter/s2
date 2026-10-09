@@ -884,6 +884,24 @@ func TestPartsReader(t *testing.T) {
 	}
 }
 
+// goneObject is a part whose body was removed since Part read it.
+type goneObject struct{ s2.Object }
+
+func (goneObject) Open() (io.ReadCloser, error) {
+	return nil, fmt.Errorf("%w: gone", s2.ErrNotExist)
+}
+
+// A part gone before it opens means the upload was aborted or swept, so Complete answers NoSuchUpload, not NoSuchKey (#349).
+func TestPartsReader_MissingPart(t *testing.T) {
+	pr := &partsReader{parts: []s2.Object{goneObject{s2.NewObjectBytes("a", []byte("abc"))}}}
+
+	_, err := io.ReadAll(pr)
+	require.ErrorIs(t, err, server.ErrNoSuchUpload)
+	code, _, status := uploadErrorToS3Error(fmt.Errorf("failed to write temp file: %w", err))
+	assert.Equal(t, "NoSuchUpload", code)
+	assert.Equal(t, http.StatusNotFound, status)
+}
+
 func TestPartsReader_CloseMidStream(t *testing.T) {
 	parts := []s2.Object{
 		s2.NewObjectBytes("a", []byte("hello world")),

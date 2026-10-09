@@ -494,6 +494,10 @@ func (p *partsReader) Read(buf []byte) (int, error) {
 				return 0, io.EOF
 			}
 			rc, err := p.parts[p.idx].Open()
+			// A part gone since Part was read: an Abort or sweep took the upload, so it is not the key that is missing.
+			if errors.Is(err, s2.ErrNotExist) {
+				return 0, fmt.Errorf("%w: %v", server.ErrNoSuchUpload, err)
+			}
 			if err != nil {
 				return 0, err
 			}

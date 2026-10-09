@@ -1,8 +1,11 @@
 package fs
 
 import (
+	"context"
 	"io"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"testing/fstest"
@@ -34,6 +37,9 @@ func (s *ObjectTestSuite) testMemFS() fs.FS {
 
 func (s *ObjectTestSuite) TestOpen() {
 	fsys := s.testMemFS()
+	info, err := fs.Stat(fsys, "test.txt")
+	s.Require().NoError(err)
+
 	testCases := []struct {
 		caseName string
 		obj      s2.Object
@@ -41,10 +47,7 @@ func (s *ObjectTestSuite) TestOpen() {
 	}{
 		{
 			caseName: "typical",
-			obj: &object{
-				fsys: fsys,
-				name: "test.txt",
-			},
+			obj:      newObjectFileInfo(fsys, "test.txt", info),
 		},
 		{
 			caseName: "not found",
@@ -52,7 +55,7 @@ func (s *ObjectTestSuite) TestOpen() {
 				fsys: fsys,
 				name: "not-found.txt",
 			},
-			wantErr: "Open not-found.txt: file does not exist",
+			wantErr: "s2: object not exist: Open not-found.txt: file does not exist",
 		},
 	}
 	for _, tc := range testCases {
@@ -222,10 +225,115 @@ func (s *ObjectTestSuite) TestObjectAccessorsAreConcurrencySafe() {
 	var wg sync.WaitGroup
 	for range 8 {
 		wg.Go(func() {
+			if rc, err := obj.Open(); s.NoError(err) {
+				s.NoError(rc.Close())
+			}
 			s.Nil(obj.Metadata())
 			s.Equal(`"1234-5"`, obj.ETag())
 			s.Empty(obj.ContentType())
+			s.Equal(uint64(5), obj.Length())
 		})
 	}
 	wg.Wait()
+}
+
+// TestOpenRefusesAReplacedBody checks Open serves the body Get saw or fails, never another body under Get's length and ETag (#349).
+func (s *ObjectTestSuite) TestOpenRefusesAReplacedBody() {
+	ctx := context.Background()
+	// age backdates k, so a Put within the filesystem's mtime granularity still changes it.
+	backends := []struct {
+		caseName   string
+		newStorage func() (strg s2.Storage, age func())
+	}{
+		{caseName: "memfs", newStorage: func() (s2.Storage, func()) { return NewStorageMem(s2.Config{}), func() {} }},
+		{caseName: "osfs", newStorage: func() (s2.Storage, func()) {
+			dir := s.T().TempDir()
+			return NewStorageDir(dir), func() {
+				old := time.Now().Add(-time.Hour)
+				s.Require().NoError(os.Chtimes(filepath.Join(dir, "d", "k"), old, old))
+			}
+		}},
+	}
+	testCases := []struct {
+		caseName string
+		replace  func(strg s2.Storage) error
+		wantBody string
+		wantErr  error
+	}{
+		{caseName: "same length", replace: putBody("d/k", "xyz"), wantErr: errModified},
+		{caseName: "metadata only", replace: func(strg s2.Storage) error {
+			return strg.PutMetadata(ctx, "d/k", s2.Metadata{"a": "b"})
+		}, wantBody: "abc"},
+		{caseName: "shorter", replace: putBody("d/k", "x"), wantErr: errModified},
+		{caseName: "longer", replace: putBody("d/k", "wxyz"), wantErr: errModified},
+		{caseName: "a directory", replace: func(strg s2.Storage) error {
+			if err := strg.Delete(ctx, "d/k"); err != nil {
+				return err
+			}
+			return putBody("d/k/x", "abc")(strg)
+		}, wantErr: s2.ErrNotExist},
+		{caseName: "under a new object", replace: func(strg s2.Storage) error {
+			if err := strg.Delete(ctx, "d/k"); err != nil {
+				return err
+			}
+			return putBody("d", "abc")(strg)
+		}, wantErr: s2.ErrNotExist},
+		{caseName: "deleted", replace: func(strg s2.Storage) error {
+			return strg.Delete(ctx, "d/k")
+		}, wantErr: s2.ErrNotExist},
+	}
+	for _, b := range backends {
+		for _, tc := range testCases {
+			s.Run(b.caseName+"/"+tc.caseName, func() {
+				strg, age := b.newStorage()
+				s.Require().NoError(putBody("d/k", "abc")(strg))
+				age()
+				obj, err := strg.Get(ctx, "d/k")
+				s.Require().NoError(err)
+				s.Require().NoError(tc.replace(strg))
+
+				rc, err := obj.Open()
+				if tc.wantErr != nil {
+					s.ErrorIs(err, tc.wantErr)
+					return
+				}
+				s.Require().NoError(err)
+				body, err := io.ReadAll(rc)
+				s.Require().NoError(err)
+				s.Require().NoError(rc.Close())
+				s.Equal(tc.wantBody, string(body))
+				s.Equal(uint64(len(body)), obj.Length())
+			})
+		}
+	}
+}
+
+// TestOpenRangeRefusesAReplacedBody checks a range resolved before a shrinking Put fails instead of reading short (#349).
+func (s *ObjectTestSuite) TestOpenRangeRefusesAReplacedBody() {
+	ctx := context.Background()
+	testCases := []struct {
+		caseName string
+		strg     s2.Storage
+	}{
+		{caseName: "memfs", strg: NewStorageMem(s2.Config{})},
+		{caseName: "osfs", strg: NewStorageDir(s.T().TempDir())},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.Require().NoError(putBody("k", "0123456789")(tc.strg))
+			obj, err := tc.strg.Get(ctx, "k")
+			s.Require().NoError(err)
+			s.Require().NoError(putBody("k", "012")(tc.strg))
+
+			_, err = obj.OpenRange(1, 8)
+			s.ErrorIs(err, errModified)
+		})
+	}
+}
+
+// putBody returns a step that stores body under name.
+func putBody(name, body string) func(strg s2.Storage) error {
+	return func(strg s2.Storage) error {
+		return strg.Put(context.Background(), s2.NewObjectBytes(name, []byte(body)))
+	}
 }
