@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"slices"
@@ -193,13 +194,14 @@ func (ms *MultipartStore) Abort(ctx context.Context, id, bucket, key string, gen
 }
 
 // PutPart stores part n of id and returns the ETag the storage assigned, dropping it if an Abort took the record.
-func (ms *MultipartStore) PutPart(ctx context.Context, id string, n int, data []byte) (string, error) {
+// body must yield exactly length bytes; PutPart does not close it.
+func (ms *MultipartStore) PutPart(ctx context.Context, id string, n int, body io.Reader, length uint64) (string, error) {
 	u, err := ms.upload(ctx, id)
 	if err != nil {
 		return "", err
 	}
 	// The storage's ETag, not the part's MD5, is what Complete checks against.
-	res, putErr := s2.Upload(ctx, u, s2.NewObjectBytes(uploadPartName(n), data), s2.UploadOptions{})
+	res, putErr := s2.Upload(ctx, u, s2.NewObjectReader(uploadPartName(n), io.NopCloser(body), length), s2.UploadOptions{})
 	// Only a record known to be gone drops the part; a failed probe leaves it.
 	if exists, err := u.Exists(ctx, uploadMetaName); err == nil && !exists {
 		_ = ms.Remove(ctx, id)

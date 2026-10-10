@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/mojatter/s2"
@@ -267,12 +269,65 @@ func (s *MultipartStoreTestSuite) TestPutPartAfterAbort() {
 	s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil, ""))
 	s.Require().NoError(ms.Remove(ctx, "id1"))
 
-	_, err := ms.PutPart(ctx, "id1", 1, []byte("late"))
+	_, err := ms.PutPart(ctx, "id1", 1, strings.NewReader("late"), 4)
 
 	s.ErrorIs(err, ErrNoSuchUpload)
 	exists, err := ms.Storage().Exists(ctx, "id1")
 	s.Require().NoError(err)
 	s.False(exists)
+}
+
+// A part whose body fails mid-way is not stored, and a part stored before under its number stays.
+func (s *MultipartStoreTestSuite) TestPutPartFailedBody() {
+	errBody := errors.New("body failed")
+	testCases := []struct {
+		caseName string
+		typ      s2.Type
+		existing string
+	}{
+		{caseName: "osfs new part", typ: s2.TypeOSFS},
+		{caseName: "osfs existing part", typ: s2.TypeOSFS, existing: "old"},
+		{caseName: "memfs new part", typ: s2.TypeMemFS},
+		{caseName: "memfs existing part", typ: s2.TypeMemFS, existing: "old"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			root := s.T().TempDir()
+			ms := s.newStoreAt(tc.typ, root, 0)
+			s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil, ""))
+			if tc.existing != "" {
+				_, err := ms.PutPart(ctx, "id1", 1, strings.NewReader(tc.existing), uint64(len(tc.existing)))
+				s.Require().NoError(err)
+			}
+
+			_, err := ms.PutPart(ctx, "id1", 1, io.MultiReader(strings.NewReader("part"), iotest.ErrReader(errBody)), 10)
+			s.Require().ErrorIs(err, errBody)
+			if tc.typ == s2.TypeOSFS {
+				// memfs writes nothing under root; fs's own tests cover its temp files.
+				s.Require().NoError(filepath.WalkDir(root, func(name string, d fs.DirEntry, err error) error {
+					if err == nil {
+						s.False(strings.HasPrefix(d.Name(), ".s2tmp-"), "temp file %q left", name)
+					}
+					return err
+				}))
+			}
+
+			obj, err := ms.Part(ctx, "id1", 1)
+			if tc.existing == "" {
+				s.ErrorIs(err, s2.ErrNotExist)
+				return
+			}
+			s.Require().NoError(err)
+			rc, err := obj.Open()
+			s.Require().NoError(err)
+			defer rc.Close()
+
+			data, err := io.ReadAll(rc)
+			s.Require().NoError(err)
+			s.Equal(tc.existing, string(data))
+		})
+	}
 }
 
 // A probe that fails must not fail a part that is already stored.
@@ -282,7 +337,7 @@ func (s *MultipartStoreTestSuite) TestPutPartIgnoresProbeFailure() {
 	s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil, ""))
 	probeBroken := &MultipartStore{strg: existsFailingStorage{ms.Storage(), errors.New("probe failed")}}
 
-	_, err := probeBroken.PutPart(ctx, "id1", 1, []byte("hello"))
+	_, err := probeBroken.PutPart(ctx, "id1", 1, strings.NewReader("hello"), 5)
 	s.Require().NoError(err)
 
 	obj, err := ms.Part(ctx, "id1", 1)
@@ -483,7 +538,7 @@ func (s *MultipartStoreTestSuite) TestSweep() {
 			setup: func(ctx context.Context, root string, ms *MultipartStore) {
 				s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil, ""))
 				s.backdate(root, "id1", uploadMetaName, 2*time.Hour)
-				_, err := ms.PutPart(ctx, "id1", 1, []byte("x"))
+				_, err := ms.PutPart(ctx, "id1", 1, strings.NewReader("x"), 1)
 				s.Require().NoError(err)
 			},
 			wantGone: true,
@@ -592,7 +647,7 @@ func (s *MultipartStoreTestSuite) TestRemove() {
 			ms := s.newStore(tc.typ)
 
 			s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil, ""))
-			_, err := ms.PutPart(ctx, "id1", 1, []byte("x"))
+			_, err := ms.PutPart(ctx, "id1", 1, strings.NewReader("x"), 1)
 			s.Require().NoError(err)
 			s.Require().NoError(ms.Create(ctx, "id2", "photos", "b.jpg", 0, nil, ""))
 
@@ -692,7 +747,7 @@ func (s *MultipartStoreTestSuite) TestPutPartReturnsStorageETag() {
 	ms := &MultipartStore{strg: opaqueETagStorage{base.Storage()}}
 	s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil, ""))
 
-	etag, err := ms.PutPart(ctx, "id1", 1, []byte("hello"))
+	etag, err := ms.PutPart(ctx, "id1", 1, strings.NewReader("hello"), 5)
 	s.Require().NoError(err)
 
 	s.Equal(`"opaque"`, etag)
@@ -718,7 +773,7 @@ func (s *MultipartStoreTestSuite) TestPutPartReadBackError() {
 			s.Require().NoError(base.Create(ctx, "id1", "photos", "a.jpg", 0, nil, ""))
 			ms := &MultipartStore{strg: getFailingStorage{base.Storage(), tc.getErr}}
 
-			_, err := ms.PutPart(ctx, "id1", 1, []byte("hello"))
+			_, err := ms.PutPart(ctx, "id1", 1, strings.NewReader("hello"), 5)
 
 			want := tc.want
 			if want == nil {
@@ -734,9 +789,10 @@ func (s *MultipartStoreTestSuite) TestParts() {
 	ms := s.newStore(s2.TypeOSFS)
 	s.Require().NoError(ms.Create(ctx, "id1", "photos", "a.jpg", 0, nil, ""))
 	for _, n := range []int{10000, 1, 3} {
-		etag, err := ms.PutPart(ctx, "id1", n, []byte(strconv.Itoa(n)))
+		data := strconv.Itoa(n)
+		etag, err := ms.PutPart(ctx, "id1", n, strings.NewReader(data), uint64(len(data)))
 		s.Require().NoError(err)
-		sum := md5.Sum([]byte(strconv.Itoa(n)))
+		sum := md5.Sum([]byte(data))
 		s.Equal(`"`+hex.EncodeToString(sum[:])+`"`, etag)
 	}
 	u, err := ms.upload(ctx, "id1")
