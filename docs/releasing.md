@@ -213,6 +213,21 @@ bumps `go.work` — step 1, not step 3. Waiting until step 3 (when
 `cmd/s2-server/go.mod` happens to catch up) leaves e2e on `main` broken
 from the moment the step 1 PR merges.
 
+### CI and releases build with the latest patch of `go.work`'s minor
+
+`tests.yaml` and `release.yaml` take the minor version from `go.work`'s
+`go` directive and set up the latest patch of it (`check-latest: true`).
+`go-version-file: go.work` installed that directive's exact version
+instead: v0.21.3 shipped built with go1.26.0, without the standard-library
+fixes of any 1.26 patch release. Bumping the minor stays a manual step:
+raise `go.work` and `server/Dockerfile`'s `FROM golang` line in the same
+PR.
+
+The patch is whatever is latest when each job runs, so the `tests` and
+`release` jobs of one tag can differ if Go publishes a patch in between;
+the release log and `go version -m s2-server` record the one that built
+it.
+
 ### Multi-tag push can miss webhooks
 
 Pushing several tags in one `git push` has occasionally failed to

@@ -32,10 +32,16 @@ jobs:
         with:
           fetch-depth: 0
       -
+        # go-version-file would install go.work's exact x.y.0; take its minor and the latest patch.
+        name: Pick Go minor from go.work
+        id: go
+        run: echo "minor=$(awk '/^go [0-9]/ {print $2}' go.work | cut -d. -f1-2)" >> "$GITHUB_OUTPUT"
+      -
         name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version-file: go.work
+          go-version: ${{ steps.go.outputs.minor }}
+          check-latest: true
       -
         name: Set up QEMU
         uses: docker/setup-qemu-action@v4
