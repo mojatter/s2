@@ -1475,3 +1475,26 @@ func (s *ObjectsTestSuite) TestGalleryView_ThumbnailAndPersistenceAcrossReload()
 		))
 	})
 }
+
+// TestBrowserOverviewRunsTheObjectsScript checks in Chrome that the objects script, loaded on every page, throws nothing on the overview, which has no object views.
+func (s *ObjectsTestSuite) TestBrowserOverviewRunsTheObjectsScript() {
+	browserCtx, consoleURL := s.newBrowser()
+
+	// Subscribe before the navigation so no exception thrown during the load is missed.
+	messages := chromedp.Console(browserCtx)
+	s.Require().NoError(chromedp.Do(browserCtx, chromedp.Navigate(consoleURL+"/")))
+	// The sentinel follows every message of the load, since the iterator keeps the order.
+	s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`console.log("sentinel")`)))
+
+	var exceptions []string
+	for m, err := range messages {
+		s.Require().NoError(err)
+		if m.Type == chromedp.ConsoleLog && m.Text == "sentinel" {
+			break
+		}
+		if m.IsException() {
+			exceptions = append(exceptions, m.String())
+		}
+	}
+	s.Empty(exceptions)
+}
