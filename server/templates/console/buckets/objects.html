@@ -285,6 +285,8 @@
   function setViewMode(mode, btn) {
     const listView = document.getElementById('list-view');
     const galleryView = document.getElementById('gallery-view');
+    // index.html loads this script on every page, including the overview, which has no object views.
+    if (!listView || !galleryView) return;
 
     const btns = document.querySelectorAll('.view-toggle-btn');
     btns.forEach(function(b) { b.classList.remove('active'); });
