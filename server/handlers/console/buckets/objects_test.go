@@ -1370,22 +1370,22 @@ func (s *ObjectsTestSuite) TestBrowserShowsWhyAnUploadWasRefused() {
 	file := filepath.Join(s.T().TempDir(), "big.bin")
 	s.Require().NoError(os.WriteFile(file, bytes.Repeat([]byte("x"), 4096), 0o600))
 
-	var alerted string
-	s.Require().NoError(chromedp.Run(browserCtx,
+	fileInput := chromedp.CSS(`input[name="file"]`)
+	s.Require().NoError(chromedp.Do(browserCtx,
 		chromedp.Navigate(consoleURL+"/buckets/big"),
-		chromedp.WaitReady(`input[name="file"]`, chromedp.ByQuery),
+		chromedp.WaitReady(fileInput),
 		// Record alerts instead of opening a dialog headless Chrome would leave open.
-		chromedp.Evaluate(`window.alerts = []; window.alert = m => window.alerts.push(m)`, nil),
-		chromedp.SetUploadFiles(`input[name="file"]`, []string{file}, chromedp.ByQuery),
-		chromedp.Poll(`window.alerts[0]`, &alerted),
+		chromedp.Evaluate[chromedp.Void](`window.alerts = []; window.alert = m => window.alerts.push(m)`),
+		chromedp.SetUploadFiles(fileInput, []string{file}),
 	))
+	alerted, err := chromedp.Run(browserCtx, chromedp.Poll[string](`window.alerts[0]`))
+	s.Require().NoError(err)
 	s.Contains(alerted, "max 1024 bytes")
 
 	// Picking the same file again fires change only if the form was reset after the refusal.
-	s.Require().NoError(chromedp.Run(browserCtx,
-		chromedp.SetUploadFiles(`input[name="file"]`, []string{file}, chromedp.ByQuery),
-		chromedp.Poll(`window.alerts[1]`, &alerted),
-	))
+	s.Require().NoError(chromedp.Do(browserCtx, chromedp.SetUploadFiles(fileInput, []string{file})))
+	alerted, err = chromedp.Run(browserCtx, chromedp.Poll[string](`window.alerts[1]`))
+	s.Require().NoError(err)
 	s.Contains(alerted, "max 1024 bytes")
 
 	strg, err := s.server.Buckets.Get(context.Background(), "big")
@@ -1404,21 +1404,22 @@ func (s *ObjectsTestSuite) TestBrowserActsOnTheClickedName() {
 	s.putObject("hash", "f#x/inside.txt", "x")
 
 	s.Run("folder link opens the folder", func() {
-		s.Require().NoError(chromedp.Run(browserCtx,
+		s.Require().NoError(chromedp.Do(browserCtx,
 			chromedp.Navigate(consoleURL+"/buckets/hash"),
-			chromedp.Click(`a[title="f#x/"]`, chromedp.ByQuery),
-			chromedp.WaitVisible(`span.obj-name[title="inside.txt"]`, chromedp.ByQuery),
+			chromedp.Click(chromedp.CSS(`a[title="f#x/"]`)),
+			chromedp.WaitVisible(chromedp.CSS(`span.obj-name[title="inside.txt"]`)),
 		))
 	})
 
 	s.Run("delete button deletes its own object", func() {
-		s.Require().NoError(chromedp.Run(browserCtx,
+		target := chromedp.CSS(`span.obj-name[title="a#b"]`)
+		s.Require().NoError(chromedp.Do(browserCtx,
 			chromedp.Navigate(consoleURL+"/buckets/hash"),
-			chromedp.WaitVisible(`span.obj-name[title="a#b"]`, chromedp.ByQuery),
+			chromedp.WaitVisible(target),
 			// hx-confirm asks window.confirm, which headless Chrome would leave open.
-			chromedp.Evaluate(`window.confirm = () => true`, nil),
-			chromedp.Evaluate(`document.querySelector('button[title="Delete File"][hx-confirm*="\'a#b\'"]').click()`, nil),
-			chromedp.WaitNotPresent(`span.obj-name[title="a#b"]`, chromedp.ByQuery),
+			chromedp.Evaluate[chromedp.Void](`window.confirm = () => true`),
+			chromedp.Evaluate[chromedp.Void](`document.querySelector('button[title="Delete File"][hx-confirm*="\'a#b\'"]').click()`),
+			chromedp.WaitNotPresent(target),
 		))
 		strg, err := s.server.Buckets.Get(context.Background(), "hash")
 		s.Require().NoError(err)
@@ -1441,33 +1442,32 @@ func (s *ObjectsTestSuite) TestGalleryView_ThumbnailAndPersistenceAcrossReload()
 	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("photo.png", tinyPNG)))
 
 	pageURL := consoleURL + "/buckets/gallery?prefix="
+	galleryButton := chromedp.CSS(`button[title="Gallery View"]`)
+	thumb := chromedp.CSS(`.gallery-thumb img`)
 
 	s.Run("thumbnail loads after switching to gallery view", func() {
-		s.Require().NoError(chromedp.Run(browserCtx,
+		s.Require().NoError(chromedp.Do(browserCtx,
 			chromedp.Navigate(pageURL),
-			chromedp.WaitVisible(`button[title="Gallery View"]`),
-			chromedp.Click(`button[title="Gallery View"]`),
-			chromedp.WaitVisible(`.gallery-thumb img`),
+			chromedp.WaitVisible(galleryButton),
+			chromedp.Click(galleryButton),
+			chromedp.WaitVisible(thumb),
 		))
 	})
 
 	s.Run("gallery view and thumbnail survive a full reload", func() {
-		s.Require().NoError(chromedp.Run(browserCtx,
+		s.Require().NoError(chromedp.Do(browserCtx,
 			chromedp.Reload(),
-			chromedp.WaitVisible(`#gallery-view.gallery-grid`),
+			chromedp.WaitVisible(chromedp.CSS(`#gallery-view.gallery-grid`)),
 		))
 
-		var galleryDisplay string
-		s.Require().NoError(chromedp.Run(browserCtx,
-			chromedp.EvaluateAsDevTools(
-				`getComputedStyle(document.getElementById('gallery-view')).display`,
-				&galleryDisplay,
-			),
+		galleryDisplay, err := chromedp.Run(browserCtx, chromedp.Evaluate[string](
+			`getComputedStyle(document.getElementById('gallery-view')).display`,
 		))
+		s.Require().NoError(err)
 		s.NotEqual("none", galleryDisplay)
 
-		s.Require().NoError(chromedp.Run(browserCtx,
-			chromedp.WaitVisible(`.gallery-thumb img`),
+		s.Require().NoError(chromedp.Do(browserCtx,
+			chromedp.WaitVisible(thumb),
 		))
 	})
 }

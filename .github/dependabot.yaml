@@ -14,6 +14,12 @@ updates:
       go-dependencies:
         patterns:
           - "*"
+        exclude-patterns:
+          - "github.com/chromedp/*"
+      # chromedp breaks its API often; keep it out of the group so it cannot block the other bumps.
+      chromedp:
+        patterns:
+          - "github.com/chromedp/*"
 
   - package-ecosystem: github-actions
     directory: /
