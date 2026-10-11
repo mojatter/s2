@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"io/fs"
 	"net/http/httptest"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -61,6 +63,42 @@ func TestRenderConsoleIndex(t *testing.T) {
 			for _, notWant := range tc.wantNotContains {
 				assert.NotContains(t, body, notWant)
 			}
+		})
+	}
+}
+
+// otherHostURL matches an absolute or protocol-relative URL in HTML, CSS or JS.
+var otherHostURL = regexp.MustCompile(`(?i)["'(=\x60][ \t]*(https?:)?//`)
+
+// The console references no other host, so it works offline; any absolute URL fails.
+func TestConsoleLoadsNothingFromOtherHosts(t *testing.T) {
+	// The Google Fonts link the console used to load must match, or the scan below proves nothing.
+	require.Regexp(t, otherHostURL, `<link href="https://fonts.googleapis.com/css2?family=Inter" rel="stylesheet">`)
+
+	testCases := []struct {
+		caseName string
+		fsys     fs.FS
+	}{
+		{caseName: "templates", fsys: templatesFS},
+		{caseName: "static", fsys: StaticFS},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			scanned := 0
+			err := fs.WalkDir(tc.fsys, ".", func(name string, d fs.DirEntry, err error) error {
+				if err != nil || d.IsDir() {
+					return err
+				}
+				b, err := fs.ReadFile(tc.fsys, name)
+				if err != nil {
+					return err
+				}
+				scanned++
+				assert.NotRegexp(t, otherHostURL, string(b), name)
+				return nil
+			})
+			require.NoError(t, err)
+			assert.NotZero(t, scanned, "walk visited no files; the scan proves nothing")
 		})
 	}
 }

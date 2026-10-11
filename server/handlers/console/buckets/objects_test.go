@@ -1340,7 +1340,7 @@ func (s *ObjectsTestSuite) newBrowser() (context.Context, string) {
 	// --no-sandbox avoids Chrome sandbox-init failures seen on some CI
 	// runners; not needed locally but harmless there.
 	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:], chromedp.NoSandbox)
-	// Resolve every host but the test server to NOTFOUND, so a hanging Google Fonts fetch cannot hold the load event Navigate waits for.
+	// Resolve every host but the test server to NOTFOUND, so no network fetch can hold the load event Navigate waits for.
 	allocOpts = append(allocOpts, chromedp.Flag("host-resolver-rules", "MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"))
 	// chromedp's auto-detection tries "chromium"/"chromium-browser" before
 	// "google-chrome". On GitHub's ubuntu-latest runner, chromium is a snap
