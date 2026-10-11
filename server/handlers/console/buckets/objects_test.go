@@ -1340,6 +1340,8 @@ func (s *ObjectsTestSuite) newBrowser() (context.Context, string) {
 	// --no-sandbox avoids Chrome sandbox-init failures seen on some CI
 	// runners; not needed locally but harmless there.
 	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:], chromedp.NoSandbox)
+	// Resolve every host but the test server to NOTFOUND, so a hanging Google Fonts fetch cannot hold the load event Navigate waits for.
+	allocOpts = append(allocOpts, chromedp.Flag("host-resolver-rules", "MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"))
 	// chromedp's auto-detection tries "chromium"/"chromium-browser" before
 	// "google-chrome". On GitHub's ubuntu-latest runner, chromium is a snap
 	// shim that fails to launch headless (actions/runner-images#12096);
@@ -1353,7 +1355,9 @@ func (s *ObjectsTestSuite) newBrowser() (context.Context, string) {
 
 	browserCtx, cancel := chromedp.NewContext(allocCtx)
 	s.T().Cleanup(cancel)
-	// 30s covers the whole test; 15s flaked in CI with "chrome failed to start: context deadline exceeded".
+	// Start Chrome before the step timeout, since a timeout on the first Do would bound the browser's lifetime too.
+	s.Require().NoError(chromedp.Do(browserCtx), "start Chrome")
+	// 30s covers the test's steps.
 	browserCtx, cancelTimeout := context.WithTimeout(browserCtx, 30*time.Second)
 	s.T().Cleanup(cancelTimeout)
 	return browserCtx, ts.URL
