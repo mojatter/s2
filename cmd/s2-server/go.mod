@@ -3,11 +3,11 @@ module github.com/mojatter/s2/cmd/s2-server
 go 1.26.0
 
 require (
-	github.com/mojatter/s2 v0.21.3
-	github.com/mojatter/s2/azblob v0.21.3
-	github.com/mojatter/s2/gcs v0.21.3
-	github.com/mojatter/s2/s3 v0.21.3
-	github.com/mojatter/s2/server v0.21.3
+	github.com/mojatter/s2 v0.22.0
+	github.com/mojatter/s2/azblob v0.22.0
+	github.com/mojatter/s2/gcs v0.22.0
+	github.com/mojatter/s2/s3 v0.22.0
+	github.com/mojatter/s2/server v0.22.0
 )
 
 require (
@@ -64,7 +64,7 @@ require (
 	github.com/klauspost/compress v1.19.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
-	github.com/mojatter/wfs v0.7.1 // indirect
+	github.com/mojatter/wfs v0.8.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.28 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
