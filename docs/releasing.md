@@ -219,9 +219,8 @@ from the moment the step 1 PR merges.
 `go` directive and set up the latest patch of it (`check-latest: true`).
 `go-version-file: go.work` installed that directive's exact version
 instead: v0.21.3 shipped built with go1.26.0, without the standard-library
-fixes of any 1.26 patch release. Bumping the minor stays a manual step:
-raise `go.work` and `server/Dockerfile`'s `FROM golang` line in the same
-PR.
+fixes of any 1.26 patch release. Bumping the minor stays a manual step;
+see the `server/Dockerfile` section above.
 
 The patch is whatever is latest when each job runs, so the `tests` and
 `release` jobs of one tag can differ if Go publishes a patch in between;
