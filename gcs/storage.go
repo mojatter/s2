@@ -150,6 +150,7 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 				metadata:     md,
 				contentType:  contentType,
 				etag:         objectETag(attrs),
+				generation:   attrs.Generation,
 			})
 		}
 
@@ -186,6 +187,7 @@ func (s *gcsStorage) Get(ctx context.Context, name string) (s2.Object, error) {
 		metadata:     md,
 		contentType:  contentType,
 		etag:         objectETag(attrs),
+		generation:   attrs.Generation,
 	}, nil
 }
 

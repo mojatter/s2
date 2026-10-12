@@ -46,7 +46,8 @@ type blobItem struct {
 // azblobClient abstracts the Azure Blob SDK so that tests can swap in a mock.
 type azblobClient interface {
 	getProperties(ctx context.Context, container, blob string) (blobProps, error)
-	downloadStream(ctx context.Context, container, blobName string, offset, count int64) (io.ReadCloser, error)
+	// downloadStream reads the blob, or count bytes from offset when either is set; a nonempty ifMatch must still be its ETag.
+	downloadStream(ctx context.Context, container, blobName string, offset, count int64, ifMatch string) (io.ReadCloser, error)
 	// upload stores the blob and reports the ETag a later read derives.
 	upload(ctx context.Context, container, blobName string, body io.Reader, metadata map[string]*string, contentType string) (string, error)
 	deleteBlob(ctx context.Context, container, blobName string) error
@@ -92,12 +93,14 @@ func (c *sdkClient) getProperties(ctx context.Context, ctr, blobName string) (bl
 	}, nil
 }
 
-func (c *sdkClient) downloadStream(ctx context.Context, ctr, blobName string, offset, count int64) (io.ReadCloser, error) {
-	var opts *azsdk.DownloadStreamOptions
+func (c *sdkClient) downloadStream(ctx context.Context, ctr, blobName string, offset, count int64, ifMatch string) (io.ReadCloser, error) {
+	opts := &azsdk.DownloadStreamOptions{}
 	if offset > 0 || count > 0 {
-		opts = &azsdk.DownloadStreamOptions{
-			Range: blob.HTTPRange{Offset: offset, Count: count},
-		}
+		opts.Range = blob.HTTPRange{Offset: offset, Count: count}
+	}
+	if ifMatch != "" {
+		etag := azcore.ETag(ifMatch)
+		opts.AccessConditions = &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfMatch: &etag}}
 	}
 
 	resp, err := c.client.DownloadStream(ctx, ctr, blobName, opts)

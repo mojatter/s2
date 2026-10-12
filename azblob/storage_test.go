@@ -7,13 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 
 	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/s2test"
@@ -42,6 +45,10 @@ type mockAzblobClient struct {
 	// the mock's simple map lookup cannot reproduce, e.g.
 	// CannotVerifyCopySource for a CopyFromURL whose source is missing.
 	copyBlobErr error
+	// etags counts writes, so no two writes share an ETag whatever the clock's resolution.
+	etags atomic.Uint64
+	// preconditionOnMissing answers If-Match on a missing blob with 412, as Azurite does.
+	preconditionOnMissing bool
 }
 
 func newMockAzblobClient() *mockAzblobClient {
@@ -65,8 +72,12 @@ func (m *mockAzblobClient) put(container, key string, body []byte, metadata map[
 		body:      body,
 		modified:  time.Now(),
 		metadata:  metadata,
-		etag:      fmt.Sprintf("0x%X", time.Now().UnixNano()),
+		etag:      m.nextETag(),
 	}
+}
+
+func (m *mockAzblobClient) nextETag() string {
+	return fmt.Sprintf("0x%X", m.etags.Add(1))
 }
 
 func (m *mockAzblobClient) get(container, key string) (*mockBlob, bool) {
@@ -103,10 +114,16 @@ func (m *mockAzblobClient) getProperties(_ context.Context, container, blobName 
 	}, nil
 }
 
-func (m *mockAzblobClient) downloadStream(_ context.Context, container, blobName string, offset, count int64) (io.ReadCloser, error) {
+func (m *mockAzblobClient) downloadStream(_ context.Context, container, blobName string, offset, count int64, ifMatch string) (io.ReadCloser, error) {
 	b, ok := m.get(container, blobName)
+	if !ok && ifMatch != "" && m.preconditionOnMissing {
+		return nil, &azcore.ResponseError{ErrorCode: string(bloberror.ConditionNotMet), StatusCode: http.StatusPreconditionFailed}
+	}
 	if !ok {
 		return nil, newBlobNotFoundError()
+	}
+	if ifMatch != "" && ifMatch != b.etag {
+		return nil, &azcore.ResponseError{ErrorCode: string(bloberror.ConditionNotMet), StatusCode: http.StatusPreconditionFailed}
 	}
 	body := b.body
 	if offset > 0 || count > 0 {
@@ -146,7 +163,7 @@ func (m *mockAzblobClient) setMetadata(_ context.Context, container, blobName st
 		return newBlobNotFoundError()
 	}
 	b.metadata = metadata
-	b.etag = fmt.Sprintf("0x%X", time.Now().UnixNano())
+	b.etag = m.nextETag()
 	return nil
 }
 

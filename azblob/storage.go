@@ -182,6 +182,7 @@ func (s *azblobStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListR
 				metadata:    s2.Metadata(fromPtrMetadata(item.metadata)),
 				contentType: item.contentType,
 				etag:        blobETag(item.contentMD5, item.etag),
+				version:     item.etag,
 			})
 		}
 
@@ -224,6 +225,7 @@ func (s *azblobStorage) Get(ctx context.Context, name string) (s2.Object, error)
 		metadata:    md,
 		contentType: props.contentType,
 		etag:        blobETag(props.contentMD5, props.etag),
+		version:     props.etag,
 	}, nil
 }
 
