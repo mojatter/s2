@@ -1342,6 +1342,8 @@ func (s *ObjectsTestSuite) newBrowser() (context.Context, string) {
 	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:], chromedp.NoSandbox)
 	// Resolve every host but the test server to NOTFOUND, so no network fetch can hold the load event Navigate waits for.
 	allocOpts = append(allocOpts, chromedp.Flag("host-resolver-rules", "MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"))
+	// Chrome drops clicks dispatched before the first frame of a new document (acked, not delivered); this lets them through, as Puppeteer and Playwright do.
+	allocOpts = append(allocOpts, chromedp.Flag("allow-pre-commit-input", true))
 	// chromedp's auto-detection tries "chromium"/"chromium-browser" before
 	// "google-chrome". On GitHub's ubuntu-latest runner, chromium is a snap
 	// shim that fails to launch headless (actions/runner-images#12096);
