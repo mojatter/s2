@@ -14,7 +14,7 @@ import (
 	"github.com/mojatter/s2"
 )
 
-//go:embed templates/*
+//go:embed templates
 var templatesFS embed.FS
 
 // loadTemplates parses every file under templates/ into a single
