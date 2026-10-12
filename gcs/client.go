@@ -31,8 +31,8 @@ type gcsBucket interface {
 
 type gcsObject interface {
 	attrs(ctx context.Context) (*storage.ObjectAttrs, error)
-	newReader(ctx context.Context) (io.ReadCloser, error)
-	newRangeReader(ctx context.Context, offset, length int64) (io.ReadCloser, error)
+	// newRangeReader reads length bytes from offset, or to the end when length is negative, and reports the generation it read; a nonzero generation must still be the live one.
+	newRangeReader(ctx context.Context, offset, length, generation int64) (io.ReadCloser, int64, error)
 	newWriter(ctx context.Context, metadata map[string]string, contentType string) gcsWriter
 	patch(ctx context.Context, p objectPatch) error
 	copyTo(ctx context.Context, dst gcsObject) error
@@ -100,12 +100,17 @@ func (o *sdkObject) attrs(ctx context.Context) (*storage.ObjectAttrs, error) {
 	return o.obj.Attrs(ctx)
 }
 
-func (o *sdkObject) newReader(ctx context.Context) (io.ReadCloser, error) {
-	return o.obj.NewReader(ctx)
-}
-
-func (o *sdkObject) newRangeReader(ctx context.Context, offset, length int64) (io.ReadCloser, error) {
-	return o.obj.NewRangeReader(ctx, offset, length)
+func (o *sdkObject) newRangeReader(ctx context.Context, offset, length, generation int64) (io.ReadCloser, int64, error) {
+	obj := o.obj
+	// A zero generation would read as "the object must not exist".
+	if generation != 0 {
+		obj = obj.If(storage.Conditions{GenerationMatch: generation})
+	}
+	r, err := obj.NewRangeReader(ctx, offset, length)
+	if err != nil {
+		return nil, 0, err
+	}
+	return r, r.Attrs.Generation, nil
 }
 
 func (o *sdkObject) newWriter(ctx context.Context, metadata map[string]string, contentType string) gcsWriter {

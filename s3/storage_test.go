@@ -18,6 +18,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/s2test"
 	"github.com/stretchr/testify/suite"
@@ -39,6 +40,8 @@ type mockS3Client struct {
 	mu            sync.RWMutex
 	objects       map[string]*mockObject
 	lastListInput *s3.ListObjectsV2Input
+	// ignoreIfMatch serves GetObject as an S3-compatible server that does not support If-Match.
+	ignoreIfMatch bool
 }
 
 // mockKey keys the store verbatim. S3 keys are opaque strings, and path.Join
@@ -231,6 +234,9 @@ func (m *mockS3Client) GetObject(ctx context.Context, params *s3.GetObjectInput,
 	if !ok {
 		return nil, &s3types.NoSuchKey{}
 	}
+	if params.IfMatch != nil && !m.ignoreIfMatch && aws.ToString(params.IfMatch) != mockETag(obj.body) {
+		return nil, &smithy.GenericAPIError{Code: "PreconditionFailed"}
+	}
 	body := obj.body
 	if params.Range != nil {
 		rangeStr := aws.ToString(params.Range)
@@ -244,6 +250,7 @@ func (m *mockS3Client) GetObject(ctx context.Context, params *s3.GetObjectInput,
 	return &s3.GetObjectOutput{
 		Body:          io.NopCloser(bytes.NewReader(body)),
 		ContentLength: aws.Int64(int64(len(body))),
+		ETag:          aws.String(mockETag(obj.body)),
 		LastModified:  aws.Time(obj.lastModified),
 		Metadata:      obj.metadata,
 	}, nil

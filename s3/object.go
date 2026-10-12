@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/mojatter/s2"
 )
 
@@ -40,17 +41,38 @@ func (o *object) key() string {
 	return o.prefix + "/" + o.name
 }
 
+// errModified is what Open returns once the key holds another version than the one Get or List saw.
+var errModified = errors.New("object modified since Get")
+
 func (o *object) Open() (io.ReadCloser, error) {
-	res, err := o.client.GetObject(context.Background(), &s3.GetObjectInput{
+	return o.get(nil)
+}
+
+// get reads the version Get or List saw; IfMatch spares the transfer, the ETag check covers servers that ignore it.
+func (o *object) get(rng *string) (io.ReadCloser, error) {
+	in := &s3.GetObjectInput{
 		Bucket: aws.String(o.bucket),
 		Key:    aws.String(o.key()),
-	})
+		Range:  rng,
+	}
+	if o.etag != "" {
+		in.IfMatch = aws.String(o.etag)
+	}
+	res, err := o.client.GetObject(context.Background(), in)
 	if err != nil {
 		var noSuchKeyErr *s3types.NoSuchKey
 		if errors.As(err, &noSuchKeyErr) {
 			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, o.key())
 		}
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "PreconditionFailed" {
+			return nil, fmt.Errorf("%w: %s: %w", errModified, o.key(), err)
+		}
 		return nil, fmt.Errorf("failed to get object: %w", err)
+	}
+	if o.etag != "" && res.ETag != nil && strings.Trim(aws.ToString(res.ETag), `"`) != strings.Trim(o.etag, `"`) {
+		_ = res.Body.Close()
+		return nil, fmt.Errorf("%w: %s", errModified, o.key())
 	}
 	return res.Body, nil
 }
@@ -68,19 +90,7 @@ func (o *object) Metadata() s2.Metadata {
 }
 
 func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
-	res, err := o.client.GetObject(context.Background(), &s3.GetObjectInput{
-		Bucket: aws.String(o.bucket),
-		Key:    aws.String(o.key()),
-		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)),
-	})
-	if err != nil {
-		var noSuchKeyErr *s3types.NoSuchKey
-		if errors.As(err, &noSuchKeyErr) {
-			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, o.key())
-		}
-		return nil, fmt.Errorf("failed to get object range: %w", err)
-	}
-	return res.Body, nil
+	return o.get(aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)))
 }
 
 func (o *object) ContentType() string {

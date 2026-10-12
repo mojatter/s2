@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -44,6 +45,9 @@ type mockGCSClient struct {
 	objects map[string]*mockObject // keyed by "bucket/key"
 	patches int                    // patch calls, so a test can pin how many requests PutMetadata takes
 	onAttrs func()                 // runs after reading attrs, to simulate a racing writer
+	// ignoreGenerationMatch reads as an endpoint that does not honour ifGenerationMatch.
+	ignoreGenerationMatch bool
+	generations           atomic.Uint64
 }
 
 func newMockGCSClient() *mockGCSClient {
@@ -62,11 +66,8 @@ func (m *mockGCSClient) put(bucket, key string, body []byte, metadata map[string
 			stored[k] = v
 		}
 	}
-	// A new generation resets the metageneration, as the service does.
-	generation := int64(1)
-	if old, ok := m.objects[path.Join(bucket, key)]; ok {
-		generation = old.generation + 1
-	}
+	// A new generation resets the metageneration, as the service does; generations are never reused, even after a delete.
+	generation := int64(m.generations.Add(1))
 	m.objects[path.Join(bucket, key)] = &mockObject{
 		bucket:         bucket,
 		key:            key,
@@ -172,6 +173,7 @@ func (b *mockBucket) objects(ctx context.Context, q *storage.Query) gcsObjectIte
 				Metadata:    obj.metadata,
 				MD5:         mockMD5(obj.body),
 				ContentType: obj.contentType,
+				Generation:  obj.generation,
 			},
 		})
 	}
@@ -210,25 +212,20 @@ func (o *mockGCSObject) attrs(_ context.Context) (*storage.ObjectAttrs, error) {
 	return attrs, nil
 }
 
-func (o *mockGCSObject) newReader(_ context.Context) (io.ReadCloser, error) {
+func (o *mockGCSObject) newRangeReader(_ context.Context, offset, length, generation int64) (io.ReadCloser, int64, error) {
 	obj, ok := o.client.get(o.bucket, o.key)
 	if !ok {
-		return nil, storage.ErrObjectNotExist
+		return nil, 0, storage.ErrObjectNotExist
 	}
-	return io.NopCloser(bytes.NewReader(obj.body)), nil
-}
-
-func (o *mockGCSObject) newRangeReader(_ context.Context, offset, length int64) (io.ReadCloser, error) {
-	obj, ok := o.client.get(o.bucket, o.key)
-	if !ok {
-		return nil, storage.ErrObjectNotExist
+	if generation != 0 && generation != obj.generation && !o.client.ignoreGenerationMatch {
+		return nil, 0, errPreconditionFailed
 	}
 	body := obj.body
-	end := offset + length
-	if int(end) > len(body) {
-		end = int64(len(body))
+	end := int64(len(body))
+	if length >= 0 && offset+length < end {
+		end = offset + length
 	}
-	return io.NopCloser(bytes.NewReader(body[offset:end])), nil
+	return io.NopCloser(bytes.NewReader(body[offset:end])), obj.generation, nil
 }
 
 func (o *mockGCSObject) newWriter(ctx context.Context, metadata map[string]string, contentType string) gcsWriter {

@@ -97,6 +97,8 @@ As JSON:
 
 When `S3Config` is nil or all fields are empty, the standard AWS SDK credential chain is used.
 
+`Open` and `OpenRange` read only the version `Get` or `List` saw: they send its ETag as If-Match and compare the ETag of the response, so a key replaced since then fails rather than serving another body. A metadata update that gives the object a new ETag fails them too, which happens for an object whose ETag is not the MD5 of its body, such as one uploaded in parts or stored with SSE-KMS or SSE-C.
+
 ## GCS
 
 When using the `gcs` backend, authentication uses [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) by default. Run `gcloud auth application-default login` for local development.
@@ -137,6 +139,8 @@ As JSON:
 |-------|-------------|
 | `credentials_file` | Path to a service account JSON key file |
 
+`Open` and `OpenRange` read only the generation `Get` or `List` saw, so a key replaced since then fails rather than serving another body. A metadata update keeps the generation and does not affect them.
+
 ## Azure Blob Storage
 
 When using the `azblob` backend, you can authenticate with a connection string, shared key, or [DefaultAzureCredential](https://learn.microsoft.com/en-us/azure/developer/go/azure-sdk-authentication).
@@ -173,6 +177,8 @@ As JSON:
 | `connection_string` | Full Azure Storage connection string (takes precedence over name+key) |
 
 Authentication priority: `connection_string` > `account_name`+`account_key` > DefaultAzureCredential.
+
+`Open` and `OpenRange` read only the version `Get` or `List` saw, by its native ETag, so a blob replaced since then fails rather than serving another body. Azure gives a blob a new ETag on every metadata update, so one since `Get` or `List` fails them too.
 
 ## Object names
 

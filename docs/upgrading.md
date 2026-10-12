@@ -25,6 +25,12 @@ The steps below take a root from any version since v0.14.0 to the current one in
 
 Each section lists whether the data at rest changes, what to do, and, where known, what a downgrade does. A version not listed here changes nothing on disk and needs no step; what its responses change is in its release notes.
 
+### v0.22.1
+
+- **Data at rest:** unchanged; downgrading to v0.22.0 is safe.
+- On `s3`, `gcs` and `azblob`, a GetObject, or a CopyObject reading its source, racing a write of the same key no longer serves another version's body under the `Content-Length`, ETag and Last-Modified of the version it looked up ([#375](https://github.com/mojatter/s2/issues/375)); `osfs` and `memfs` stopped doing so in v0.22.0. Such a request now answers `500 InternalError`, which SDKs retry, as on `osfs` and `memfs`. Earlier versions sent the new body, or a range of it resolved against the old length, and a CopyObject stored the new body under the old version's Content-Type and metadata, answering `200`. Nothing in the bucket tells such a copy apart; copy again any key copied while another client was replacing its source.
+- The same `500` answers a GetObject or CopyObject racing a metadata-only change of its key where that change gives the object a new ETag: on `azblob` every metadata update does, and on `s3` one does for an object whose ETag is not the MD5 of its body, such as one uploaded in parts or stored with SSE-KMS or SSE-C.
+
 ### v0.22.0
 
 - **Data at rest:** unchanged; downgrading to v0.21.3 is safe.

@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"context"
 	"io"
 	"testing"
 	"time"
@@ -113,4 +114,70 @@ func (s *ObjectTestSuite) TestObjectOpenNotFound() {
 
 	// Ensure it wraps into s2.ErrNotExist
 	s.Require().ErrorIs(err, s2.ErrNotExist)
+}
+
+// Open and OpenRange read the version Get or List saw, or fail.
+func (s *ObjectTestSuite) TestObjectOpenSinceGet() {
+	testCases := []struct {
+		caseName string
+		change   func(m *mockS3Client)
+		// ignoreIfMatch serves Get as a server that does not support If-Match.
+		ignoreIfMatch bool
+		wantBody      string
+		wantErr       error
+	}{
+		{caseName: "unchanged", wantBody: "short"},
+		{caseName: "replaced", change: func(m *mockS3Client) { m.put("my-bucket", "k", []byte("a longer body"), nil) }, wantErr: errModified},
+		{caseName: "replaced on a server that ignores If-Match", change: func(m *mockS3Client) { m.put("my-bucket", "k", []byte("a longer body"), nil) }, ignoreIfMatch: true, wantErr: errModified},
+		{caseName: "deleted", change: func(m *mockS3Client) { m.delete("my-bucket", "k") }, wantErr: s2.ErrNotExist},
+	}
+	for _, tc := range testCases {
+		for _, via := range []string{"Get", "List"} {
+			s.Run(tc.caseName+" via "+via, func() {
+				m := newMockS3Client()
+				m.ignoreIfMatch = tc.ignoreIfMatch
+				m.put("my-bucket", "k", []byte("short"), nil)
+				strg := &storage{client: m, presignClient: m, bucket: "my-bucket"}
+				var obj s2.Object
+				if via == "Get" {
+					got, err := strg.Get(context.Background(), "k")
+					s.Require().NoError(err)
+					obj = got
+				} else {
+					res, err := strg.List(context.Background(), s2.ListOptions{})
+					s.Require().NoError(err)
+					s.Require().Len(res.Objects, 1)
+					obj = res.Objects[0]
+				}
+				if tc.change != nil {
+					tc.change(m)
+				}
+
+				// The mid-object range reads from offset 1, so the conditions are checked away from the start too.
+				opens := []struct {
+					caseName string
+					open     func() (io.ReadCloser, error)
+					offset   int
+				}{
+					{caseName: "Open", open: obj.Open},
+					{caseName: "OpenRange", open: func() (io.ReadCloser, error) { return obj.OpenRange(0, obj.Length()) }},
+					{caseName: "OpenRange mid", open: func() (io.ReadCloser, error) { return obj.OpenRange(1, obj.Length()-1) }, offset: 1},
+				}
+				for _, op := range opens {
+					s.Run(op.caseName, func() {
+						rc, err := op.open()
+						if tc.wantErr != nil {
+							s.ErrorIs(err, tc.wantErr)
+							return
+						}
+						s.Require().NoError(err)
+						b, err := io.ReadAll(rc)
+						_ = rc.Close()
+						s.Require().NoError(err)
+						s.Equal(tc.wantBody[op.offset:], string(b))
+					})
+				}
+			})
+		}
+	}
 }

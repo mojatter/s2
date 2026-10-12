@@ -3,13 +3,16 @@ package gcs
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"time"
 
 	"cloud.google.com/go/storage"
 	"github.com/mojatter/s2"
+	"google.golang.org/api/googleapi"
 )
 
 type object struct {
@@ -22,26 +25,39 @@ type object struct {
 	metadata     s2.Metadata
 	contentType  string
 	etag         string
+	// generation is the version Get or List saw; 0 when unknown.
+	generation int64
 }
+
+// errModified is what Open returns once the key holds another generation than the one Get or List saw.
+var errModified = errors.New("object modified since Get")
 
 func (o *object) Name() string {
 	return o.name
 }
 
 func (o *object) Open() (io.ReadCloser, error) {
-	obj := o.client.bucket(o.bucket).object(o.key())
-	rc, err := obj.newReader(context.Background())
-	if err != nil {
-		return nil, mapNotExist(err, o.name)
-	}
-	return rc, nil
+	return o.read(0, -1)
 }
 
 func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
+	return o.read(s2.MustInt64(offset), s2.MustInt64(length))
+}
+
+// read reads the generation Get or List saw; the precondition spares the transfer, the check covers endpoints that ignore it.
+func (o *object) read(offset, length int64) (io.ReadCloser, error) {
 	obj := o.client.bucket(o.bucket).object(o.key())
-	rc, err := obj.newRangeReader(context.Background(), s2.MustInt64(offset), s2.MustInt64(length))
+	rc, generation, err := obj.newRangeReader(context.Background(), offset, length, o.generation)
+	var apiErr *googleapi.Error
+	if errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed {
+		return nil, fmt.Errorf("%w: %s: %w", errModified, o.name, err)
+	}
 	if err != nil {
 		return nil, mapNotExist(err, o.name)
+	}
+	if o.generation != 0 && generation != 0 && generation != o.generation {
+		_ = rc.Close()
+		return nil, fmt.Errorf("%w: %s", errModified, o.name)
 	}
 	return rc, nil
 }
