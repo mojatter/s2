@@ -5,6 +5,7 @@ import (
 	iofs "io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -325,6 +326,12 @@ func TestWritesHoldTheLock(t *testing.T) {
 			return strg.Put(ctx, s2.NewObjectBytes(name, []byte("x")))
 		}
 	}
+	get := func(name string) func(context.Context, s2.Storage) error {
+		return func(ctx context.Context, strg s2.Storage) error {
+			_, err := strg.Get(ctx, name)
+			return err
+		}
+	}
 	move := func(src, dst string) func(context.Context, s2.Storage) error {
 		return func(ctx context.Context, strg s2.Storage) error { return s2.Move(ctx, strg, src, dst) }
 	}
@@ -333,9 +340,10 @@ func TestWritesHoldTheLock(t *testing.T) {
 		seed     []string // objects put through the root before each run; a/b/x if empty
 		sub      string   // the op runs through this Sub; "sidecar" is SubSidecar
 		lockOnly bool     // the locker has no SLock
+		reads    bool     // the op's stats and opens must run under its lock too
 		op       func(context.Context, s2.Storage) error
 		want     []lockReq // every call, in order, as the root's locker sees it
-		waitOn   []string  // besides ".", names whose exclusive lock the op waits behind
+		waitOn   []string  // besides "." when the op asks for it, names whose exclusive lock the op waits behind
 		freeOn   string    // a name whose exclusive lock the op does not wait behind
 	}{
 		{
@@ -429,6 +437,29 @@ func TestWritesHoldTheLock(t *testing.T) {
 			freeOn:   "A/B/X",
 		},
 		{
+			caseName: "get",
+			op:       get("a/b/x"),
+			reads:    true,
+			want:     []lockReq{s("A/B/X")},
+			waitOn:   []string{"A/B/X"},
+			freeOn:   ".", // a read never waits behind a prune
+		},
+		{
+			caseName: "get through a sub locks the parent's name",
+			sub:      "a/b",
+			op:       get("x"),
+			reads:    true,
+			want:     []lockReq{s("A/B/X")},
+			waitOn:   []string{"A/B/X"},
+			freeOn:   ".",
+		},
+		{
+			caseName: "get without SLock",
+			lockOnly: true,
+			op:       get("a/b/x"),
+			freeOn:   ".",
+		},
+		{
 			caseName: "put without SLock",
 			lockOnly: true,
 			op:       put("a/b/x"),
@@ -459,16 +490,32 @@ func TestWritesHoldTheLock(t *testing.T) {
 					unlocked.Store(true)
 				}
 			}
-			base := memfs.New()
-			fsys := wfs.DelegateFS(base)
-			fsys.CreateFileFunc = func(name string, mode iofs.FileMode) (wfs.WriterFile, error) {
-				check()
-				return base.CreateFile(name, mode)
+			// hook wraps m so its writes, and its reads for a reads row, check the lock; a Sub of it is hooked too.
+			var hook func(m *memfs.MemFS) *wfs.FSDelegator
+			hook = func(m *memfs.MemFS) *wfs.FSDelegator {
+				d := wfs.DelegateFS(m)
+				d.CreateFileFunc = func(name string, mode iofs.FileMode) (wfs.WriterFile, error) {
+					check()
+					return m.CreateFile(name, mode)
+				}
+				d.RenameFunc = func(oldpath, newpath string) error { check(); return m.Rename(oldpath, newpath) }
+				d.RemoveFileFunc = func(name string) error { check(); return m.RemoveFile(name) }
+				d.MkdirAllFunc = func(dir string, mode iofs.FileMode) error { check(); return m.MkdirAll(dir, mode) }
+				d.RemoveAllFunc = func(dir string) error { check(); return m.RemoveAll(dir) }
+				if tc.reads {
+					d.StatFunc = func(name string) (iofs.FileInfo, error) { check(); return m.Stat(name) }
+					d.OpenFunc = func(name string) (iofs.File, error) { check(); return m.Open(name) }
+				}
+				d.SubFunc = func(dir string) (iofs.FS, error) {
+					sub, err := m.Sub(dir)
+					if err != nil {
+						return nil, err
+					}
+					return hook(sub.(*memfs.MemFS)), nil
+				}
+				return d
 			}
-			fsys.RenameFunc = func(oldpath, newpath string) error { check(); return base.Rename(oldpath, newpath) }
-			fsys.RemoveFileFunc = func(name string) error { check(); return base.RemoveFile(name) }
-			fsys.MkdirAllFunc = func(dir string, mode iofs.FileMode) error { check(); return base.MkdirAll(dir, mode) }
-			fsys.RemoveAllFunc = func(dir string) error { check(); return base.RemoveAll(dir) }
+			fsys := hook(memfs.New())
 			var lk NameLocker = spy
 			if tc.lockOnly {
 				lk = lockOnly{spy}
@@ -501,11 +548,17 @@ func TestWritesHoldTheLock(t *testing.T) {
 			recording.Store(true)
 			require.NoError(t, tc.op(ctx, strg))
 			recording.Store(false)
-			require.False(t, unlocked.Load(), "changed the filesystem without the lock")
+			require.False(t, unlocked.Load(), "touched the filesystem without the lock")
 			require.Equal(t, tc.want, spy.recorded())
 
 			// The locks are taken, not only held: with one held elsewhere the operation waits.
-			for _, name := range append([]string{"."}, tc.waitOn...) {
+			// An op waits behind "." only when it asks for the root.
+			var waits []string
+			if slices.ContainsFunc(tc.want, func(r lockReq) bool { return r.name == "." }) {
+				waits = append(waits, ".")
+			}
+			waits = append(waits, tc.waitOn...)
+			for _, name := range waits {
 				seed()
 				unlock, err := spy.Lock(ctx, name)
 				require.NoError(t, err)
