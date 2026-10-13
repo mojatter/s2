@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/server"
@@ -1525,4 +1526,50 @@ func (s *ObjectsTestSuite) TestBrowserOverviewRunsTheObjectsScript() {
 	browserCtx, consoleURL := s.newBrowser()
 	// newBrowser fails the test on any uncaught exception.
 	s.Require().NoError(chromedp.Do(browserCtx, chromedp.Navigate(consoleURL+"/")))
+}
+
+// TestBrowserScrollsTheSidebarToTheLastBucket checks in Chrome that the wheel brings a bucket below the window's height into view, in the desktop sidebar and in the drawer (#393).
+func (s *ObjectsTestSuite) TestBrowserScrollsTheSidebarToTheLastBucket() {
+	for i := range 25 {
+		s.createBucket(fmt.Sprintf("b%02d", i))
+	}
+	// True once the last bucket is inside the window and nothing covers its center.
+	const reachable = `(() => {
+		const a = document.querySelector('.bucket-item[title="b24"]');
+		const r = a.getBoundingClientRect();
+		return r.bottom <= innerHeight && document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest('.bucket-item') === a;
+	})()`
+	testCases := []struct {
+		caseName string
+		width    int64
+		drawer   bool
+	}{
+		{caseName: "desktop sidebar", width: 1280},
+		{caseName: "drawer at the breakpoint", width: 900, drawer: true},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			browserCtx, consoleURL := s.newBrowser()
+			s.Require().NoError(chromedp.Do(browserCtx,
+				chromedp.EmulateViewport(tc.width, 800),
+				chromedp.Navigate(consoleURL+"/"),
+			))
+			if tc.drawer {
+				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Click(chromedp.CSS(".mobile-sidebar-toggle"))))
+				// The drawer slides in over 0.2s; aim the wheel only once it has landed.
+				_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`document.querySelector('.sidebar').getBoundingClientRect().left === 0`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "open the drawer")
+			}
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.WaitVisible(chromedp.CSS(`.bucket-item[title="b00"]`))))
+			reached, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](reachable))
+			s.Require().NoError(err)
+			s.Require().False(reached, "25 buckets must overflow an 800px window")
+
+			// Chrome requires deltaX, which cdproto omits when zero; 1px sideways cannot scroll a sidebar that hides overflow-x.
+			wheel := func(p *input.DispatchMouseEventParams) { p.DeltaX, p.DeltaY = 1, 5000 }
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.MouseEvent(chromedp.MouseWheel, 100, 400, wheel)))
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](reachable, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "the wheel must bring the last bucket into view")
+		})
+	}
 }
