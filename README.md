@@ -402,6 +402,13 @@ res, err := s2.Upload(ctx, strg, obj, s2.UploadOptions{})
 // res.ETag is what a later Get reports.
 ```
 
+`s2.Count` counts the objects whose names begin with a prefix, at any depth, as a recursive `List` would. `osfs` and `memfs` satisfy the optional `s2.Counter` interface and count in one pruned walk; elsewhere the free function pages through `List`, which on `s3`, `gcs` and `azblob` costs one request per 1000 objects. `UpTo` stops the count once it is passed:
+
+```go
+res, err := s2.Count(ctx, strg, s2.CountOptions{Prefix: "images/image-20260929", UpTo: 1000})
+// res.Objects is exact, or 1000 with res.Truncated set when more exist.
+```
+
 Errors that report a missing object wrap [`s2.ErrNotExist`](https://pkg.go.dev/github.com/mojatter/s2#pkg-variables); detect them with `errors.Is`:
 
 ```go

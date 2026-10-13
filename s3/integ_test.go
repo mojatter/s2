@@ -78,6 +78,10 @@ func (s *S3IntegrationSuite) TestList() {
 	s.Require().NoError(s2test.TestStorageListPaging(context.Background(), s.strg))
 }
 
+func (s *S3IntegrationSuite) TestCount() {
+	s.Require().NoError(s2test.TestStorageCount(context.Background(), s.strg))
+}
+
 func (s *S3IntegrationSuite) TestGetNotExist() {
 	s.Require().NoError(s2test.TestStorageGetNotExist(context.Background(), s.strg))
 }

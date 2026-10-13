@@ -564,6 +564,8 @@ func (s *StorageTestSuite) TestS2TestList() {
 	s.Require().NoError(err)
 
 	s.Require().NoError(s2test.TestStorageListDefaultPage(ctx, strg))
+
+	s.Require().NoError(s2test.TestStorageCount(ctx, strg))
 }
 
 // TestListCursors separates the two resume paths: After is the SDK's page

@@ -3,6 +3,8 @@ package s2
 import (
 	"context"
 	"errors"
+	"math"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -192,4 +194,153 @@ func (s *emptyUploaderStorage) Upload(ctx context.Context, obj Object, opts Uplo
 func (s *emptyUploaderStorage) Get(ctx context.Context, name string) (Object, error) {
 	s.getCalled = true
 	return etagObject{etag: s.etag}, nil
+}
+
+// pagedStorage lists names in pages of pageSize, recording the Limit of each call.
+type pagedStorage struct {
+	Storage
+	names    []string
+	pageSize int
+	stuck    bool
+	listErr  error
+	limits   []int
+}
+
+func (s *pagedStorage) List(ctx context.Context, opts ListOptions) (ListResult, error) {
+	s.limits = append(s.limits, opts.Limit)
+	if s.listErr != nil {
+		return ListResult{}, s.listErr
+	}
+	if s.stuck {
+		return ListResult{Objects: []Object{NewObjectBytes("a", nil)}, NextAfter: "a"}, nil
+	}
+	limit := s.pageSize
+	if opts.Limit > 0 && opts.Limit < limit {
+		limit = opts.Limit
+	}
+	var res ListResult
+	for _, name := range s.names {
+		if !strings.HasPrefix(name, opts.Prefix) || name <= opts.After {
+			continue
+		}
+		if len(res.Objects) == limit {
+			res.NextAfter = res.Objects[limit-1].Name()
+			break
+		}
+		res.Objects = append(res.Objects, NewObjectBytes(name, nil))
+	}
+	return res, nil
+}
+
+// counterStorage answers Count itself; its nil Storage panics if Count lists.
+type counterStorage struct {
+	Storage
+	res CountResult
+}
+
+func (s *counterStorage) Count(ctx context.Context, opts CountOptions) (CountResult, error) {
+	return s.res, nil
+}
+
+func TestCount(t *testing.T) {
+	names := []string{"a/1", "a/2", "a/3", "a/4", "a/5", "b/1"}
+	testCases := []struct {
+		caseName   string
+		strg       Storage
+		opts       CountOptions
+		want       CountResult
+		wantLimits []int
+		wantErr    string
+	}{
+		{
+			caseName:   "pages through every object under the prefix",
+			strg:       &pagedStorage{names: names, pageSize: 2},
+			opts:       CountOptions{Prefix: "a/"},
+			want:       CountResult{Objects: 5},
+			wantLimits: []int{0, 0, 0},
+		},
+		{
+			caseName:   "counts everything with an empty prefix",
+			strg:       &pagedStorage{names: names, pageSize: 1000},
+			want:       CountResult{Objects: 6},
+			wantLimits: []int{0},
+		},
+		{
+			caseName:   "stops once more than UpTo objects are seen",
+			strg:       &pagedStorage{names: names, pageSize: 1000},
+			opts:       CountOptions{Prefix: "a/", UpTo: 2},
+			want:       CountResult{Objects: 2, Truncated: true},
+			wantLimits: []int{3},
+		},
+		{
+			caseName:   "asks only for what is left past the earlier pages",
+			strg:       &pagedStorage{names: names, pageSize: 2},
+			opts:       CountOptions{Prefix: "a/", UpTo: 3},
+			want:       CountResult{Objects: 3, Truncated: true},
+			wantLimits: []int{4, 2},
+		},
+		{
+			caseName:   "is exact when the objects number UpTo",
+			strg:       &pagedStorage{names: names, pageSize: 1000},
+			opts:       CountOptions{Prefix: "a/", UpTo: 5},
+			want:       CountResult{Objects: 5},
+			wantLimits: []int{6},
+		},
+		{
+			caseName:   "leaves the page size to the backend for a large UpTo",
+			strg:       &pagedStorage{names: names, pageSize: 1000},
+			opts:       CountOptions{Prefix: "a/", UpTo: 5000},
+			want:       CountResult{Objects: 5},
+			wantLimits: []int{0},
+		},
+		{
+			caseName:   "leaves the page size alone for the largest UpTo",
+			strg:       &pagedStorage{names: names, pageSize: 1000},
+			opts:       CountOptions{Prefix: "a/", UpTo: math.MaxInt64},
+			want:       CountResult{Objects: 5},
+			wantLimits: []int{0},
+		},
+		{
+			caseName: "refuses a NextAfter that does not advance",
+			strg:     &pagedStorage{stuck: true},
+			wantErr:  "does not advance",
+		},
+		{
+			caseName: "reports a List failure without a partial count",
+			strg:     &pagedStorage{listErr: errors.New("list failed")},
+			wantErr:  "list failed",
+		},
+		{
+			caseName: "refuses a negative UpTo",
+			strg:     &pagedStorage{},
+			opts:     CountOptions{UpTo: -1},
+			wantErr:  "negative",
+		},
+		{
+			caseName: "uses the capability instead of listing",
+			strg:     &counterStorage{res: CountResult{Objects: 7}},
+			want:     CountResult{Objects: 7},
+		},
+		{
+			caseName: "caps a capability that ignores UpTo",
+			strg:     &counterStorage{res: CountResult{Objects: 7}},
+			opts:     CountOptions{UpTo: 3},
+			want:     CountResult{Objects: 3, Truncated: true},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			got, err := Count(t.Context(), tc.strg, tc.opts)
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
+				assert.Zero(t, got)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+			if p, ok := tc.strg.(*pagedStorage); ok {
+				assert.Equal(t, tc.wantLimits, p.limits)
+			}
+		})
+	}
 }

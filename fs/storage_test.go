@@ -196,6 +196,10 @@ func (s *StorageTestSuite) TestS2TestList() {
 	s.Require().NoError(err)
 
 	s.Require().NoError(s2test.TestStorageListDefaultPage(ctx, strg))
+
+	s.Require().NoError(s2test.TestStorageCount(ctx, strg))
+	// Hiding Counter runs the same checks through the List fallback.
+	s.Require().NoError(s2test.TestStorageCount(ctx, struct{ s2.Storage }{strg}))
 }
 
 func (s *StorageTestSuite) TestS2TestListPaging() {
@@ -965,6 +969,90 @@ func (s *StorageTestSuite) TestListWhenThePrefixNamesAnObject() {
 	}
 }
 
+func (s *StorageTestSuite) TestCount() {
+	newFSs := []struct {
+		caseName string
+		newFS    func() fs.FS
+		typ      s2.Type
+	}{
+		{caseName: "memfs", newFS: func() fs.FS { return memfs.New() }, typ: s2.TypeMemFS},
+		{caseName: "osfs", newFS: func() fs.FS { return osfs.DirFS(s.T().TempDir()) }, typ: s2.TypeOSFS},
+	}
+	testCases := []struct {
+		caseName string
+		prefix   string
+		canceled bool
+		want     int64
+		wantErr  error
+	}{
+		{caseName: "everything but the metadata files", want: 4},
+		{caseName: "a partial name", prefix: "dir", want: 3},
+		{caseName: "a directory", prefix: "dir/", want: 2},
+		{caseName: "a name inside the metadata directory's", prefix: "dir/.me", want: 0},
+		{caseName: "a missing directory", prefix: "missing/x", want: 0},
+		{caseName: "an object as a directory", prefix: "a.txt/", want: 0},
+		{caseName: "below an object", prefix: "a.txt/sub/x", want: 0},
+		{caseName: "the metadata directory", prefix: ".meta/", wantErr: s2.ErrInvalidName},
+		{caseName: "a canceled context", canceled: true, wantErr: context.Canceled},
+	}
+	for _, f := range newFSs {
+		for _, tc := range testCases {
+			s.Run(f.caseName+"/"+tc.caseName, func() {
+				strg := NewStorageFS(s2.Config{Type: f.typ}, f.newFS())
+				for _, name := range []string{"a.txt", "dir/b.txt", "dir/sub/c.txt", "dirx.txt"} {
+					s.Require().NoError(strg.Put(context.Background(), s2.NewObjectBytes(name, []byte("x"))))
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+
+				if tc.canceled {
+					cancel()
+				}
+				got, err := s2.Count(ctx, strg, s2.CountOptions{Prefix: tc.prefix})
+				if tc.wantErr != nil {
+					s.Require().ErrorIs(err, tc.wantErr)
+					return
+				}
+				s.Require().NoError(err)
+				s.Equal(s2.CountResult{Objects: tc.want}, got)
+				res, err := strg.List(ctx, s2.ListOptions{Prefix: tc.prefix, Recursive: true})
+				s.Require().NoError(err)
+				s.Len(res.Objects, int(tc.want), "Count must match a recursive List")
+			})
+		}
+	}
+}
+
+// A symlinked directory is unsupported, but Count must still agree with a recursive List, which does not follow it.
+func (s *StorageTestSuite) TestCountDoesNotFollowASymlinkedDirectory() {
+	dir := s.T().TempDir()
+	strg := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(dir))
+	for _, name := range []string{"real/a.txt", "real/b.txt"} {
+		s.Require().NoError(strg.Put(context.Background(), s2.NewObjectBytes(name, []byte("x"))))
+	}
+	s.Require().NoError(os.Symlink(filepath.Join(dir, "real"), filepath.Join(dir, "link")))
+
+	testCases := []struct {
+		caseName string
+		prefix   string
+		want     int64
+	}{
+		{caseName: "inside the link", prefix: "link/", want: 0},
+		{caseName: "the link itself", prefix: "li", want: 1},
+		{caseName: "the real directory", prefix: "real/", want: 2},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			got, err := s2.Count(context.Background(), strg, s2.CountOptions{Prefix: tc.prefix})
+			s.Require().NoError(err)
+			s.Equal(s2.CountResult{Objects: tc.want}, got)
+			res, err := strg.List(context.Background(), s2.ListOptions{Prefix: tc.prefix, Recursive: true})
+			s.Require().NoError(err)
+			s.Len(res.Objects, int(tc.want), "Count must match a recursive List")
+		})
+	}
+}
+
 // A root that is not a directory is a misconfiguration, not an empty bucket:
 // both listing paths must still say so.
 func (s *StorageTestSuite) TestListSaysSoWhenTheRootIsNotADirectory() {
@@ -1000,8 +1088,10 @@ func (s *StorageTestSuite) TestListSaysSoWhenTheRootIsNotADirectory() {
 				_, err := strg.List(context.Background(), s2.ListOptions{Recursive: recursive})
 				s.Require().Errorf(err, "recursive=%v", recursive)
 			}
+			_, err := s2.Count(context.Background(), strg, s2.CountOptions{})
+			s.Require().Error(err, "Count")
 			// Reads stay errors too, not a missing key.
-			_, err := strg.Get(context.Background(), "x")
+			_, err = strg.Get(context.Background(), "x")
 			s.Require().Error(err)
 			s.NotErrorIs(err, s2.ErrNotExist)
 		})
