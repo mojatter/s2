@@ -358,6 +358,71 @@ func TestStorageListDefaultPage(ctx context.Context, strg s2.Storage) error {
 	return nil
 }
 
+// TestStorageCount validates s2.Count against a fixture of its own: names matched by string at any depth, as a recursive List does, and UpTo. It removes the fixture afterwards.
+func TestStorageCount(ctx context.Context, strg s2.Storage) error {
+	const base = "s2test-count"
+	defer func() { _ = strg.DeleteRecursive(ctx, base) }()
+
+	for _, name := range []string{
+		base + ".txt",
+		base + "/image-20260929-1.jpg",
+		base + "/image-20260929-2.jpg",
+		base + "/image-20260930-1.jpg",
+		base + "/sub/a.txt",
+	} {
+		if err := strg.Put(ctx, s2.NewObjectBytes(name, []byte("x"))); err != nil {
+			return fmt.Errorf("Put(%q) failed: %w", name, err)
+		}
+	}
+	// A Sub storage keeps the empty prefix to the fixture.
+	sub, err := strg.Sub(ctx, base)
+	if err != nil {
+		return fmt.Errorf("Sub(%q) failed: %w", base, err)
+	}
+	// Sub hands back the backend itself, so a caller that hid Counter gets the same.
+	if _, ok := strg.(s2.Counter); !ok {
+		sub = struct{ s2.Storage }{sub}
+	}
+
+	var errs []string
+	testCases := []struct {
+		strg s2.Storage
+		opts s2.CountOptions
+		want s2.CountResult
+	}{
+		{strg: strg, opts: s2.CountOptions{Prefix: base}, want: s2.CountResult{Objects: 5}},
+		{strg: strg, opts: s2.CountOptions{Prefix: base + "/"}, want: s2.CountResult{Objects: 4}},
+		{strg: strg, opts: s2.CountOptions{Prefix: base + "/image-20260929"}, want: s2.CountResult{Objects: 2}},
+		{strg: strg, opts: s2.CountOptions{Prefix: base + "/sub/"}, want: s2.CountResult{Objects: 1}},
+		{strg: strg, opts: s2.CountOptions{Prefix: base + "/none"}, want: s2.CountResult{}},
+		{strg: strg, opts: s2.CountOptions{Prefix: base + "/none/"}, want: s2.CountResult{}},
+		{strg: strg, opts: s2.CountOptions{Prefix: base + "/", UpTo: 3}, want: s2.CountResult{Objects: 3, Truncated: true}},
+		{strg: strg, opts: s2.CountOptions{Prefix: base + "/", UpTo: 4}, want: s2.CountResult{Objects: 4}},
+		{strg: strg, opts: s2.CountOptions{Prefix: base + "/image-", UpTo: 1}, want: s2.CountResult{Objects: 1, Truncated: true}},
+		{strg: sub, want: s2.CountResult{Objects: 4}},
+		{strg: sub, opts: s2.CountOptions{Prefix: "image-2026093"}, want: s2.CountResult{Objects: 1}},
+	}
+	for _, tc := range testCases {
+		where := fmt.Sprintf("Count(prefix=%q, upTo=%d)", tc.opts.Prefix, tc.opts.UpTo)
+		if tc.strg == sub {
+			where = "Sub(" + base + ")." + where
+		}
+		got, err := s2.Count(ctx, tc.strg, tc.opts)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s failed: %v", where, err))
+			continue
+		}
+		if got != tc.want {
+			errs = append(errs, fmt.Sprintf("%s = %+v, expected %+v", where, got, tc.want))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("TestStorageCount found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
+	}
+	return nil
+}
+
 // TestStorageGetPut validates that Put writes an object and Get reads it back with its metadata, Content-Type and ETag, and that a failed Put leaves no new key and keeps an existing one.
 func TestStorageGetPut(ctx context.Context, strg s2.Storage, opts ...Option) error {
 	o := newOptions(opts)

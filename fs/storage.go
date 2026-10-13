@@ -362,6 +362,59 @@ func (s *storage) listRecursive(prefix, after string, limit int) (s2.ListResult,
 	return res, nil
 }
 
+var _ s2.Counter = (*storage)(nil)
+
+// Count walks once, entering only directories that match the prefix or lead to it, without the stat and sort a List page costs.
+func (s *storage) Count(ctx context.Context, opts s2.CountOptions) (s2.CountResult, error) {
+	prefix := opts.Prefix
+	if err := validatePrefix(prefix); err != nil {
+		return s2.CountResult{}, err
+	}
+	var res s2.CountResult
+	err := fs.WalkDir(s.fsys, ".", func(name string, d fs.DirEntry, err error) error {
+		if err != nil {
+			// A directory deleted since its parent was read, or a missing root, holds nothing to count.
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Not the walk root, which memfs names ".meta" in a Sub of one; see listRecursive.
+		if name != "." && isMetaDir(d.Name()) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			// Enter a directory that matches the prefix or leads to it; a symlink is no directory here, as in listRecursive.
+			if name != "." && !strings.HasPrefix(name, prefix) && !strings.HasPrefix(prefix, name+"/") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasPrefix(name, prefix) {
+			return nil
+		}
+		res.Objects++
+		if opts.UpTo > 0 && res.Objects > opts.UpTo {
+			res.Truncated = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return s2.CountResult{}, err
+	}
+	if res.Truncated {
+		res.Objects = opts.UpTo
+	}
+	return res, nil
+}
+
 func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 	if err := validateName(name); err != nil {
 		return nil, err

@@ -438,6 +438,8 @@ func (s *StorageTestSuite) TestS2TestList() {
 	s.Require().NoError(err)
 
 	s.Require().NoError(s2test.TestStorageListDefaultPage(ctx, strg))
+
+	s.Require().NoError(s2test.TestStorageCount(ctx, strg))
 }
 
 // TestListStartAfter covers the emulated start-after: the backend pages from

@@ -65,6 +65,10 @@ func (s *AzblobIntegrationSuite) TestList() {
 	s.Require().NoError(s2test.TestStorageListPaging(context.Background(), s.strg))
 }
 
+func (s *AzblobIntegrationSuite) TestCount() {
+	s.Require().NoError(s2test.TestStorageCount(context.Background(), s.strg))
+}
+
 func (s *AzblobIntegrationSuite) TestGetNotExist() {
 	s.Require().NoError(s2test.TestStorageGetNotExist(context.Background(), s.strg))
 }

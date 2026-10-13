@@ -384,6 +384,8 @@ func (s *StorageTestSuite) TestS2TestList() {
 	s.Require().NoError(err)
 
 	s.Require().NoError(s2test.TestStorageListDefaultPage(ctx, strg))
+
+	s.Require().NoError(s2test.TestStorageCount(ctx, strg))
 }
 
 // TestListCursorMapping pins which ListObjectsV2 parameter each cursor field

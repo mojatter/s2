@@ -228,6 +228,76 @@ func readBackETag(ctx context.Context, s Storage, name string) (string, error) {
 	return got.ETag(), nil
 }
 
+// Counter is an optional interface a Storage may satisfy to count faster than paging List; it must report what a recursive List of an unchanging, readable tree reports and may ignore UpTo, which Count caps.
+type Counter interface {
+	Count(ctx context.Context, opts CountOptions) (CountResult, error)
+}
+
+// CountOptions controls a Count call.
+type CountOptions struct {
+	// Prefix selects the names beginning with it, at any depth, as a recursive List does.
+	Prefix string
+	// UpTo stops the count once more than UpTo objects are seen; zero counts all.
+	UpTo int64
+}
+
+// CountResult reports how many objects a Count call saw.
+type CountResult struct {
+	// Objects is the exact count, or UpTo when Truncated.
+	Objects int64
+	// Truncated reports that more than UpTo objects exist.
+	Truncated bool
+}
+
+// countPageSize is the page size every bundled backend lists by default.
+const countPageSize = 1000
+
+// Count counts the objects on s matching opts, via Counter when s has it, else by paging a recursive List; a failure reports no partial count.
+func Count(ctx context.Context, s Storage, opts CountOptions) (CountResult, error) {
+	if opts.UpTo < 0 {
+		return CountResult{}, fmt.Errorf("s2: negative CountOptions.UpTo: %d", opts.UpTo)
+	}
+	var (
+		res CountResult
+		err error
+	)
+	if c, ok := s.(Counter); ok {
+		res, err = c.Count(ctx, opts)
+	} else {
+		res, err = countByList(ctx, s, opts)
+	}
+	if err != nil {
+		return CountResult{}, err
+	}
+	if opts.UpTo > 0 && res.Objects > opts.UpTo {
+		return CountResult{Objects: opts.UpTo, Truncated: true}, nil
+	}
+	return res, nil
+}
+
+// countByList pages through a recursive List, asking for one object past UpTo so the last page tells whether more exist.
+func countByList(ctx context.Context, s Storage, opts CountOptions) (CountResult, error) {
+	var res CountResult
+	for after := ""; ; {
+		lopts := ListOptions{Prefix: opts.Prefix, After: after, Recursive: true}
+		if opts.UpTo > 0 && opts.UpTo-res.Objects < countPageSize {
+			lopts.Limit = int(opts.UpTo - res.Objects + 1)
+		}
+		page, err := s.List(ctx, lopts)
+		if err != nil {
+			return CountResult{}, err
+		}
+		res.Objects += int64(len(page.Objects))
+		if page.NextAfter == "" || (opts.UpTo > 0 && res.Objects > opts.UpTo) {
+			return res, nil
+		}
+		if page.NextAfter == after {
+			return CountResult{}, fmt.Errorf("s2: List returned a NextAfter that does not advance: %q", after)
+		}
+		after = page.NextAfter
+	}
+}
+
 // NewStorageFunc is a function that creates a new storage.
 type NewStorageFunc func(ctx context.Context, cfg Config) (Storage, error)
 
