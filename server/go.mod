@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.1
 	github.com/chromedp/cdproto v0.157.8
 	github.com/chromedp/chromedp v0.21.0
-	github.com/mojatter/s2 v0.22.0
+	github.com/mojatter/s2 v0.22.1
 	github.com/stretchr/testify v1.12.1
 )
 
