@@ -3237,3 +3237,61 @@ func TestFailedWriteKeepsDirsWithoutRename(t *testing.T) {
 		})
 	}
 }
+
+// TestGetReadsOneVersion checks a Put landing while Get reads x leaves Get with one version's length, ETag and Content-Type (#376).
+func TestGetReadsOneVersion(t *testing.T) {
+	ctx := context.Background()
+	testCases := []struct {
+		caseName string
+		statOf   string // the Put starts once Get has statted this, if set
+		openOf   string // or just before Get opens this
+	}{
+		{caseName: "after the body's stat", statOf: "x"},
+		{caseName: "before the metadata file's open", openOf: ".meta/x"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			spy := newSpyLocker()
+			base := memfs.New()
+			fsys := wfs.DelegateFS(base)
+			strg := NewStorageFS(s2.Config{Type: s2.TypeMemFS}, fsys, WithNameLocker(spy))
+			require.NoError(t, putText(ctx, strg, "x", "aaa", nil))
+
+			// race starts the Put once and returns when it has finished or queued behind Get's lock.
+			var armed atomic.Bool
+			putErr := make(chan error, 1)
+			race := func() {
+				if !armed.CompareAndSwap(true, false) {
+					return
+				}
+				go func() { putErr <- putText(ctx, strg, "x", "bbbbbb", nil) }()
+				require.Eventually(t, func() bool { return queued(spy.nameLocker, "X") > 0 || len(putErr) > 0 },
+					5*time.Second, time.Millisecond, "the Put neither queued on X nor finished")
+			}
+			fsys.StatFunc = func(name string) (fs.FileInfo, error) {
+				info, err := base.Stat(name)
+				if name == tc.statOf {
+					race()
+				}
+				return info, err
+			}
+			fsys.OpenFunc = func(name string) (fs.File, error) {
+				if name == tc.openOf {
+					race()
+				}
+				return base.Open(name)
+			}
+
+			armed.Store(true)
+			obj, err := strg.Get(ctx, "x")
+			require.NoError(t, err)
+			require.False(t, armed.Load(), "the race never ran")
+			assert.Equal(t, uint64(3), obj.Length())
+			assert.Equal(t, fmt.Sprintf("%q", fmt.Sprintf("%x", md5.Sum([]byte("aaa")))), obj.ETag())
+			assert.Equal(t, "text/a", obj.ContentType())
+
+			require.NoError(t, <-putErr)
+			assert.Equal(t, "bbbbbb", readConsistent(t, strg, "x"))
+		})
+	}
+}

@@ -24,7 +24,7 @@ type SharedNameLocker interface {
 	SLock(ctx context.Context, name string) (unlock func(), err error)
 }
 
-// WithNameLocker makes the storage, and every Sub of it, serialize writes through l.
+// WithNameLocker makes the storage, and every Sub of it, serialize writes through l, and Get too when l implements SharedNameLocker.
 func WithNameLocker(l NameLocker) Option {
 	return func(s *storage) { s.lk = l }
 }
@@ -216,11 +216,31 @@ func (s *storage) lockNames(ctx context.Context, names []string, fn func() error
 	return fn()
 }
 
+// slockName runs fn with name held shared and the root untouched; a locker without SLock is not asked, so fn runs unlocked.
+func (s *storage) slockName(ctx context.Context, name string, fn func() error) error {
+	sl, ok := s.lk.(SharedNameLocker)
+	if !ok {
+		return fn()
+	}
+	unlock, err := sl.SLock(ctx, s.qualify(name))
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	return fn()
+}
+
+// qualify qualifies name by the storage's prefix and folds it, as every lock call names it.
+func (s *storage) qualify(name string) string {
+	return foldName(path.Join(s.prefix, name))
+}
+
 // qualifiedNames qualifies names by the storage's prefix and folds them, sorted and without duplicates.
 func (s *storage) qualifiedNames(names []string) []string {
 	keys := make([]string, 0, len(names))
 	for _, name := range names {
-		keys = append(keys, foldName(path.Join(s.prefix, name)))
+		keys = append(keys, s.qualify(name))
 	}
 	slices.Sort(keys)
 	return slices.Compact(keys)

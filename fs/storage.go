@@ -366,7 +366,15 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 	if err := validateName(name); err != nil {
 		return nil, err
 	}
-	return s.get(name)
+	// The shared lock keeps a Put from landing between the stat and the metadata read.
+	var obj *object
+	if err := s.slockName(ctx, name, func() (err error) {
+		obj, err = s.get(name)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return obj, nil
 }
 
 func (s *storage) get(name string) (*object, error) {
@@ -937,14 +945,15 @@ func (s *storage) removeDir(dir, prefix string) error {
 	return nil
 }
 
-func (s *storage) SignedURL(ctx context.Context, opts s2.SignedURLOptions) (string, error) {
+func (s *storage) SignedURL(_ context.Context, opts s2.SignedURLOptions) (string, error) {
 	if err := validateName(opts.Name); err != nil {
 		return "", err
 	}
 	if opts.Method != "" && opts.Method != s2.SignedURLGet {
 		return "", fmt.Errorf("fs storage: unsupported signed URL method %q", opts.Method)
 	}
-	if _, err := s.Get(ctx, opts.Name); err != nil {
+	// Only existence matters here, so the unlocked get serves.
+	if _, err := s.get(opts.Name); err != nil {
 		return "", err
 	}
 	return url.JoinPath(s.cfg.SignedURL, opts.Name)
