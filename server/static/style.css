@@ -119,7 +119,8 @@ h1, h2, h3 {
   position: sticky;
   top: 0;
   height: 100vh;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .sidebar-header {
@@ -1148,7 +1149,6 @@ tr:hover td {
     background-color: var(--surface);
     transform: translateX(-100%);
     transition: transform 0.2s ease;
-    overflow-y: auto;
   }
 
   .layout:not(.layout--sidebar-collapsed) .sidebar {
