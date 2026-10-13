@@ -213,11 +213,11 @@ An `osfs` or `memfs` object is two files, its body and its metadata file, each r
 - The lock is shared by every storage opened on the same directory in one process, whatever path spells it, symlinks and case included, and by every `Sub` of them. It is not shared by nested roots (`/data` and `/data/b`), by a wrapped filesystem or an `fs.Sub` passed to `fs.NewStorageFS`, or by other processes. To coordinate a wrapped filesystem or other processes, give each storage the same `fs.NameLocker`, such as one backed by `flock`, with `fs.WithNameLocker`; nested roots and an `fs.Sub` see different names for one file, so a locker shared across them must not implement `SLock`; a storage built by `s2.NewStorage` gets one when its type is registered again with `s2.RegisterNewStorageFunc`.
 - A `NameLocker` sees names relative to the storage it was given to, a `Sub` adding its prefix, with case folded; share one only among storages of the same root. One that also implements `fs.SharedNameLocker` gets the per-key scheme above; one that does not is only asked for `"."`, which then serializes every write.
 - Keys that differ only in case lock as one, on every filesystem. Keys that differ only in Unicode normalization (a composed and a decomposed `é`) or in full case folding (`ß` and `SS`) lock separately, although a case- or normalization-insensitive filesystem such as APFS stores each pair as one file.
-- Reads take no lock: a `Get` racing a `Put` can return one version's length and modification time with another version's ETag or Content-Type. Once a `Put` has replaced the body, `Open` and `OpenRange` on the object `Get` returned fail rather than serve another body, and a `Delete` since `Get` makes them fail with `s2.ErrNotExist`; a replacement of the same length within the filesystem's modification-time granularity goes unnoticed. On a filesystem without rename, a body is read in full into a temp file and then copied over the key, or written in place when the filesystem cannot remove files either, so a read racing the copy can see a body still being written.
+- `Get` holds its key shared, so its length, modification time, ETag and Content-Type come from one version; it does not take the root, so it never waits behind a prune or the directory removals of a `DeleteRecursive`, only behind a write holding its own key, which a `DeleteRecursive` takes for each object in turn, and a `Get` racing a `DeleteRecursive` of its own directory can still report a body without its metadata. With a `NameLocker` without `SLock` it takes no lock, and a `Get` racing a `Put` can mix two versions. `List` and the other reads take no lock, so an object `List` returned can report another version's ETag or Content-Type. Once a `Put` has replaced the body, `Open` and `OpenRange` on the object `Get` returned fail rather than serve another body, and a `Delete` since `Get` makes them fail with `s2.ErrNotExist`; a replacement of the same length within the filesystem's modification-time granularity goes unnoticed. On a filesystem without rename, a body is read in full into a temp file and then copied over the key, or written in place when the filesystem cannot remove files either, so a read racing the copy can see a body still being written.
 - A `Put` racing a `DeleteRecursive` of its directory fails or lands, depending on which reaches the directory first.
 - Writing `a` and `a/x` at once leaves one of them; the other fails with `s2.ErrInvalidName`.
 - `Delete` of a name that is a directory, a prefix rather than a key, removes nothing and succeeds.
-- `PutMetadata` syncs the metadata file under its key's lock, and on a filesystem without rename a write holds its key while it streams.
+- `PutMetadata` syncs the metadata file under its key's lock, and on a filesystem without rename a write holds its key while it streams, so a `Get` of that key waits for the whole body.
 - `fs.MigrateMeta` takes no lock; run it while nothing writes.
 - A symlinked directory inside a root is not supported: a listing shows it as an object, and deleting an object under it removes the link.
 
@@ -234,9 +234,10 @@ Each row is one or more sections; within a section the root is taken first, then
 | `DeleteRecursive` | `SLock(".")` + `Lock(name)` per object, then `Lock(".")` per directory and once more to prune |
 | Pruning after `Delete`, `Move` or a failed write, when a directory emptied | `Lock(".")` |
 | A failed write's cleanup | `SLock(".")` + `Lock(name)` |
-| `Get`, `Exists`, `List`, `SignedURL` | nothing |
+| `Get` | `SLock(name)`; nothing for a `NameLocker` without `SLock` |
+| `Exists`, `List`, `SignedURL` | nothing |
 
-On a filesystem without rename, `Put`, `Upload` and `Copy` write in their first section and take no second. A `NameLocker` without `SLock` gets `Lock(".")` alone in place of every row's calls.
+On a filesystem without rename, `Put`, `Upload` and `Copy` write in their first section and take no second. A `NameLocker` without `SLock` gets `Lock(".")` alone in place of every write's calls.
 
 ## Content-Type and ETag
 
