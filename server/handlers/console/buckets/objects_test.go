@@ -1328,7 +1328,7 @@ var tinyPNG = []byte{
 	0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 }
 
-// newBrowser serves the console and starts a headless Chrome on it, both closed when the test ends; skipped with `go test -short`.
+// newBrowser serves the console and starts a headless Chrome on it, both closed when the test ends; the test fails on any exception the page left uncaught by then; skipped with `go test -short`.
 func (s *ObjectsTestSuite) newBrowser() (context.Context, string) {
 	s.T().Helper()
 	if testing.Short() {
@@ -1359,10 +1359,52 @@ func (s *ObjectsTestSuite) newBrowser() (context.Context, string) {
 	s.T().Cleanup(cancel)
 	// Start Chrome before the step timeout, since a timeout on the first Do would bound the browser's lifetime too.
 	s.Require().NoError(chromedp.Do(browserCtx), "start Chrome")
+	// Subscribe on a context the step timeout does not bound, so every message of the test reaches the check below.
+	consoleCtx, cancelConsole := context.WithCancel(browserCtx)
+	s.T().Cleanup(cancelConsole)
+	messages := chromedp.Console(consoleCtx)
 	// 30s covers the test's steps.
-	browserCtx, cancelTimeout := context.WithTimeout(browserCtx, 30*time.Second)
+	stepCtx, cancelTimeout := context.WithTimeout(browserCtx, 30*time.Second)
 	s.T().Cleanup(cancelTimeout)
-	return browserCtx, ts.URL
+	t := s.T()
+	// Registered last, so it runs before the browser closes: fail on any exception nothing caught, up to a sentinel logged now.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(browserCtx, 10*time.Second)
+		defer cancel()
+
+		stop := context.AfterFunc(ctx, cancelConsole)
+		defer stop()
+
+		// htmx removes htmx-settling in the task that fires afterSettle, so its handlers have run once the classes are gone.
+		require.NoError(t, chromedp.Do(ctx, chromedp.WaitNotPresent(chromedp.CSS(".htmx-request, .htmx-swapping, .htmx-settling"))), "wait for htmx to settle (a request still in flight or an open alert/confirm dialog blocks it)")
+		require.NoError(t, chromedp.Do(ctx, chromedp.Evaluate[chromedp.Void](`console.log("sentinel")`)), "log the sentinel (an open alert/confirm dialog blocks it)")
+		var exceptions []string
+		seen := false
+		for m, err := range messages {
+			// The deadline cancels the subscription, so its own error would only say "canceled".
+			require.NoError(t, ctx.Err(), "wait for the sentinel")
+			require.NoError(t, err, "read the console")
+			if m.Type == chromedp.ConsoleLog && m.Text == "sentinel" {
+				seen = true
+				break
+			}
+			if m.IsException() {
+				text := m.String()
+				if m.URL != "" {
+					// The protocol counts lines from 0.
+					text += fmt.Sprintf(" (%s:%d)", m.URL, m.Line+1)
+				}
+				exceptions = append(exceptions, text)
+			}
+		}
+		// The iterator can end on the closed subscription without yielding the deadline's error.
+		if !seen {
+			require.NoError(t, ctx.Err(), "wait for the sentinel")
+		}
+		require.True(t, seen, "the console closed before the sentinel")
+		require.Empty(t, exceptions, "uncaught exceptions on the page")
+	})
+	return stepCtx, ts.URL
 }
 
 // TestBrowserShowsWhyAnUploadWasRefused uploads past the size limit in Chrome and checks the reason reaches an alert, once per pick (#340).
@@ -1481,22 +1523,6 @@ func (s *ObjectsTestSuite) TestGalleryView_ThumbnailAndPersistenceAcrossReload()
 // TestBrowserOverviewRunsTheObjectsScript checks in Chrome that the objects script, loaded on every page, throws nothing on the overview, which has no object views.
 func (s *ObjectsTestSuite) TestBrowserOverviewRunsTheObjectsScript() {
 	browserCtx, consoleURL := s.newBrowser()
-
-	// Subscribe before the navigation so no exception thrown during the load is missed.
-	messages := chromedp.Console(browserCtx)
+	// newBrowser fails the test on any uncaught exception.
 	s.Require().NoError(chromedp.Do(browserCtx, chromedp.Navigate(consoleURL+"/")))
-	// The sentinel follows every message of the load, since the iterator keeps the order.
-	s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`console.log("sentinel")`)))
-
-	var exceptions []string
-	for m, err := range messages {
-		s.Require().NoError(err)
-		if m.Type == chromedp.ConsoleLog && m.Text == "sentinel" {
-			break
-		}
-		if m.IsException() {
-			exceptions = append(exceptions, m.String())
-		}
-	}
-	s.Empty(exceptions)
 }
