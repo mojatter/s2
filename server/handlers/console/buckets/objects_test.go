@@ -1573,3 +1573,58 @@ func (s *ObjectsTestSuite) TestBrowserScrollsTheSidebarToTheLastBucket() {
 		})
 	}
 }
+
+// TestBrowserKeepsTheNameColumnReadable checks in Chrome that the object table hides metadata columns by its own width, so Name stays readable beside the sidebar (#394).
+func (s *ObjectsTestSuite) TestBrowserKeepsTheNameColumnReadable() {
+	s.createBucket("cols")
+	s.putObject("cols", "a-long-object-name-that-runs-well-past-sixty-characters-in-the-list.txt", "x")
+	// The visible headers, the cells shown in the object's row, and the room for text inside the Name header.
+	const measure = `(() => {
+		const shown = el => getComputedStyle(el).display !== 'none';
+		const ths = [...document.querySelectorAll('#list-view th')].filter(shown);
+		const tds = [...document.querySelectorAll('#list-view tbody tr:last-child td')].filter(shown);
+		const st = getComputedStyle(ths[0]);
+		const text = ths[0].getBoundingClientRect().width - parseFloat(st.paddingLeft) - parseFloat(st.paddingRight);
+		return {headers: ths.map(th => th.textContent.trim()), cells: tds.length, text: text};
+	})()`
+	type layout struct {
+		Headers []string `json:"headers"`
+		Cells   int      `json:"cells"`
+		Text    float64  `json:"text"`
+	}
+	testCases := []struct {
+		caseName    string
+		width       int64
+		collapsed   bool
+		wantHeaders []string
+		minText     float64
+	}{
+		{caseName: "wide desktop", width: 1280, wantHeaders: []string{"Name", "Size", "Last Modified", "Actions"}, minText: 140},
+		{caseName: "desktop just above the breakpoint", width: 901, wantHeaders: []string{"Name", "Size", "Actions"}, minText: 140},
+		{caseName: "collapsed sidebar just above the breakpoint", width: 901, collapsed: true, wantHeaders: []string{"Name", "Size", "Last Modified", "Actions"}, minText: 140},
+		// The table is 608px beside the open sidebar, under the 650px that hides Last Modified.
+		{caseName: "laptop", width: 1024, wantHeaders: []string{"Name", "Size", "Actions"}, minText: 140},
+		{caseName: "drawer tier", width: 640, wantHeaders: []string{"Name", "Size", "Actions"}, minText: 140},
+		// The table is 448px, under the 470px that hides Size.
+		{caseName: "small phone landscape", width: 480, wantHeaders: []string{"Name", "Actions"}, minText: 140},
+		// Only Actions is left beside Name, so its text room follows the window.
+		{caseName: "phone", width: 375, wantHeaders: []string{"Name", "Actions"}, minText: 120},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			browserCtx, consoleURL := s.newBrowser()
+			s.Require().NoError(chromedp.Do(browserCtx,
+				chromedp.EmulateViewport(tc.width, 800),
+				chromedp.Navigate(consoleURL+"/"),
+				chromedp.Evaluate[chromedp.Void](fmt.Sprintf(`localStorage.setItem('s2-sidebar-collapsed', '%t')`, tc.collapsed)),
+				chromedp.Navigate(consoleURL+"/buckets/cols"),
+				chromedp.WaitVisible(chromedp.CSS(`#list-view th`)),
+			))
+			got, err := chromedp.Run(browserCtx, chromedp.Evaluate[layout](measure))
+			s.Require().NoError(err)
+			s.Equal(tc.wantHeaders, got.Headers)
+			s.Equal(len(tc.wantHeaders), got.Cells, "the row must hide the same columns as the header")
+			s.GreaterOrEqual(got.Text, tc.minText, "the Name column must keep room for a name")
+		})
+	}
+}

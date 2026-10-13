@@ -541,6 +541,7 @@ h1, h2, h3 {
    Table
    ===================== */
 .object-table-container {
+  container-type: inline-size;
   background-color: var(--surface);
   border-radius: 16px;
   overflow-x: auto;
@@ -1260,16 +1261,21 @@ tr:hover td {
   }
 }
 
-/* Progressively hide table metadata columns at narrow widths so the Name
-   column has enough room (table-layout: fixed otherwise collapses it to 0). */
-@media (max-width: 700px) {
+/* Progressively hide table metadata columns as the table narrows so the Name
+   column keeps about 140px inside its padding, about 105px of name after the
+   icon (table-layout: fixed otherwise collapses it to 0). The table's width,
+   not the window's, decides: the sidebar takes 320px above 900px and 56px when
+   collapsed.
+   650 ≈ 140 + 48 Name padding + 120 Size + 180 Last Modified + 160 Actions;
+   470 ≈ 140 + 48 + 120 + 160. */
+@container (max-width: 650px) {
   .object-table-container th:nth-child(3),
   .object-table-container td:nth-child(3) {
     display: none;
   }
 }
 
-@media (max-width: 500px) {
+@container (max-width: 470px) {
   .object-table-container th:nth-child(2),
   .object-table-container td:nth-child(2) {
     display: none;
