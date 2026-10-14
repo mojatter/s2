@@ -29,9 +29,6 @@ type object struct {
 	generation int64
 }
 
-// errModified is what Open returns once the key holds another generation than the one Get or List saw.
-var errModified = errors.New("object modified since Get")
-
 func (o *object) Name() string {
 	return o.name
 }
@@ -50,14 +47,14 @@ func (o *object) read(offset, length int64) (io.ReadCloser, error) {
 	rc, generation, err := obj.newRangeReader(context.Background(), offset, length, o.generation)
 	var apiErr *googleapi.Error
 	if errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed {
-		return nil, fmt.Errorf("%w: %s: %w", errModified, o.name, err)
+		return nil, fmt.Errorf("%w: %s: %w", s2.ErrModified, o.name, err)
 	}
 	if err != nil {
 		return nil, mapNotExist(err, o.name)
 	}
 	if o.generation != 0 && generation != 0 && generation != o.generation {
 		_ = rc.Close()
-		return nil, fmt.Errorf("%w: %s", errModified, o.name)
+		return nil, fmt.Errorf("%w: %s", s2.ErrModified, o.name)
 	}
 	return rc, nil
 }

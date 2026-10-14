@@ -127,13 +127,13 @@ func (s *ObjectTestSuite) TestObjectOpenSinceGet() {
 		wantErr               error
 	}{
 		{caseName: "unchanged", wantBody: "short"},
-		{caseName: "replaced", change: func(m *mockGCSClient) { m.put("my-bucket", "k", []byte("a longer body"), nil) }, wantErr: errModified},
-		{caseName: "replaced on an endpoint that ignores ifGenerationMatch", change: func(m *mockGCSClient) { m.put("my-bucket", "k", []byte("a longer body"), nil) }, ignoreGenerationMatch: true, wantErr: errModified},
+		{caseName: "replaced", change: func(m *mockGCSClient) { m.put("my-bucket", "k", []byte("a longer body"), nil) }, wantErr: s2.ErrModified},
+		{caseName: "replaced on an endpoint that ignores ifGenerationMatch", change: func(m *mockGCSClient) { m.put("my-bucket", "k", []byte("a longer body"), nil) }, ignoreGenerationMatch: true, wantErr: s2.ErrModified},
 		{caseName: "deleted", change: func(m *mockGCSClient) { m.del("my-bucket", "k") }, wantErr: s2.ErrNotExist},
 		{caseName: "deleted and recreated", change: func(m *mockGCSClient) {
 			m.del("my-bucket", "k")
 			m.put("my-bucket", "k", []byte("a longer body"), nil)
-		}, wantErr: errModified},
+		}, wantErr: s2.ErrModified},
 	}
 	for _, tc := range testCases {
 		for _, via := range []string{"Get", "List"} {

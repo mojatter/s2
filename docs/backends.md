@@ -97,7 +97,7 @@ As JSON:
 
 When `S3Config` is nil or all fields are empty, the standard AWS SDK credential chain is used.
 
-`Open` and `OpenRange` read only the version `Get` or `List` saw: they send its ETag as If-Match and compare the ETag of the response, so a key replaced since then fails rather than serving another body. A metadata update that gives the object a new ETag fails them too, which happens for an object whose ETag is not the MD5 of its body, such as one uploaded in parts or stored with SSE-KMS or SSE-C.
+`Open` and `OpenRange` read only the version `Get` or `List` saw: they send its ETag as If-Match and compare the ETag of the response, so a key replaced since then fails with `s2.ErrModified` rather than serving another body. A metadata update that gives the object a new ETag fails them too, which happens for an object whose ETag is not the MD5 of its body, such as one uploaded in parts or stored with SSE-KMS or SSE-C.
 
 ## GCS
 
@@ -139,7 +139,7 @@ As JSON:
 |-------|-------------|
 | `credentials_file` | Path to a service account JSON key file |
 
-`Open` and `OpenRange` read only the generation `Get` or `List` saw, so a key replaced since then fails rather than serving another body. A metadata update keeps the generation and does not affect them.
+`Open` and `OpenRange` read only the generation `Get` or `List` saw, so a key replaced since then fails with `s2.ErrModified` rather than serving another body. A metadata update keeps the generation and does not affect them.
 
 ## Azure Blob Storage
 
@@ -178,7 +178,7 @@ As JSON:
 
 Authentication priority: `connection_string` > `account_name`+`account_key` > DefaultAzureCredential.
 
-`Open` and `OpenRange` read only the version `Get` or `List` saw, by its native ETag, so a blob replaced since then fails rather than serving another body. Azure gives a blob a new ETag on every metadata update, so one since `Get` or `List` fails them too.
+`Open` and `OpenRange` read only the version `Get` or `List` saw, by its native ETag, so a blob replaced since then fails with `s2.ErrModified` rather than serving another body. Azure gives a blob a new ETag on every metadata update, so one since `Get` or `List` fails them too.
 
 ## Object names
 
@@ -213,7 +213,7 @@ An `osfs` or `memfs` object is two files, its body and its metadata file, each r
 - The lock is shared by every storage opened on the same directory in one process, whatever path spells it, symlinks and case included, and by every `Sub` of them. It is not shared by nested roots (`/data` and `/data/b`), by a wrapped filesystem or an `fs.Sub` passed to `fs.NewStorageFS`, or by other processes. To coordinate a wrapped filesystem or other processes, give each storage the same `fs.NameLocker`, such as one backed by `flock`, with `fs.WithNameLocker`; nested roots and an `fs.Sub` see different names for one file, so a locker shared across them must not implement `SLock`; a storage built by `s2.NewStorage` gets one when its type is registered again with `s2.RegisterNewStorageFunc`.
 - A `NameLocker` sees names relative to the storage it was given to, a `Sub` adding its prefix, with case folded; share one only among storages of the same root. One that also implements `fs.SharedNameLocker` gets the per-key scheme above; one that does not is only asked for `"."`, which then serializes every write.
 - Keys that differ only in case lock as one, on every filesystem. Keys that differ only in Unicode normalization (a composed and a decomposed `é`) or in full case folding (`ß` and `SS`) lock separately, although a case- or normalization-insensitive filesystem such as APFS stores each pair as one file.
-- `Get` holds its key shared, so its length, modification time, ETag and Content-Type come from one version; it does not take the root, so it never waits behind a prune or the directory removals of a `DeleteRecursive`, only behind a write holding its own key, which a `DeleteRecursive` takes for each object in turn, and a `Get` racing a `DeleteRecursive` of its own directory can still report a body without its metadata. With a `NameLocker` without `SLock` it takes no lock, and a `Get` racing a `Put` can mix two versions. `List` and the other reads take no lock, so an object `List` returned can report another version's ETag or Content-Type. Once a `Put` has replaced the body, `Open` and `OpenRange` on the object `Get` returned fail rather than serve another body, and a `Delete` since `Get` makes them fail with `s2.ErrNotExist`; a replacement of the same length within the filesystem's modification-time granularity goes unnoticed. On a filesystem without rename, a body is read in full into a temp file and then copied over the key, or written in place when the filesystem cannot remove files either, so a read racing the copy can see a body still being written.
+- `Get` holds its key shared, so its length, modification time, ETag and Content-Type come from one version; it does not take the root, so it never waits behind a prune or the directory removals of a `DeleteRecursive`, only behind a write holding its own key, which a `DeleteRecursive` takes for each object in turn, and a `Get` racing a `DeleteRecursive` of its own directory can still report a body without its metadata. With a `NameLocker` without `SLock` it takes no lock, and a `Get` racing a `Put` can mix two versions. `List` and the other reads take no lock, so an object `List` returned can report another version's ETag or Content-Type. Once a `Put` has replaced the body, `Open` and `OpenRange` on the object `Get` returned fail with `s2.ErrModified` rather than serve another body, and a `Delete` since `Get` makes them fail with `s2.ErrNotExist`; a replacement of the same length within the filesystem's modification-time granularity goes unnoticed. On a filesystem without rename, a body is read in full into a temp file and then copied over the key, or written in place when the filesystem cannot remove files either, so a read racing the copy can see a body still being written.
 - A `Put` racing a `DeleteRecursive` of its directory fails or lands, depending on which reaches the directory first.
 - Writing `a` and `a/x` at once leaves one of them; the other fails with `s2.ErrInvalidName`.
 - `Delete` of a name that is a directory, a prefix rather than a key, removes nothing and succeeds.

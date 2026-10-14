@@ -127,13 +127,13 @@ func (s *ObjectTestSuite) TestObjectOpenSinceGet() {
 		wantErr               error
 	}{
 		{caseName: "unchanged", wantBody: "short"},
-		{caseName: "replaced", change: func(m *mockAzblobClient) { m.put("my-container", "k", []byte("a longer body"), nil) }, wantErr: errModified},
+		{caseName: "replaced", change: func(m *mockAzblobClient) { m.put("my-container", "k", []byte("a longer body"), nil) }, wantErr: s2.ErrModified},
 		{caseName: "deleted", change: func(m *mockAzblobClient) { m.del("my-container", "k") }, wantErr: s2.ErrNotExist},
 		{caseName: "deleted on a service that answers 412", change: func(m *mockAzblobClient) { m.del("my-container", "k") }, preconditionOnMissing: true, wantErr: s2.ErrNotExist},
 		{caseName: "deleted and recreated", change: func(m *mockAzblobClient) {
 			m.del("my-container", "k")
 			m.put("my-container", "k", []byte("a longer body"), nil)
-		}, wantErr: errModified},
+		}, wantErr: s2.ErrModified},
 	}
 	for _, tc := range testCases {
 		for _, via := range []string{"Get", "List"} {

@@ -276,5 +276,9 @@ func s2ErrorToS3Error(err error) (string, string, int) {
 	if errors.Is(err, server.ErrNoSuchUpload) {
 		return "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound
 	}
+	// A 500 the client's SDK retries; the retry sees the key's current version.
+	if errors.Is(err, s2.ErrModified) {
+		return "InternalError", "The object was modified while it was being read. Please try again.", http.StatusInternalServerError
+	}
 	return "InternalError", err.Error(), http.StatusInternalServerError
 }

@@ -228,6 +228,21 @@ func (s *StorageTestSuite) TestS2TestGetNotExist() {
 	s.Require().NoError(s2test.TestStorageGetNotExist(context.Background(), strg))
 }
 
+func (s *StorageTestSuite) TestS2TestOpenSinceGet() {
+	testCases := []struct {
+		caseName string
+		strg     s2.Storage
+	}{
+		{caseName: "memfs", strg: NewStorageMem(s2.Config{})},
+		{caseName: "osfs", strg: NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(s.T().TempDir()))},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.Require().NoError(s2test.TestStorageOpenSinceGet(context.Background(), tc.strg))
+		})
+	}
+}
+
 func (s *StorageTestSuite) TestS2TestExists() {
 	strg := NewStorageMem(s2.Config{})
 	s.Require().NoError(s2test.TestStorageExists(context.Background(), strg))

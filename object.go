@@ -16,9 +16,11 @@ type Object interface {
 	Name() string
 	// Open opens the object for reading and returns the reader stream.
 	// The caller is responsible for closing the returned io.ReadCloser.
+	// From a Storage, it fails with ErrModified once the key holds another version than Get or List saw, and with ErrNotExist once the key is gone.
 	Open() (io.ReadCloser, error)
 	// OpenRange opens the object for reading the specified range and returns the reader stream.
 	// The caller is responsible for closing the returned io.ReadCloser.
+	// It fails as Open does.
 	OpenRange(offset, length uint64) (io.ReadCloser, error)
 	// Length returns the length of the object in bytes.
 	Length() uint64

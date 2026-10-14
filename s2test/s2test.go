@@ -423,6 +423,106 @@ func TestStorageCount(ctx context.Context, strg s2.Storage) error {
 	return nil
 }
 
+// TestStorageOpenSinceGet validates that Open and OpenRange of an object from Get or List fail with s2.ErrModified once its key holds another version, and with s2.ErrNotExist once it is deleted.
+func TestStorageOpenSinceGet(ctx context.Context, strg s2.Storage) error {
+	const name = "s2test-open-since-get.txt"
+	defer func() { _ = strg.Delete(ctx, name) }()
+
+	var errs []string
+	testCases := []struct {
+		caseName string
+		change   func() error
+		want     error
+	}{
+		{caseName: "unchanged", change: func() error { return nil }},
+		// Another length, so a backend comparing size and mtime notices it within the mtime's granularity.
+		{caseName: "replaced", change: func() error { return strg.Put(ctx, s2.NewObjectBytes(name, []byte("a longer body"))) }, want: s2.ErrModified},
+		{caseName: "deleted", change: func() error { return strg.Delete(ctx, name) }, want: s2.ErrNotExist},
+		{caseName: "deleted and recreated", change: func() error {
+			if err := strg.Delete(ctx, name); err != nil {
+				return err
+			}
+			return strg.Put(ctx, s2.NewObjectBytes(name, []byte("a longer body")))
+		}, want: s2.ErrModified},
+	}
+	lookups := []struct {
+		via    string
+		lookup func() (s2.Object, error)
+	}{
+		{via: "Get", lookup: func() (s2.Object, error) { return strg.Get(ctx, name) }},
+		{via: "List", lookup: func() (s2.Object, error) {
+			res, err := strg.List(ctx, s2.ListOptions{Prefix: name, Recursive: true})
+			if err != nil {
+				return nil, err
+			}
+			if len(res.Objects) != 1 || res.Objects[0].Name() != name {
+				return nil, fmt.Errorf("listed %d objects, expected only %q", len(res.Objects), name)
+			}
+			return res.Objects[0], nil
+		}},
+	}
+	for _, l := range lookups {
+		for _, tc := range testCases {
+			if err := checkOpenSinceLookup(ctx, strg, name, l.via+"/"+tc.caseName, l.lookup, tc.change, tc.want, &errs); err != nil {
+				return err
+			}
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("TestStorageOpenSinceGet found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
+	}
+	return nil
+}
+
+// checkOpenSinceLookup writes name, looks it up, applies change, then opens the looked-up object; it returns an error only when the setup fails.
+func checkOpenSinceLookup(ctx context.Context, strg s2.Storage, name, caseName string, lookup func() (s2.Object, error), change func() error, want error, errs *[]string) error {
+	if err := strg.Put(ctx, s2.NewObjectBytes(name, []byte("body"))); err != nil {
+		return fmt.Errorf("%s: Put(%q) failed: %w", caseName, name, err)
+	}
+	obj, err := lookup()
+	if err != nil {
+		return fmt.Errorf("%s: looking up %q failed: %w", caseName, name, err)
+	}
+	if err := change(); err != nil {
+		return fmt.Errorf("%s: changing %q failed: %w", caseName, name, err)
+	}
+	opens := []struct {
+		call string
+		open func() (io.ReadCloser, error)
+		body string
+	}{
+		{call: "Open()", open: obj.Open, body: "body"},
+		{call: "OpenRange(0, 2)", open: func() (io.ReadCloser, error) { return obj.OpenRange(0, 2) }, body: "bo"},
+		{call: "OpenRange(1, 2)", open: func() (io.ReadCloser, error) { return obj.OpenRange(1, 2) }, body: "od"},
+	}
+	for _, o := range opens {
+		rc, err := o.open()
+		if want != nil {
+			if err == nil {
+				_ = rc.Close()
+			}
+			if !errors.Is(err, want) {
+				*errs = append(*errs, fmt.Sprintf("%s: %s = %v, expected an error wrapping %v", caseName, o.call, err, want))
+			}
+			continue
+		}
+		if err != nil {
+			*errs = append(*errs, fmt.Sprintf("%s: %s failed: %v", caseName, o.call, err))
+			continue
+		}
+		got, err := io.ReadAll(rc)
+		_ = rc.Close()
+		switch {
+		case err != nil:
+			*errs = append(*errs, fmt.Sprintf("%s: reading %s failed: %v", caseName, o.call, err))
+		case string(got) != o.body:
+			*errs = append(*errs, fmt.Sprintf("%s: %s read %q, expected %q", caseName, o.call, got, o.body))
+		}
+	}
+	return nil
+}
+
 // TestStorageGetPut validates that Put writes an object and Get reads it back with its metadata, Content-Type and ETag, and that a failed Put leaves no new key and keeps an existing one.
 func TestStorageGetPut(ctx context.Context, strg s2.Storage, opts ...Option) error {
 	o := newOptions(opts)

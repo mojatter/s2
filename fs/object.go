@@ -43,9 +43,6 @@ func (o *object) Name() string {
 	return o.name
 }
 
-// errModified is what Open returns once the body changed after Get: its length or modification time differs from what Get saw.
-var errModified = errors.New("object modified since Get")
-
 // Open refuses a body of another length or modification time than Get saw, so a Put since Get cannot pair it with what Get returned (#349); a deleted one, or a directory, is s2.ErrNotExist.
 func (o *object) Open() (io.ReadCloser, error) {
 	f, err := o.fsys.Open(o.name)
@@ -68,7 +65,7 @@ func (o *object) Open() (io.ReadCloser, error) {
 	}
 	if s2.MustUint64(info.Size()) != o.length || !info.ModTime().Equal(o.lastModified) {
 		_ = f.Close()
-		return nil, fmt.Errorf("%w: %s", errModified, o.name)
+		return nil, fmt.Errorf("%w: %s", s2.ErrModified, o.name)
 	}
 	return f, nil
 }
