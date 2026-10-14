@@ -64,6 +64,10 @@ func (s *GCSIntegrationSuite) TestCount() {
 	s.Require().NoError(s2test.TestStorageCount(context.Background(), s.strg))
 }
 
+func (s *GCSIntegrationSuite) TestOpenSinceGet() {
+	s.Require().NoError(s2test.TestStorageOpenSinceGet(context.Background(), s.strg))
+}
+
 func (s *GCSIntegrationSuite) TestGetNotExist() {
 	s.Require().NoError(s2test.TestStorageGetNotExist(context.Background(), s.strg))
 }

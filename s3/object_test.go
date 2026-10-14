@@ -127,8 +127,8 @@ func (s *ObjectTestSuite) TestObjectOpenSinceGet() {
 		wantErr       error
 	}{
 		{caseName: "unchanged", wantBody: "short"},
-		{caseName: "replaced", change: func(m *mockS3Client) { m.put("my-bucket", "k", []byte("a longer body"), nil) }, wantErr: errModified},
-		{caseName: "replaced on a server that ignores If-Match", change: func(m *mockS3Client) { m.put("my-bucket", "k", []byte("a longer body"), nil) }, ignoreIfMatch: true, wantErr: errModified},
+		{caseName: "replaced", change: func(m *mockS3Client) { m.put("my-bucket", "k", []byte("a longer body"), nil) }, wantErr: s2.ErrModified},
+		{caseName: "replaced on a server that ignores If-Match", change: func(m *mockS3Client) { m.put("my-bucket", "k", []byte("a longer body"), nil) }, ignoreIfMatch: true, wantErr: s2.ErrModified},
 		{caseName: "deleted", change: func(m *mockS3Client) { m.delete("my-bucket", "k") }, wantErr: s2.ErrNotExist},
 	}
 	for _, tc := range testCases {

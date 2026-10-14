@@ -41,9 +41,6 @@ func (o *object) key() string {
 	return o.prefix + "/" + o.name
 }
 
-// errModified is what Open returns once the key holds another version than the one Get or List saw.
-var errModified = errors.New("object modified since Get")
-
 func (o *object) Open() (io.ReadCloser, error) {
 	return o.get(nil)
 }
@@ -66,13 +63,13 @@ func (o *object) get(rng *string) (io.ReadCloser, error) {
 		}
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "PreconditionFailed" {
-			return nil, fmt.Errorf("%w: %s: %w", errModified, o.key(), err)
+			return nil, fmt.Errorf("%w: %s: %w", s2.ErrModified, o.key(), err)
 		}
 		return nil, fmt.Errorf("failed to get object: %w", err)
 	}
 	if o.etag != "" && res.ETag != nil && strings.Trim(aws.ToString(res.ETag), `"`) != strings.Trim(o.etag, `"`) {
 		_ = res.Body.Close()
-		return nil, fmt.Errorf("%w: %s", errModified, o.key())
+		return nil, fmt.Errorf("%w: %s", s2.ErrModified, o.key())
 	}
 	return res.Body, nil
 }

@@ -24,10 +24,11 @@ func TestUtilsTestSuite(t *testing.T) {
 
 func (s *UtilsTestSuite) TestS2ErrorToS3Error() {
 	testCases := []struct {
-		caseName   string
-		err        error
-		wantCode   string
-		wantStatus int
+		caseName    string
+		err         error
+		wantCode    string
+		wantMessage string
+		wantStatus  int
 	}{
 		{
 			caseName:   "not exist",
@@ -66,6 +67,13 @@ func (s *UtilsTestSuite) TestS2ErrorToS3Error() {
 			wantStatus: http.StatusBadRequest,
 		},
 		{
+			caseName:    "modified since Get",
+			err:         fmt.Errorf("wrap: %w", fmt.Errorf("%w: /tmp/root/key", s2.ErrModified)),
+			wantCode:    "InternalError",
+			wantMessage: "The object was modified while it was being read. Please try again.",
+			wantStatus:  http.StatusInternalServerError,
+		},
+		{
 			caseName:   "unknown error",
 			err:        fmt.Errorf("something broke"),
 			wantCode:   "InternalError",
@@ -74,9 +82,12 @@ func (s *UtilsTestSuite) TestS2ErrorToS3Error() {
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			code, _, status := s2ErrorToS3Error(tc.err)
+			code, message, status := s2ErrorToS3Error(tc.err)
 			s.Equal(tc.wantCode, code)
 			s.Equal(tc.wantStatus, status)
+			if tc.wantMessage != "" {
+				s.Equal(tc.wantMessage, message)
+			}
 		})
 	}
 }

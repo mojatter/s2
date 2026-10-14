@@ -260,12 +260,12 @@ func (s *ObjectTestSuite) TestOpenRefusesAReplacedBody() {
 		wantBody string
 		wantErr  error
 	}{
-		{caseName: "same length", replace: putBody("d/k", "xyz"), wantErr: errModified},
+		{caseName: "same length", replace: putBody("d/k", "xyz"), wantErr: s2.ErrModified},
 		{caseName: "metadata only", replace: func(strg s2.Storage) error {
 			return strg.PutMetadata(ctx, "d/k", s2.Metadata{"a": "b"})
 		}, wantBody: "abc"},
-		{caseName: "shorter", replace: putBody("d/k", "x"), wantErr: errModified},
-		{caseName: "longer", replace: putBody("d/k", "wxyz"), wantErr: errModified},
+		{caseName: "shorter", replace: putBody("d/k", "x"), wantErr: s2.ErrModified},
+		{caseName: "longer", replace: putBody("d/k", "wxyz"), wantErr: s2.ErrModified},
 		{caseName: "a directory", replace: func(strg s2.Storage) error {
 			if err := strg.Delete(ctx, "d/k"); err != nil {
 				return err
@@ -326,7 +326,7 @@ func (s *ObjectTestSuite) TestOpenRangeRefusesAReplacedBody() {
 			s.Require().NoError(putBody("k", "012")(tc.strg))
 
 			_, err = obj.OpenRange(1, 8)
-			s.ErrorIs(err, errModified)
+			s.ErrorIs(err, s2.ErrModified)
 		})
 	}
 }
