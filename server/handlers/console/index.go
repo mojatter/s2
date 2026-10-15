@@ -2,7 +2,6 @@ package console
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"net/http"
 
@@ -13,7 +12,7 @@ import (
 
 func handleIndex(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	if err := s.RenderConsoleIndex(r.Context(), w, nil); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
 	}
 }
 
@@ -32,16 +31,16 @@ func handleCreateBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := s.Buckets.Create(r.Context(), name); err != nil {
-		writeBucketError(w, err)
+		writeBucketError(w, r, err)
 		return
 	}
 
-	renderBucketList(r.Context(), s, w)
+	renderBucketList(r, s, w)
 }
 
 // writeBucketError answers with the status the error deserves: htmx swaps on
 // none of them, so a name the server refuses must not read as its own fault.
-func writeBucketError(w http.ResponseWriter, err error) {
+func writeBucketError(w http.ResponseWriter, r *http.Request, err error) {
 	status := http.StatusInternalServerError
 	var notFound *server.ErrBucketNotFound
 	switch {
@@ -50,7 +49,7 @@ func writeBucketError(w http.ResponseWriter, err error) {
 	case errors.As(err, &notFound):
 		status = http.StatusNotFound
 	}
-	http.Error(w, err.Error(), status)
+	server.WriteConsoleError(w, r, status, err)
 }
 
 func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request) {
@@ -60,13 +59,13 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 		return
 	}
 	if err := s.Buckets.Delete(r.Context(), name); err != nil {
-		writeBucketError(w, err)
+		writeBucketError(w, r, err)
 		return
 	}
 
 	names, err := s.Buckets.Names(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
 		return
 	}
 	names = server.FilterBucketNames(server.UserFromContext(r.Context()), names)
@@ -75,7 +74,7 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 
 	var buf bytes.Buffer
 	if err := s.Template.ExecuteTemplate(&buf, "console/buckets/list.html", data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -83,7 +82,7 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 	buf.WriteString(`<div id="main-content" hx-swap-oob="innerHTML">`)
 
 	if err := s.Template.ExecuteTemplate(&buf, "console/empty.html", nil); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -94,10 +93,11 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 }
 
 // renderBucketList renders the sidebar bucket list fragment.
-func renderBucketList(ctx context.Context, s *server.Server, w http.ResponseWriter) {
+func renderBucketList(r *http.Request, s *server.Server, w http.ResponseWriter) {
+	ctx := r.Context()
 	names, err := s.Buckets.Names(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
 		return
 	}
 	names = server.FilterBucketNames(server.UserFromContext(ctx), names)
@@ -106,7 +106,7 @@ func renderBucketList(ctx context.Context, s *server.Server, w http.ResponseWrit
 
 	var buf bytes.Buffer
 	if err := s.Template.ExecuteTemplate(&buf, "console/buckets/list.html", data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
 		return
 	}
 

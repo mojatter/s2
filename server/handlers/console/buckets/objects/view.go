@@ -21,19 +21,19 @@ func handleView(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		server.WriteConsoleError(w, r, http.StatusNotFound, err)
 		return
 	}
 
 	obj, err := strg.Get(ctx, objectName)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		server.WriteConsoleError(w, r, http.StatusNotFound, err)
 		return
 	}
 
 	rc, err := obj.Open()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
 		return
 	}
 	defer func() { _ = rc.Close() }()
@@ -56,13 +56,13 @@ func handleMeta(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		server.WriteConsoleError(w, r, http.StatusNotFound, err)
 		return
 	}
 
 	obj, err := strg.Get(ctx, objectName)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		server.WriteConsoleError(w, r, http.StatusNotFound, err)
 		return
 	}
 
@@ -88,13 +88,13 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		server.WriteConsoleError(w, r, http.StatusNotFound, err)
 		return
 	}
 
 	obj, err := strg.Get(ctx, objectName)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		server.WriteConsoleError(w, r, http.StatusNotFound, err)
 		return
 	}
 
@@ -105,14 +105,14 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	if previewType == "text" {
 		rc, err := obj.Open()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
 			return
 		}
 		defer func() { _ = rc.Close() }()
 
 		b, err := io.ReadAll(rc)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
 			return
 		}
 		textContent = string(b)
@@ -144,7 +144,7 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	var buf bytes.Buffer
 	if err := s.Template.ExecuteTemplate(&buf, "console/buckets/preview.html", data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
 		return
 	}
 

@@ -109,15 +109,15 @@ func objectsData(ctx context.Context, s *server.Server, bucket, prefix, search s
 // writeObjectsFragment renders the objects.html fragment for htmx partial swaps.
 // Used by both handleObjects (on HX-Request) and the mutating POST/DELETE
 // handlers to re-render the list after a state change.
-func writeObjectsFragment(ctx context.Context, w http.ResponseWriter, s *server.Server, bucket, prefix, search string) {
-	data, err := objectsData(ctx, s, bucket, prefix, search)
+func writeObjectsFragment(r *http.Request, w http.ResponseWriter, s *server.Server, bucket, prefix, search string) {
+	data, err := objectsData(r.Context(), s, bucket, prefix, search)
 	if err != nil {
-		writeStorageError(w, err, http.StatusNotFound)
+		writeStorageError(w, r, err, http.StatusNotFound)
 		return
 	}
 	var buf bytes.Buffer
 	if err := s.Template.ExecuteTemplate(&buf, "console/buckets/objects.html", data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
 		return
 	}
 	_, _ = buf.WriteTo(w)
@@ -130,17 +130,17 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	search := r.URL.Query().Get("search")
 
 	if r.Header.Get("HX-Request") == "true" {
-		writeObjectsFragment(ctx, w, s, name, prefix, search)
+		writeObjectsFragment(r, w, s, name, prefix, search)
 		return
 	}
 
 	data, err := objectsData(ctx, s, name, prefix, search)
 	if err != nil {
-		writeStorageError(w, err, http.StatusNotFound)
+		writeStorageError(w, r, err, http.StatusNotFound)
 		return
 	}
 	if err := s.RenderConsoleIndex(ctx, w, data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
 	}
 }
 
@@ -162,7 +162,7 @@ func handleCreateFolder(s *server.Server, w http.ResponseWriter, r *http.Request
 	key := joinKey(prefix, folderName)
 	// Check the key before authorizing it, so the key authorized is the key written whatever the storage.
 	if err := s2.ValidateName(key); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		server.WriteConsoleError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	// Both: the marker is what is written, and a Deny on the folder's own
@@ -179,11 +179,11 @@ func handleCreateFolder(s *server.Server, w http.ResponseWriter, r *http.Request
 		if errors.As(err, &notFound) {
 			fallback = http.StatusNotFound
 		}
-		writeStorageError(w, err, fallback)
+		writeStorageError(w, r, err, fallback)
 		return
 	}
 
-	writeObjectsFragment(ctx, w, s, name, prefix, "")
+	writeObjectsFragment(r, w, s, name, prefix, "")
 }
 
 // uploadContentType returns the part's Content-Type, or a guess from key when the browser sent none or a generic octet-stream.
@@ -226,7 +226,7 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		// A file error is the server failing to spool the form, not a bad request (#358).
 		var pathErr *fs.PathError
 		if errors.As(err, &pathErr) {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -244,7 +244,7 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 
 	strg, err := s.Buckets.Get(ctx, name)
 	if err != nil {
-		writeStorageError(w, err, http.StatusNotFound)
+		writeStorageError(w, r, err, http.StatusNotFound)
 		return
 	}
 
@@ -254,7 +254,7 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	}
 	key := joinKey(prefix, header.Filename)
 	if err := s2.ValidateName(key); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		server.WriteConsoleError(w, r, http.StatusBadRequest, err)
 		return
 	}
 	if !server.DenyUnlessAllowedS3Action(w, server.UserFromContext(ctx), server.ActionPutObject, name, key) {
@@ -262,11 +262,11 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	}
 	obj := s2.NewObjectReader(key, io.NopCloser(file), s2.MustUint64(header.Size), s2.WithContentType(uploadContentType(header, key)))
 	if err := strg.Put(ctx, obj); err != nil {
-		writeStorageError(w, err, http.StatusInternalServerError)
+		writeStorageError(w, r, err, http.StatusInternalServerError)
 		return
 	}
 
-	writeObjectsFragment(ctx, w, s, name, prefix, "")
+	writeObjectsFragment(r, w, s, name, prefix, "")
 }
 
 func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
@@ -280,7 +280,7 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 
 	strg, err := s.Buckets.Get(ctx, name)
 	if err != nil {
-		writeStorageError(w, err, http.StatusNotFound)
+		writeStorageError(w, r, err, http.StatusNotFound)
 		return
 	}
 
@@ -311,7 +311,7 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 			for {
 				res, err := strg.List(ctx, s2.ListOptions{Prefix: key, Recursive: true, After: after})
 				if err != nil {
-					writeStorageError(w, err, http.StatusInternalServerError)
+					writeStorageError(w, r, err, http.StatusInternalServerError)
 					return
 				}
 				for _, obj := range res.Objects {
@@ -319,7 +319,7 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 						break pagination
 					}
 					if err := strg.Delete(ctx, obj.Name()); err != nil {
-						writeStorageError(w, err, http.StatusInternalServerError)
+						writeStorageError(w, r, err, http.StatusInternalServerError)
 						return
 					}
 				}
@@ -329,18 +329,18 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 				after = res.NextAfter
 			}
 		} else if err := strg.DeleteRecursive(ctx, key); err != nil {
-			writeStorageError(w, err, http.StatusInternalServerError)
+			writeStorageError(w, r, err, http.StatusInternalServerError)
 			return
 		}
 	} else {
 		if err := strg.Delete(ctx, key); err != nil {
-			writeStorageError(w, err, http.StatusInternalServerError)
+			writeStorageError(w, r, err, http.StatusInternalServerError)
 			return
 		}
 	}
 
 	prefix := r.URL.Query().Get("prefix")
-	writeObjectsFragment(ctx, w, s, name, prefix, "")
+	writeObjectsFragment(r, w, s, name, prefix, "")
 }
 
 func init() {
@@ -415,10 +415,10 @@ func pastSearchRange(name, listPrefix string) bool {
 // writeStorageError answers with 400 for a name the storage refuses and with
 // fallback otherwise, so a rejected key never reads as a server fault or as a
 // missing bucket.
-func writeStorageError(w http.ResponseWriter, err error, fallback int) {
+func writeStorageError(w http.ResponseWriter, r *http.Request, err error, fallback int) {
 	status := fallback
 	if errors.Is(err, s2.ErrInvalidName) {
 		status = http.StatusBadRequest
 	}
-	http.Error(w, err.Error(), status)
+	server.WriteConsoleError(w, r, status, err)
 }
