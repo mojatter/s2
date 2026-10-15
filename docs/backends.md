@@ -235,7 +235,7 @@ Each row is one or more sections; within a section the root is taken first, then
 | Pruning after `Delete`, `Move` or a failed write, when a directory emptied | `Lock(".")` |
 | A failed write's cleanup | `SLock(".")` + `Lock(name)` |
 | `Get` | `SLock(name)`; nothing for a `NameLocker` without `SLock` |
-| `Exists`, `List`, `SignedURL` | nothing |
+| `Exists`, `List`, `Count`, `SignedURL` | nothing |
 
 On a filesystem without rename, `Put`, `Upload` and `Copy` write in their first section and take no second. A `NameLocker` without `SLock` gets `Lock(".")` alone in place of every write's calls.
 
