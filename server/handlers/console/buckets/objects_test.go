@@ -975,7 +975,7 @@ func (s *ObjectsTestSuite) TestHandleUploadFile() {
 			maxUpload:  64 << 20,
 			noSpoolDir: true,
 			wantCode:   http.StatusInternalServerError,
-			wantBody:   "no such file or directory",
+			wantBody:   "Internal Server Error",
 			wantAbsent: "docs/spool.bin",
 		},
 		{

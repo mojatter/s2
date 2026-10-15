@@ -2,11 +2,18 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io/fs"
+	"log"
+	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 
+	"github.com/mojatter/s2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -99,6 +106,93 @@ func TestConsoleLoadsNothingFromOtherHosts(t *testing.T) {
 			})
 			require.NoError(t, err)
 			assert.NotZero(t, scanned, "walk visited no files; the scan proves nothing")
+		})
+	}
+}
+
+func TestWriteConsoleError(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		status   int
+		err      error
+		wantBody string
+		wantLog  []string
+	}{
+		{
+			caseName: "server error hides its detail",
+			status:   http.StatusInternalServerError,
+			err:      errors.New("open /tmp/multipart-1: no such file or directory"),
+			wantBody: "Internal Server Error",
+			wantLog:  []string{"level=ERROR", `msg="Console error"`, "method=POST", "path=/buckets/b/upload", "status=500", `error="open /tmp/multipart-1: no such file or directory"`},
+		},
+		{
+			caseName: "client gone logs at debug",
+			status:   http.StatusInternalServerError,
+			err:      context.Canceled,
+			wantBody: "Internal Server Error",
+			wantLog:  []string{"level=DEBUG", "status=500"},
+		},
+		{
+			caseName: "invalid name keeps its text",
+			status:   http.StatusBadRequest,
+			err:      fmt.Errorf("%w: a/.meta", s2.ErrInvalidName),
+			wantBody: "s2: invalid name: a/.meta",
+			wantLog:  []string{"level=DEBUG", "status=400"},
+		},
+		{
+			caseName: "reserved bucket name keeps its text",
+			status:   http.StatusBadRequest,
+			err:      fmt.Errorf("%w: %q is internal state", ErrReservedBucketName, ".buckets"),
+			wantBody: `bucket name is reserved: ".buckets" is internal state`,
+			wantLog:  []string{"level=DEBUG", "status=400"},
+		},
+		{
+			caseName: "missing bucket",
+			status:   http.StatusNotFound,
+			err:      &ErrBucketNotFound{Name: "b"},
+			wantBody: "bucket not found",
+			wantLog:  []string{"level=DEBUG", "status=404"},
+		},
+		{
+			caseName: "missing object",
+			status:   http.StatusNotFound,
+			err:      fmt.Errorf("%w: /root/b/k", s2.ErrNotExist),
+			wantBody: "object not found",
+			wantLog:  []string{"level=DEBUG", "status=404", "/root/b/k"},
+		},
+		{
+			caseName: "modified since get",
+			status:   http.StatusInternalServerError,
+			err:      fmt.Errorf("%w: k", s2.ErrModified),
+			wantBody: "object modified while it was being read; try again",
+			wantLog:  []string{"level=ERROR", "status=500"},
+		},
+		{
+			caseName: "backend error answered not found",
+			status:   http.StatusNotFound,
+			err:      errors.New("stat /root/b: permission denied"),
+			wantBody: "Not Found",
+			wantLog:  []string{"level=DEBUG", "permission denied"},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			var buf strings.Builder
+			prev, prevW, prevFlags := slog.Default(), log.Writer(), log.Flags()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			defer func() {
+				slog.SetDefault(prev)
+				log.SetOutput(prevW)
+				log.SetFlags(prevFlags)
+			}()
+
+			w := httptest.NewRecorder()
+			WriteConsoleError(w, httptest.NewRequest(http.MethodPost, "/buckets/b/upload", nil), tc.status, tc.err)
+			assert.Equal(t, tc.status, w.Code)
+			assert.Equal(t, tc.wantBody+"\n", w.Body.String())
+			for _, want := range tc.wantLog {
+				assert.Contains(t, buf.String(), want)
+			}
 		})
 	}
 }

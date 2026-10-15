@@ -2,6 +2,7 @@ package console
 
 import (
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"path"
 
@@ -26,7 +27,7 @@ func handleStatic(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", contentType)
 	if _, err := w.Write(content); err != nil { // #nosec G705 -- content is from embed.FS, not user input
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		slog.Debug("Failed to write static content", "error", err)
 	}
 }
 
