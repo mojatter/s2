@@ -85,9 +85,34 @@
       if (collapsed) {
         layout.classList.add('layout--sidebar-collapsed');
       }
+      // Mark the entry of the bucket the URL shows. htmx snapshots the page and pushes the URL before it swaps, so marking after the swap keeps Back right, and a failed open swaps nothing.
+      // scroll is 'always', 'new' (only to an entry not marked before) or 'none'.
+      const markOpenBucket = function(scroll) {
+        let name = null;
+        try {
+          name = decodeURIComponent(location.pathname.match(/^\/buckets\/([^/]+)/)?.[1] ?? '');
+        } catch (e) {}
+        document.querySelectorAll('.bucket-item').forEach(function(el) {
+          const open = el.title === name;
+          if (open && (scroll === 'always' || (scroll === 'new' && !el.classList.contains('active')))) el.scrollIntoView({block: 'nearest'});
+          el.classList.toggle('active', open);
+        });
+      };
+      // A page load or a history restore builds the sidebar anew, scrolled to the top.
+      markOpenBucket('always');
+      document.addEventListener('htmx:historyRestore', function() { markOpenBucket('always'); });
+      // e.target, not detail.target: a delete's out-of-band reset of the main view reports the replaced list as detail.target.
+      document.addEventListener('htmx:afterSwap', function(e) {
+        // Moving within a bucket leaves the sidebar where the user put it.
+        if (e.target.id === 'main-content') markOpenBucket('new');
+        // A create or delete answers the list unmarked; mark it again without moving it.
+        else if (e.target.matches?.('.bucket-list')) markOpenBucket('none');
+      });
       window.toggleSidebar = function() {
         const isCollapsed = layout.classList.toggle('layout--sidebar-collapsed');
         localStorage.setItem('s2-sidebar-collapsed', isCollapsed);
+        // A collapsed desktop sidebar hides the list, so its marked entry could not be scrolled to until now.
+        if (!isCollapsed) document.querySelector('.bucket-item.active')?.scrollIntoView({block: 'nearest'});
       };
       window.closeSidebarOnNarrow = function() {
         if (!narrowQuery.matches) return;
@@ -100,8 +125,10 @@
         const name = form.elements.name.value;
         form.reset();
         form.classList.remove('active');
-        htmx.ajax('GET', '/buckets/' + encodeURIComponent(name), {target: '#main-content', pushUrl: true});
-        closeSidebarOnNarrow();
+        // Open it as a click on its new entry does, which also pushes its URL (htmx.ajax takes no pushUrl); htmx wires the entry once the new list settles.
+        document.querySelector('.bucket-list').addEventListener('htmx:afterSettle', function() {
+          Array.from(document.querySelectorAll('.bucket-item')).find(a => a.title === name)?.click();
+        }, {once: true});
       };
       // On narrow, close the drawer when a bucket or the logo is clicked
       document.addEventListener('click', function(e) {
