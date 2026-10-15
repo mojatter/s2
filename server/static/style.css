@@ -243,6 +243,12 @@ h1, h2, h3 {
   color: var(--primary);
 }
 
+/* An entry is marked once its bucket opens; until then, show the click took. */
+.bucket-item.htmx-request:not(.active) {
+  background-color: var(--surface-hover);
+  color: var(--primary);
+}
+
 .bucket-item-wrap {
   display: flex;
   align-items: center;

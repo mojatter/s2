@@ -7,6 +7,7 @@ import (
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
 	"fmt"
 	"html"
+	"iter"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 	"github.com/mojatter/s2"
@@ -1572,6 +1575,182 @@ func (s *ObjectsTestSuite) TestBrowserScrollsTheSidebarToTheLastBucket() {
 			s.Require().NoError(err, "the wheel must bring the last bucket into view")
 		})
 	}
+}
+
+// TestBrowserRevealsTheOpenBucket checks in Chrome that the open bucket is marked and scrolled into the sidebar's view, whether opened by URL or just created (#403).
+func (s *ObjectsTestSuite) TestBrowserRevealsTheOpenBucket() {
+	for i := range 25 {
+		s.createBucket(fmt.Sprintf("b%02d", i))
+	}
+	s.createBucket("zz#1")
+	// The active entry's name, once it is inside the window and nothing covers its center.
+	const revealed = `(() => {
+		const a = document.querySelector('.bucket-item.active');
+		if (!a) return '';
+		const r = a.getBoundingClientRect();
+		const shown = r.top >= 0 && r.bottom <= innerHeight && document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest('.bucket-item') === a;
+		return shown ? a.title : '';
+	})()`
+	testCases := []struct {
+		caseName  string
+		width     int64
+		collapsed bool
+		path      string
+		create    string
+		back      bool
+		wantName  string
+	}{
+		{caseName: "opened by URL", width: 1280, path: "/buckets/b24", wantName: "b24"},
+		{caseName: "opened by URL with a name that needs escaping", width: 1280, path: "/buckets/zz%231", wantName: "zz#1"},
+		{caseName: "created from the sidebar", width: 1280, path: "/", create: "zz-new", wantName: "zz-new"},
+		{caseName: "opened with the sidebar collapsed, then expanded", width: 1280, collapsed: true, path: "/buckets/b24", wantName: "b24"},
+		{caseName: "opened by URL, then the drawer opened", width: 600, collapsed: true, path: "/buckets/b24", wantName: "b24"},
+		{caseName: "opened by URL, left, then back", width: 1280, path: "/buckets/b24", back: true, wantName: "b24"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			browserCtx, consoleURL := s.newBrowser()
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.EmulateViewport(tc.width, 800)))
+			if tc.collapsed {
+				// Each browser starts with empty storage, so the collapsed state is stored before the page under test loads.
+				s.Require().NoError(chromedp.Do(browserCtx,
+					chromedp.Navigate(consoleURL+"/"),
+					chromedp.Evaluate[chromedp.Void](`localStorage.setItem('s2-sidebar-collapsed', 'true')`),
+				))
+			}
+			s.Require().NoError(chromedp.Do(browserCtx,
+				chromedp.Navigate(consoleURL+tc.path),
+				chromedp.WaitReady(chromedp.CSS(`.bucket-item[title="b00"]`)),
+			))
+			if tc.collapsed {
+				toggle := ".sidebar-toggle"
+				if tc.width <= 900 {
+					toggle = ".mobile-sidebar-toggle"
+				}
+				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Click(chromedp.CSS(toggle))))
+				// The sidebar widens or slides in over 0.2s; look for the entry only once it has landed.
+				_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`(() => { const r = document.querySelector('.sidebar').getBoundingClientRect(); return r.left === 0 && r.width >= 280; })()`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "open the sidebar")
+			}
+			if tc.back {
+				// A history restore rebuilds the sidebar scrolled to the top, with the entry already marked.
+				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Click(chromedp.CSS(`.bucket-item[title="b00"]`))))
+				_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/b00' && document.querySelector('.bucket-item.active')?.title === 'b00' || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "open b00")
+				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`history.back()`)))
+			}
+			if tc.create != "" {
+				s.Require().NoError(chromedp.Do(browserCtx,
+					chromedp.Click(chromedp.CSS(".section-header .btn")),
+					chromedp.SendKeys(chromedp.CSS(".new-bucket-form input[name=name]"), tc.create),
+					chromedp.Click(chromedp.CSS(".new-bucket-form button[type=submit]")),
+				))
+			}
+			got, err := chromedp.Run(browserCtx, chromedp.Poll[string](`(() => { const n = `+revealed+`; return n || null; })()`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "the open bucket must be marked and in view")
+			s.Equal(tc.wantName, got)
+		})
+	}
+}
+
+// TestBrowserMarksABucketOnceItOpens checks in Chrome that a sidebar click marks its bucket only when the bucket opens, so Back and a failed open keep the mark on the bucket shown (#403).
+func (s *ObjectsTestSuite) TestBrowserMarksABucketOnceItOpens() {
+	const active = `document.querySelector('.bucket-item.active')?.title ?? null`
+	testCases := []struct {
+		caseName string
+		gone     bool
+		create   string
+		back     bool
+		wantName string
+	}{
+		{caseName: "back restores the earlier mark", back: true, wantName: "a"},
+		{caseName: "a bucket that fails to open is not marked", gone: true, wantName: "a"},
+		{caseName: "back after a create restores the earlier mark", create: "zz", back: true, wantName: "a"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.createBucket("a")
+			s.createBucket("b")
+			browserCtx, consoleURL := s.newBrowser()
+			s.Require().NoError(chromedp.Do(browserCtx,
+				chromedp.EmulateViewport(1280, 800),
+				chromedp.Navigate(consoleURL+"/buckets/a"),
+				chromedp.WaitVisible(chromedp.CSS(`.bucket-item[title="b"]`)),
+			))
+			if tc.gone {
+				s.Require().NoError(s.server.Buckets.Delete(context.Background(), "b"))
+			}
+			opened := "b"
+			if tc.create != "" {
+				opened = tc.create
+				s.Require().NoError(chromedp.Do(browserCtx,
+					chromedp.Click(chromedp.CSS(".section-header .btn")),
+					chromedp.SendKeys(chromedp.CSS(".new-bucket-form input[name=name]"), tc.create),
+					chromedp.Click(chromedp.CSS(".new-bucket-form button[type=submit]")),
+				))
+			} else {
+				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Click(chromedp.CSS(`.bucket-item[title="b"]`))))
+			}
+			// htmx removes htmx-request once the response is handled, whatever its status.
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.WaitNotPresent(chromedp.CSS(".htmx-request, .htmx-settling"))))
+			if tc.back {
+				_, err := chromedp.Run(browserCtx, chromedp.Poll[string](`location.pathname === '/buckets/`+opened+`' ? 'opened' : null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "open "+opened)
+				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`history.back()`)))
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[string](`location.pathname === '/buckets/a' ? 'a' : null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "go back to a")
+			}
+			got, err := chromedp.Run(browserCtx, chromedp.Evaluate[string](active))
+			s.Require().NoError(err)
+			s.Equal(tc.wantName, got)
+		})
+	}
+}
+
+// TestBrowserMarksTheBucketThatLandsAfterTheListIsReplaced holds a bucket's GET in Chrome, checks the pending entry shows it, and lets a create replace the list meanwhile, so the entry clicked is detached when the bucket lands (#403).
+func (s *ObjectsTestSuite) TestBrowserMarksTheBucketThatLandsAfterTheListIsReplaced() {
+	s.createBucket("a")
+	s.createBucket("b")
+	s.createBucket("c")
+	browserCtx, consoleURL := s.newBrowser()
+	var target *chromedp.Target
+	s.Require().NoError(chromedp.Do(browserCtx,
+		chromedp.EmulateViewport(1280, 800),
+		chromedp.Navigate(consoleURL+"/buckets/a"),
+		chromedp.WaitVisible(chromedp.CSS(`.bucket-item[title="b"]`)),
+		chromedp.Func(func(ctx context.Context, t *chromedp.Target) error {
+			target = t
+			_, err := cdp.Call(ctx, t, fetch.Enable, fetch.EnableParams{Patterns: []*fetch.RequestPattern{{URLPattern: "*/buckets/b"}}})
+			return err
+		}),
+	))
+	// Subscribed before the click, so the pause cannot be missed.
+	next, stop := iter.Pull2(cdp.Events(browserCtx, target, fetch.RequestPaused))
+	defer stop()
+
+	s.Require().NoError(chromedp.Do(browserCtx, chromedp.Click(chromedp.CSS(`.bucket-item[title="b"]`))))
+	paused, err, ok := next()
+	s.Require().True(ok, "the GET of b must pause")
+	s.Require().NoError(err)
+	// Marked only once b opens; move the pointer off so :hover is not what shows, and outlast the entries' 0.2s transition.
+	s.Require().NoError(chromedp.Do(browserCtx, chromedp.MouseEvent(chromedp.MouseMoved, 1000, 700), chromedp.Sleep(500*time.Millisecond)))
+	pending, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`(() => { const bg = t => getComputedStyle(document.querySelector('.bucket-item[title="' + t + '"]')).backgroundColor; return bg('b') !== bg('c'); })()`))
+	s.Require().NoError(err)
+	s.True(pending, "the clicked entry must show its request is pending")
+
+	s.Require().NoError(chromedp.Do(browserCtx,
+		chromedp.Click(chromedp.CSS(".section-header .btn")),
+		chromedp.SendKeys(chromedp.CSS(".new-bucket-form input[name=name]"), "zz"),
+		chromedp.Click(chromedp.CSS(".new-bucket-form button[type=submit]")),
+	))
+	_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/zz' && document.querySelector('.bucket-item.active')?.title === 'zz' || null`, chromedp.WithPollingTimeout(5*time.Second)))
+	s.Require().NoError(err, "open zz while b is held")
+
+	_, err = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: paused.RequestID})
+	s.Require().NoError(err)
+	// The URL moves before after-request runs, so wait for the mark itself.
+	_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && document.querySelector('.bucket-item.active')?.title === 'b' || null`, chromedp.WithPollingTimeout(5*time.Second)))
+	s.Require().NoError(err, "b lands and is marked")
 }
 
 // TestBrowserKeepsTheNameColumnReadable checks in Chrome that the object table hides metadata columns by its own width, so Name stays readable beside the sidebar (#394).
