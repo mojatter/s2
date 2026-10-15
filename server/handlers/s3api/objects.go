@@ -299,15 +299,13 @@ func handleListObjects(s *server.Server, w http.ResponseWriter, r *http.Request)
 
 	strg, err := s.Buckets.Get(ctx, p.bucketName)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
 	objs, prefixes, nextToken, err := listObjects(ctx, strg, p)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
@@ -342,15 +340,13 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
 	obj, err := strg.Get(ctx, key)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
@@ -368,8 +364,7 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	rc, err := obj.Open()
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	defer func() { _ = rc.Close() }()
@@ -451,8 +446,7 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, obj s2.Object, k
 	length := end - start + 1
 	rc, err := obj.OpenRange(start, length)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	defer func() { _ = rc.Close() }()
@@ -497,8 +491,7 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
@@ -511,8 +504,7 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		code, msg, status := uploadErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeUploadError(w, r, err)
 		return
 	}
 
@@ -583,23 +575,20 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 
 	srcStrg, err := s.Buckets.Get(ctx, srcBucket)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
 	// Read source object
 	srcObj, err := srcStrg.Get(ctx, srcKey)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
 	rc, err := srcObj.Open()
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	defer func() { _ = rc.Close() }()
@@ -613,8 +602,7 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 
 	dstStrg, err := s.Buckets.Get(ctx, dstBucket)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
@@ -623,8 +611,7 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 		s2.WithMetadata(md), s2.WithContentType(contentType))
 	res, err := s2.Upload(ctx, dstStrg, dstObj, s2.UploadOptions{})
 	if err != nil {
-		code, msg, status := uploadErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeUploadError(w, r, err)
 		return
 	}
 
@@ -652,8 +639,7 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
@@ -664,8 +650,7 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 	}
 
 	if err := strg.Delete(ctx, key); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
@@ -687,8 +672,7 @@ func handleDeleteObjects(s *server.Server, w http.ResponseWriter, r *http.Reques
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
@@ -715,7 +699,9 @@ func handleDeleteObjects(s *server.Server, w http.ResponseWriter, r *http.Reques
 			continue
 		}
 		if err := strg.Delete(ctx, obj.Key); err != nil {
-			code, msg, _ := s2ErrorToS3Error(err)
+			code, msg, status := s2ErrorToS3Error(err)
+			// status is the key's mapped class, not the response's 200 multi-status.
+			logS3Error(r, code, status, err, "key", obj.Key)
 			result.Errors = append(result.Errors, DeleteError{
 				Key:     obj.Key,
 				Code:    code,

@@ -24,8 +24,7 @@ func HandleListBuckets(s *server.Server, w http.ResponseWriter, r *http.Request)
 	}
 	names, err := s.Buckets.Names(ctx)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	names = server.FilterBucketNames(server.UserFromContext(ctx), names)
@@ -65,8 +64,7 @@ func handleCreateBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 	bucketName := r.PathValue("bucket")
 
 	if err := s.Buckets.Create(ctx, bucketName); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
@@ -83,19 +81,17 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 
 	exists, err := s.Buckets.Exists(ctx, bucketName)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	if !exists {
-		writeError(w, r, "NoSuchBucket", "The specified bucket does not exist", http.StatusNotFound)
+		writeError(w, r, "NoSuchBucket", msgNoSuchBucket, http.StatusNotFound)
 		return
 	}
 	// The check and the delete are not atomic; an object put in between goes with the bucket.
 	holds, err := bucketHoldsObjects(ctx, s, bucketName)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	if holds {
@@ -104,8 +100,7 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 	}
 
 	if err := s.Buckets.Delete(ctx, bucketName); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
@@ -142,8 +137,7 @@ func handleHeadBucket(s *server.Server, w http.ResponseWriter, r *http.Request) 
 
 	exists, err := s.Buckets.Exists(r.Context(), bucketName)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	if !exists {
@@ -159,12 +153,11 @@ func handleGetBucketLocation(s *server.Server, w http.ResponseWriter, r *http.Re
 
 	exists, err := s.Buckets.Exists(r.Context(), bucketName)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	if !exists {
-		writeError(w, r, "NoSuchBucket", "The specified bucket does not exist", http.StatusNotFound)
+		writeError(w, r, "NoSuchBucket", msgNoSuchBucket, http.StatusNotFound)
 		return
 	}
 

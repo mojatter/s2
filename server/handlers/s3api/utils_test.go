@@ -2,9 +2,13 @@ package s3api
 
 import (
 	"bufio"
+	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,40 +35,60 @@ func (s *UtilsTestSuite) TestS2ErrorToS3Error() {
 		wantStatus  int
 	}{
 		{
-			caseName:   "not exist",
-			err:        fmt.Errorf("%w: key", s2.ErrNotExist),
-			wantCode:   "NoSuchKey",
-			wantStatus: http.StatusNotFound,
+			caseName:    "not exist",
+			err:         fmt.Errorf("%w: key", s2.ErrNotExist),
+			wantCode:    "NoSuchKey",
+			wantMessage: msgNoSuchKey,
+			wantStatus:  http.StatusNotFound,
 		},
 		{
-			caseName:   "no such bucket",
-			err:        &ErrNoSuchBucket{Name: "b"},
-			wantCode:   "NoSuchBucket",
-			wantStatus: http.StatusNotFound,
+			caseName:    "no such bucket",
+			err:         &ErrNoSuchBucket{Name: "b"},
+			wantCode:    "NoSuchBucket",
+			wantMessage: msgNoSuchBucket,
+			wantStatus:  http.StatusNotFound,
 		},
 		{
-			caseName:   "wrapped not exist",
-			err:        fmt.Errorf("wrap: %w", fmt.Errorf("%w: key", s2.ErrNotExist)),
-			wantCode:   "NoSuchKey",
-			wantStatus: http.StatusNotFound,
+			caseName:    "wrapped not exist",
+			err:         fmt.Errorf("wrap: %w", fmt.Errorf("%w: key", s2.ErrNotExist)),
+			wantCode:    "NoSuchKey",
+			wantMessage: msgNoSuchKey,
+			wantStatus:  http.StatusNotFound,
 		},
 		{
-			caseName:   "bucket not found",
-			err:        &server.ErrBucketNotFound{Name: "b"},
-			wantCode:   "NoSuchBucket",
-			wantStatus: http.StatusNotFound,
+			caseName:    "bucket not found",
+			err:         &server.ErrBucketNotFound{Name: "b"},
+			wantCode:    "NoSuchBucket",
+			wantMessage: msgNoSuchBucket,
+			wantStatus:  http.StatusNotFound,
 		},
 		{
-			caseName:   "wrapped bucket not found",
-			err:        fmt.Errorf("wrap: %w", &server.ErrBucketNotFound{Name: "b"}),
-			wantCode:   "NoSuchBucket",
-			wantStatus: http.StatusNotFound,
+			caseName:    "wrapped bucket not found",
+			err:         fmt.Errorf("wrap: %w", &server.ErrBucketNotFound{Name: "b"}),
+			wantCode:    "NoSuchBucket",
+			wantMessage: msgNoSuchBucket,
+			wantStatus:  http.StatusNotFound,
 		},
 		{
-			caseName:   "invalid name",
-			err:        fmt.Errorf("%w: ../other", s2.ErrInvalidName),
-			wantCode:   "InvalidArgument",
-			wantStatus: http.StatusBadRequest,
+			caseName:    "invalid name",
+			err:         fmt.Errorf("%w: ../other", s2.ErrInvalidName),
+			wantCode:    "InvalidArgument",
+			wantMessage: "s2: invalid name: ../other",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			caseName:    "reserved bucket name",
+			err:         fmt.Errorf("%w: \"healthz\" is served by the health endpoint", server.ErrReservedBucketName),
+			wantCode:    "InvalidBucketName",
+			wantMessage: `bucket name is reserved: "healthz" is served by the health endpoint`,
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			caseName:    "no such upload",
+			err:         fmt.Errorf("%w: abc", server.ErrNoSuchUpload),
+			wantCode:    "NoSuchUpload",
+			wantMessage: msgNoSuchUpload,
+			wantStatus:  http.StatusNotFound,
 		},
 		{
 			caseName:    "modified since Get",
@@ -74,10 +98,11 @@ func (s *UtilsTestSuite) TestS2ErrorToS3Error() {
 			wantStatus:  http.StatusInternalServerError,
 		},
 		{
-			caseName:   "unknown error",
-			err:        fmt.Errorf("something broke"),
-			wantCode:   "InternalError",
-			wantStatus: http.StatusInternalServerError,
+			caseName:    "unknown error",
+			err:         fmt.Errorf("something broke"),
+			wantCode:    "InternalError",
+			wantMessage: msgInternalError,
+			wantStatus:  http.StatusInternalServerError,
 		},
 	}
 	for _, tc := range testCases {
@@ -85,9 +110,7 @@ func (s *UtilsTestSuite) TestS2ErrorToS3Error() {
 			code, message, status := s2ErrorToS3Error(tc.err)
 			s.Equal(tc.wantCode, code)
 			s.Equal(tc.wantStatus, status)
-			if tc.wantMessage != "" {
-				s.Equal(tc.wantMessage, message)
-			}
+			s.Equal(tc.wantMessage, message)
 		})
 	}
 }
@@ -139,19 +162,22 @@ func (s *UtilsTestSuite) TestParseMetadataHeaders() {
 
 func (s *UtilsTestSuite) TestUploadErrorToS3Error() {
 	testCases := []struct {
-		caseName   string
-		err        error
-		wantCode   string
-		wantStatus int
+		caseName    string
+		err         error
+		wantCode    string
+		wantMessage string
+		wantStatus  int
 	}{
-		{caseName: "incomplete request body", err: fmt.Errorf("failed to write temp file: %w", errIncompleteBody), wantCode: "IncompleteBody", wantStatus: http.StatusBadRequest},
+		{caseName: "incomplete request body", err: fmt.Errorf("failed to write temp file: %w", errIncompleteBody), wantCode: "IncompleteBody", wantMessage: msgIncompleteBody, wantStatus: http.StatusBadRequest},
 		// A storage read cut short, as in CopyObject or CompleteMultipartUpload, is the server's and stays retryable.
-		{caseName: "storage read cut short", err: fmt.Errorf("failed to write temp file: %w", io.ErrUnexpectedEOF), wantCode: "InternalError", wantStatus: http.StatusInternalServerError},
+		{caseName: "storage read cut short", err: fmt.Errorf("failed to write temp file: %w", io.ErrUnexpectedEOF), wantCode: "InternalError", wantMessage: msgInternalError, wantStatus: http.StatusInternalServerError},
+		{caseName: "etag unknown", err: fmt.Errorf("%w: key", s2.ErrUnknownETag), wantCode: "InternalError", wantMessage: msgInternalError, wantStatus: http.StatusInternalServerError},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			code, _, status := uploadErrorToS3Error(tc.err)
+			code, message, status := uploadErrorToS3Error(tc.err)
 			s.Equal(tc.wantCode, code)
+			s.Equal(tc.wantMessage, message)
 			s.Equal(tc.wantStatus, status)
 		})
 	}
@@ -204,4 +230,108 @@ func (s *UtilsTestSuite) TestAWSChunkedReader() {
 			s.Equal(tc.want, string(got))
 		})
 	}
+}
+
+func (s *UtilsTestSuite) TestWriteS2Error() {
+	testCases := []struct {
+		caseName    string
+		write       func(w http.ResponseWriter, r *http.Request, err error)
+		err         error
+		wantStatus  int
+		wantMessage string
+		wantLog     []string
+	}{
+		{
+			caseName:    "server error logs its detail at error",
+			write:       writeS2Error,
+			err:         errors.New("open /root/b/k: permission denied"),
+			wantStatus:  http.StatusInternalServerError,
+			wantMessage: msgInternalError,
+			wantLog:     []string{"level=ERROR", "method=GET", "path=/b/k", "code=InternalError", "status=500", `error="open /root/b/k: permission denied"`},
+		},
+		{
+			caseName:    "client error logs its detail at debug",
+			write:       writeS2Error,
+			err:         fmt.Errorf("%w: k", s2.ErrNotExist),
+			wantStatus:  http.StatusNotFound,
+			wantMessage: msgNoSuchKey,
+			wantLog:     []string{"level=DEBUG", "path=/b/k", "code=NoSuchKey", "status=404", `error="s2: object not exist: k"`},
+		},
+		{
+			caseName:    "client gone logs at debug",
+			write:       writeS2Error,
+			err:         context.Canceled,
+			wantStatus:  http.StatusInternalServerError,
+			wantMessage: msgInternalError,
+			wantLog:     []string{"level=DEBUG", "code=InternalError", "status=500", `error="context canceled"`},
+		},
+		{
+			caseName:    "client gone during read-back",
+			write:       writeUploadError,
+			err:         fmt.Errorf("%w: %w", s2.ErrUnknownETag, context.Canceled),
+			wantStatus:  http.StatusInternalServerError,
+			wantMessage: msgInternalError,
+			wantLog:     []string{"level=DEBUG", "code=InternalError", "status=500"},
+		},
+		{
+			caseName:    "upload error",
+			write:       writeUploadError,
+			err:         fmt.Errorf("failed to write temp file: %w: 3 of 10 bytes", errIncompleteBody),
+			wantStatus:  http.StatusBadRequest,
+			wantMessage: msgIncompleteBody,
+			wantLog:     []string{"level=DEBUG", "code=IncompleteBody", "status=400", "3 of 10 bytes"},
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			buf := captureSlog(s.T())
+			w := httptest.NewRecorder()
+			tc.write(w, httptest.NewRequest(http.MethodGet, "/b/k", nil), tc.err)
+			s.Equal(tc.wantStatus, w.Code)
+			var resp server.S3ErrorResponse
+			s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &resp))
+			s.Equal(tc.wantMessage, resp.Message)
+			for _, want := range tc.wantLog {
+				s.Contains(buf.String(), want)
+			}
+		})
+	}
+}
+
+func (s *UtilsTestSuite) TestLogS3Error() {
+	testCases := []struct {
+		caseName string
+		attrs    []any
+		wantLog  string
+		denyLog  string
+	}{
+		{caseName: "no attrs", denyLog: "key="},
+		{caseName: "key attr", attrs: []any{"key", "a/b"}, wantLog: "key=a/b"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			buf := captureSlog(s.T())
+			logS3Error(httptest.NewRequest(http.MethodPost, "/b?delete", nil), "NoSuchKey", http.StatusNotFound, s2.ErrNotExist, tc.attrs...)
+			s.Contains(buf.String(), "code=NoSuchKey")
+			if tc.wantLog != "" {
+				s.Contains(buf.String(), tc.wantLog)
+			}
+			if tc.denyLog != "" {
+				s.NotContains(buf.String(), tc.denyLog)
+			}
+		})
+	}
+}
+
+// captureSlog sends slog to a Debug-level buffer until t ends; SetDefault alone does not restore the log package.
+func captureSlog(t *testing.T) *strings.Builder {
+	buf := &strings.Builder{}
+	prev, prevW, prevFlags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevW)
+		log.SetFlags(prevFlags)
+	})
+	return buf
 }
