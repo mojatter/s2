@@ -3,9 +3,12 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/mojatter/s2"
 )
 
 // consoleHandlers holds the routes registered via RegisterConsoleHandleFunc,
@@ -45,6 +48,34 @@ func (s *Server) RenderConsoleIndex(ctx context.Context, w http.ResponseWriter, 
 	}
 	_, _ = buf.WriteTo(w)
 	return nil
+}
+
+// WriteConsoleError answers err with status and a body naming no server detail, which it logs instead.
+func WriteConsoleError(w http.ResponseWriter, r *http.Request, status int, err error) {
+	level := slog.LevelDebug
+	// A client that hung up is not a server fault.
+	if status >= http.StatusInternalServerError && !errors.Is(err, context.Canceled) {
+		level = slog.LevelError
+	}
+	slog.Log(r.Context(), level, "Console error", "method", r.Method, "path", r.URL.Path, "status", status, "error", err)
+	http.Error(w, consoleErrorBody(status, err), status)
+}
+
+// consoleErrorBody keeps the text s2 writes about the client's own names and answers the status text otherwise.
+func consoleErrorBody(status int, err error) string {
+	var notFound *ErrBucketNotFound
+	switch {
+	case errors.Is(err, s2.ErrInvalidName), errors.Is(err, ErrReservedBucketName):
+		return err.Error()
+	case errors.As(err, &notFound):
+		return "bucket not found"
+	case errors.Is(err, s2.ErrNotExist):
+		return "object not found"
+	case errors.Is(err, s2.ErrModified):
+		// A retry reads the key's current version, as the S3 API tells its clients.
+		return "object modified while it was being read; try again"
+	}
+	return http.StatusText(status)
 }
 
 func init() {
