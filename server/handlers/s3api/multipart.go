@@ -38,8 +38,7 @@ func validUploadID(id string) bool {
 func bucketGeneration(s *server.Server, w http.ResponseWriter, r *http.Request, bucket string) (int64, bool) {
 	gen, err := s.Buckets.Generation(r.Context(), bucket)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return 0, false
 	}
 	return gen, true
@@ -52,8 +51,7 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	// The key is not written until Complete, so ask the backend now whether it
@@ -61,8 +59,7 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 	// Only a refused name stops us; a stat that fails for any other reason is
 	// the write's problem, not the initiate's.
 	if _, err := strg.Exists(ctx, key); errors.Is(err, s2.ErrInvalidName) {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	gen, ok := bucketGeneration(s, w, r, bucketName)
@@ -78,8 +75,7 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 
 	// S3 takes the object's headers from the initiate request.
 	if err := s.Multipart.Create(ctx, uploadID, bucketName, key, gen, parseMetadataHeaders(r), requestContentType(r)); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	writeXML(w, http.StatusOK, InitiateMultipartUploadResult{
@@ -106,7 +102,7 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if !validUploadID(uploadID) {
-		writeError(w, r, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
+		writeError(w, r, "NoSuchUpload", msgNoSuchUpload, http.StatusNotFound)
 		return
 	}
 	partNumber, err := strconv.Atoi(partNumberStr)
@@ -116,8 +112,7 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	}
 
 	if _, err := s.Buckets.Get(ctx, bucketName); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	gen, ok := bucketGeneration(s, w, r, bucketName)
@@ -125,8 +120,7 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if _, _, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key, gen); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
@@ -141,8 +135,7 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err != nil {
-		code, msg, status := uploadErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeUploadError(w, r, err)
 		return
 	}
 
@@ -164,7 +157,7 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 		return
 	}
 	if !validUploadID(uploadID) {
-		writeError(w, r, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
+		writeError(w, r, "NoSuchUpload", msgNoSuchUpload, http.StatusNotFound)
 		return
 	}
 
@@ -175,8 +168,7 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
@@ -206,8 +198,7 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 	}
 	md, contentType, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key, gen)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
@@ -221,8 +212,7 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 			return
 		}
 		if err != nil {
-			code, msg, status := s2ErrorToS3Error(err)
-			writeError(w, r, code, msg, status)
+			writeS2Error(w, r, err)
 			return
 		}
 		partETag := strings.Trim(obj.ETag(), `"`)
@@ -243,8 +233,7 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 	res, err := s2.Upload(ctx, strg, s2.NewObjectReader(key, pr, totalLen, s2.WithMetadata(md), s2.WithContentType(contentType)), s2.UploadOptions{})
 	if err != nil {
 		_ = pr.Close()
-		code, msg, status := uploadErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeUploadError(w, r, err)
 		return
 	}
 	_ = s.Multipart.Remove(ctx, uploadID)
@@ -268,13 +257,12 @@ func handleAbortMultipartUpload(s *server.Server, w http.ResponseWriter, r *http
 		return
 	}
 	if !validUploadID(uploadID) {
-		writeError(w, r, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
+		writeError(w, r, "NoSuchUpload", msgNoSuchUpload, http.StatusNotFound)
 		return
 	}
 
 	if _, err := s.Buckets.Get(ctx, bucketName); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	gen, ok := bucketGeneration(s, w, r, bucketName)
@@ -282,8 +270,7 @@ func handleAbortMultipartUpload(s *server.Server, w http.ResponseWriter, r *http
 		return
 	}
 	if err := s.Multipart.Abort(ctx, uploadID, bucketName, key, gen); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -317,8 +304,7 @@ func handleListMultipartUploads(s *server.Server, w http.ResponseWriter, r *http
 	}
 
 	if _, err := s.Buckets.Get(ctx, bucketName); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	gen, ok := bucketGeneration(s, w, r, bucketName)
@@ -327,8 +313,7 @@ func handleListMultipartUploads(s *server.Server, w http.ResponseWriter, r *http
 	}
 	all, err := s.Multipart.Uploads(ctx)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 
@@ -404,7 +389,7 @@ func handleListParts(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	uploadID := r.URL.Query().Get("uploadId")
 	if !validUploadID(uploadID) {
-		writeError(w, r, "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound)
+		writeError(w, r, "NoSuchUpload", msgNoSuchUpload, http.StatusNotFound)
 		return
 	}
 	marker := 0
@@ -423,8 +408,7 @@ func handleListParts(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := s.Buckets.Get(ctx, bucketName); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	gen, ok := bucketGeneration(s, w, r, bucketName)
@@ -432,14 +416,12 @@ func handleListParts(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, _, err := s.Multipart.Metadata(ctx, uploadID, bucketName, key, gen); err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 	parts, err := s.Multipart.Parts(ctx, uploadID)
 	if err != nil {
-		code, msg, status := s2ErrorToS3Error(err)
-		writeError(w, r, code, msg, status)
+		writeS2Error(w, r, err)
 		return
 	}
 

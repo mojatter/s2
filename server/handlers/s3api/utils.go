@@ -2,10 +2,12 @@ package s3api
 
 import (
 	"bufio"
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"slices"
@@ -30,6 +32,13 @@ const (
 	maxXMLRequestBody = 8 << 20 // 8 MiB
 
 	maxUploadParts = 10000 // S3's per-upload part ceiling
+
+	// S3's fixed messages; the error's own text goes to the server log.
+	msgNoSuchKey      = "The specified key does not exist."
+	msgNoSuchBucket   = "The specified bucket does not exist"
+	msgNoSuchUpload   = "The specified upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed."
+	msgInternalError  = "We encountered an internal error. Please try again."
+	msgIncompleteBody = "You did not provide the number of bytes specified by the Content-Length HTTP header"
 )
 
 // decodeXMLBody decodes a capped XML request body, writing the S3 error
@@ -65,6 +74,31 @@ func namesSubresource(r *http.Request, allowed ...string) bool {
 
 func writeError(w http.ResponseWriter, r *http.Request, code string, message string, status int) {
 	server.WriteS3Error(w, r, code, message, status)
+}
+
+// writeS2Error answers err with S3's code and message and logs the detail the message drops.
+func writeS2Error(w http.ResponseWriter, r *http.Request, err error) {
+	code, msg, status := s2ErrorToS3Error(err)
+	logS3Error(r, code, status, err)
+	writeError(w, r, code, msg, status)
+}
+
+// writeUploadError is writeS2Error for a failure from s2.Upload.
+func writeUploadError(w http.ResponseWriter, r *http.Request, err error) {
+	code, msg, status := uploadErrorToS3Error(err)
+	logS3Error(r, code, status, err)
+	writeError(w, r, code, msg, status)
+}
+
+// logS3Error logs a 5xx at Error and anything else at Debug, since a client error is expected traffic.
+func logS3Error(r *http.Request, code string, status int, err error, attrs ...any) {
+	level := slog.LevelDebug
+	// A client that hung up is not a server fault.
+	if status >= http.StatusInternalServerError && !errors.Is(err, context.Canceled) {
+		level = slog.LevelError
+	}
+	args := append([]any{"method", r.Method, "path", r.URL.Path, "code", code, "status", status, "error", err}, attrs...)
+	slog.Log(r.Context(), level, "S3 API error", args...)
 }
 
 // ErrNoSuchBucket is returned when a bucket does not exist.
@@ -140,11 +174,6 @@ func (b shortBody) Read(p []byte) (int, error) {
 		return n, fmt.Errorf("%w: body ended before its Content-Length", errIncompleteBody)
 	}
 	return n, err
-}
-
-// incompleteBodyError is S3's answer to a body that does not match its declared length.
-func incompleteBodyError(err error) (string, string, int) {
-	return "IncompleteBody", err.Error(), http.StatusBadRequest
 }
 
 func writeEntityTooLarge(w http.ResponseWriter, r *http.Request, maxSize int64) {
@@ -247,25 +276,25 @@ func chunkedReadError(err error) error {
 // same request converges, since the write is idempotent.
 func uploadErrorToS3Error(err error) (string, string, int) {
 	if errors.Is(err, errIncompleteBody) {
-		return incompleteBodyError(err)
+		return "IncompleteBody", msgIncompleteBody, http.StatusBadRequest
 	}
 	if errors.Is(err, s2.ErrUnknownETag) {
-		return "InternalError", err.Error(), http.StatusInternalServerError
+		return "InternalError", msgInternalError, http.StatusInternalServerError
 	}
 	return s2ErrorToS3Error(err)
 }
 
 func s2ErrorToS3Error(err error) (string, string, int) {
 	if errors.Is(err, s2.ErrNotExist) {
-		return "NoSuchKey", err.Error(), http.StatusNotFound
+		return "NoSuchKey", msgNoSuchKey, http.StatusNotFound
 	}
 	var bucketErr *ErrNoSuchBucket
 	if errors.As(err, &bucketErr) {
-		return "NoSuchBucket", err.Error(), http.StatusNotFound
+		return "NoSuchBucket", msgNoSuchBucket, http.StatusNotFound
 	}
 	var bucketNotFound *server.ErrBucketNotFound
 	if errors.As(err, &bucketNotFound) {
-		return "NoSuchBucket", err.Error(), http.StatusNotFound
+		return "NoSuchBucket", msgNoSuchBucket, http.StatusNotFound
 	}
 	if errors.Is(err, s2.ErrInvalidName) {
 		return "InvalidArgument", err.Error(), http.StatusBadRequest
@@ -274,11 +303,11 @@ func s2ErrorToS3Error(err error) (string, string, int) {
 		return "InvalidBucketName", err.Error(), http.StatusBadRequest
 	}
 	if errors.Is(err, server.ErrNoSuchUpload) {
-		return "NoSuchUpload", "The specified upload does not exist", http.StatusNotFound
+		return "NoSuchUpload", msgNoSuchUpload, http.StatusNotFound
 	}
 	// A 500 the client's SDK retries; the retry sees the key's current version.
 	if errors.Is(err, s2.ErrModified) {
 		return "InternalError", "The object was modified while it was being read. Please try again.", http.StatusInternalServerError
 	}
-	return "InternalError", err.Error(), http.StatusInternalServerError
+	return "InternalError", msgInternalError, http.StatusInternalServerError
 }
