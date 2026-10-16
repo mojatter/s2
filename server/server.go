@@ -145,6 +145,7 @@ func Run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	slog.SetLogLoggerLevel(cfg.LogLevel)
 	srv, err := NewServer(ctx, cfg)
 	if err != nil {
 		return err
