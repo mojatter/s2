@@ -35,24 +35,45 @@ func WriteS3Error(w http.ResponseWriter, r *http.Request, code, message string, 
 	})
 }
 
-type requestIDKey struct{}
+type requestInfoKey struct{}
+
+// requestInfo is what the request line logs beyond the HTTP exchange.
+type requestInfo struct {
+	id        string
+	operation string
+	attrs     []any
+}
 
 // RequestIDFromContext returns the ID the S3 API gave the request, or "" outside it.
 func RequestIDFromContext(ctx context.Context) string {
-	id, _ := ctx.Value(requestIDKey{}).(string)
-	return id
+	if info, ok := ctx.Value(requestInfoKey{}).(*requestInfo); ok {
+		return info.id
+	}
+	return ""
+}
+
+// SetS3Operation names the S3 operation r serves, with attrs, on its request line; a later call replaces it.
+func SetS3Operation(r *http.Request, name string, attrs ...any) {
+	if info, ok := r.Context().Value(requestInfoKey{}).(*requestInfo); ok {
+		info.operation, info.attrs = name, attrs
+	}
 }
 
 // requestLogHandler gives each request an ID, answers it as x-amz-request-id and logs the request at Debug.
 func requestLogHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := rand.Text()
-		w.Header().Set("x-amz-request-id", id)
+		info := &requestInfo{id: rand.Text()}
+		w.Header().Set("x-amz-request-id", info.id)
 		rw := &responseRecorder{ResponseWriter: w}
 		start := time.Now()
-		next.ServeHTTP(rw, r.WithContext(context.WithValue(r.Context(), requestIDKey{}, id)))
-		slog.Debug("S3 API request", "request_id", id, "method", r.Method, "path", r.URL.Path,
-			"status", rw.statusCode(), "bytes", rw.bytes, "duration", time.Since(start))
+		r = r.WithContext(context.WithValue(r.Context(), requestInfoKey{}, info))
+		next.ServeHTTP(rw, r)
+		args := []any{"request_id", info.id, "method", r.Method, "path", r.URL.Path}
+		if info.operation != "" {
+			args = append(append(args, "operation", info.operation), info.attrs...)
+		}
+		args = append(args, "status", rw.statusCode(), "bytes", rw.bytes, "duration", time.Since(start))
+		slog.DebugContext(r.Context(), "S3 API request", args...)
 	})
 }
 
@@ -116,10 +137,7 @@ func WriteXML(w http.ResponseWriter, status int, v any) {
 // served by S3Handler().
 var s3Handlers = map[string]HandlerFunc{}
 
-// S3Handler builds an HTTP handler that serves the S3-compatible API:
-// routes registered via RegisterS3HandleFunc, wrapped with a request ID and
-// a Debug line per request, the health endpoint at cfg.HealthPath (when set)
-// and permissive CORS headers.
+// S3Handler serves the registered S3 routes behind a request ID and Debug line, the health endpoint (when cfg.HealthPath is set) and permissive CORS.
 func (s *Server) S3Handler() http.Handler {
 	reject := func(w http.ResponseWriter, r *http.Request) {
 		WriteS3Error(w, r, "InvalidArgument", "The request path is not valid", http.StatusBadRequest)

@@ -12,6 +12,7 @@ import (
 )
 
 func HandleListBuckets(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	server.SetS3Operation(r, "ListBuckets")
 	ctx := r.Context()
 	// S3Action defers this route entirely so FilterBucketNames can filter
 	// per-bucket instead of gating the whole request on an up-front
@@ -56,6 +57,7 @@ func namesBucketSubresource(r *http.Request) bool {
 }
 
 func handleCreateBucket(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	server.SetS3Operation(r, "CreateBucket")
 	if namesBucketSubresource(r) {
 		writeError(w, r, "NotImplemented", "This operation is not implemented", http.StatusNotImplemented)
 		return
@@ -72,6 +74,7 @@ func handleCreateBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 }
 
 func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	server.SetS3Operation(r, "DeleteBucket")
 	if namesBucketSubresource(r) {
 		writeError(w, r, "NotImplemented", "This operation is not implemented", http.StatusNotImplemented)
 		return
@@ -133,6 +136,7 @@ func bucketHoldsObjects(ctx context.Context, s *server.Server, name string) (boo
 }
 
 func handleHeadBucket(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	server.SetS3Operation(r, "HeadBucket")
 	bucketName := r.PathValue("bucket")
 
 	exists, err := s.Buckets.Exists(r.Context(), bucketName)
@@ -149,6 +153,7 @@ func handleHeadBucket(s *server.Server, w http.ResponseWriter, r *http.Request) 
 }
 
 func handleGetBucketLocation(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	server.SetS3Operation(r, "GetBucketLocation")
 	bucketName := r.PathValue("bucket")
 
 	exists, err := s.Buckets.Exists(r.Context(), bucketName)

@@ -45,6 +45,7 @@ func bucketGeneration(s *server.Server, w http.ResponseWriter, r *http.Request, 
 }
 
 func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	server.SetS3Operation(r, "CreateMultipartUpload")
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
 	key := r.PathValue("key")
@@ -91,6 +92,7 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, "NotImplemented", "This operation is not implemented", http.StatusNotImplemented)
 		return
 	}
+	server.SetS3Operation(r, "UploadPart", "upload_id", r.URL.Query().Get("uploadId"), "part_number", r.URL.Query().Get("partNumber"))
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
 	key := r.PathValue("key")
@@ -147,6 +149,7 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 }
 
 func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	server.SetS3Operation(r, "CompleteMultipartUpload", "upload_id", r.URL.Query().Get("uploadId"))
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
 	key := r.PathValue("key")
@@ -247,6 +250,7 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 }
 
 func handleAbortMultipartUpload(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	server.SetS3Operation(r, "AbortMultipartUpload", "upload_id", r.URL.Query().Get("uploadId"))
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
 	key := r.PathValue("key")
@@ -292,6 +296,7 @@ func parseListLimit(r *http.Request, name string) (int, bool) {
 var s2Owner = Owner{ID: s2OwnerID, DisplayName: s2OwnerDisplayName}
 
 func handleListMultipartUploads(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	server.SetS3Operation(r, "ListMultipartUploads")
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
 	q := r.URL.Query()
@@ -384,6 +389,7 @@ func handleListMultipartUploads(s *server.Server, w http.ResponseWriter, r *http
 }
 
 func handleListParts(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	server.SetS3Operation(r, "ListParts", "upload_id", r.URL.Query().Get("uploadId"))
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
 	key := r.PathValue("key")

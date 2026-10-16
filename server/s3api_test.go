@@ -439,6 +439,14 @@ func TestRequestLogHandler(t *testing.T) {
 			wantBytes:  "bytes=7 ",
 		},
 		{
+			caseName: "operation",
+			handler: func(_ http.ResponseWriter, r *http.Request) {
+				SetS3Operation(r, "UploadPart", "upload_id", "u1", "part_number", "3")
+			},
+			wantStatus: http.StatusOK,
+			wantBytes:  "operation=UploadPart upload_id=u1 part_number=3 status=200 bytes=0 ",
+		},
+		{
 			caseName:   "nothing written",
 			handler:    func(http.ResponseWriter, *http.Request) {},
 			wantStatus: http.StatusOK,
@@ -454,7 +462,8 @@ func TestRequestLogHandler(t *testing.T) {
 			id := w.Header().Get("x-amz-request-id")
 			assert.Len(t, id, 26)
 			assert.Equal(t, tc.wantStatus, w.Code)
-			assert.Contains(t, buf.String(), `msg="S3 API request" request_id=`+id+" method=GET path=/b/k status="+strconv.Itoa(tc.wantStatus)+" ")
+			assert.Contains(t, buf.String(), `msg="S3 API request" request_id=`+id+" method=GET path=/b/k ")
+			assert.Contains(t, buf.String(), " status="+strconv.Itoa(tc.wantStatus)+" ")
 			if tc.wantBytes != "" {
 				assert.Contains(t, buf.String(), tc.wantBytes)
 			}
@@ -471,6 +480,32 @@ func TestRequestLogHandler(t *testing.T) {
 		h.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/", nil))
 		assert.NotEqual(t, w1.Header().Get("x-amz-request-id"), w2.Header().Get("x-amz-request-id"))
 	})
+}
+
+// readFromRecorder records whether a body reached its ReadFrom.
+type readFromRecorder struct {
+	*httptest.ResponseRecorder
+	readFrom bool
+}
+
+func (w *readFromRecorder) ReadFrom(src io.Reader) (int64, error) {
+	w.readFrom = true
+	return io.Copy(w.ResponseRecorder, src)
+}
+
+func TestRequestLogHandlerReadFrom(t *testing.T) {
+	buf := captureSlog(t)
+	w := &readFromRecorder{ResponseRecorder: httptest.NewRecorder()}
+	requestLogHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.Copy(w, io.LimitReader(strings.NewReader("hello world"), 11))
+	})).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/b/k", nil))
+	assert.True(t, w.readFrom)
+	assert.Equal(t, "hello world", w.Body.String())
+	assert.Contains(t, buf.String(), "status=200 bytes=11 ")
+}
+
+func TestSetS3OperationOutsideS3Handler(t *testing.T) {
+	assert.NotPanics(t, func() { SetS3Operation(httptest.NewRequest(http.MethodGet, "/", nil), "GetObject") })
 }
 
 func TestS3HandlerRequestLog(t *testing.T) {
