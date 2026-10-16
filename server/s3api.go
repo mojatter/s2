@@ -72,7 +72,12 @@ func requestLogHandler(next http.Handler) http.Handler {
 		if info.operation != "" {
 			args = append(append(args, "operation", info.operation), info.attrs...)
 		}
-		args = append(args, "status", rw.statusCode(), "bytes", rw.bytes, "duration", time.Since(start))
+		bytes := rw.bytes
+		// net/http discards a HEAD body but reports it written.
+		if r.Method == http.MethodHead {
+			bytes = 0
+		}
+		args = append(args, "status", rw.statusCode(), "bytes", bytes, "duration", time.Since(start))
 		slog.DebugContext(r.Context(), "S3 API request", args...)
 	})
 }

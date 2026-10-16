@@ -644,7 +644,12 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 		writeError(w, r, "NotImplemented", "This operation is not implemented", http.StatusNotImplemented)
 		return
 	}
-	server.SetS3Operation(r, "DeleteObject")
+	// Named before Buckets.Get, which can fail before the abort is dispatched.
+	if q := r.URL.Query(); q.Has("uploadId") {
+		server.SetS3Operation(r, "AbortMultipartUpload", "upload_id", q.Get("uploadId"))
+	} else {
+		server.SetS3Operation(r, "DeleteObject")
+	}
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {

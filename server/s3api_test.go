@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"io"
 	"log"
@@ -408,6 +409,7 @@ func TestStartSkipsNilFactories(t *testing.T) {
 func TestRequestLogHandler(t *testing.T) {
 	testCases := []struct {
 		caseName   string
+		method     string
 		handler    http.HandlerFunc
 		wantStatus int
 		wantBytes  string
@@ -447,6 +449,15 @@ func TestRequestLogHandler(t *testing.T) {
 			wantBytes:  "operation=UploadPart upload_id=u1 part_number=3 status=200 bytes=0 ",
 		},
 		{
+			caseName: "head discards the body",
+			method:   http.MethodHead,
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				WriteS3Error(w, r, "NoSuchKey", "The specified key does not exist.", http.StatusNotFound)
+			},
+			wantStatus: http.StatusNotFound,
+			wantBytes:  "bytes=0 ",
+		},
+		{
 			caseName:   "nothing written",
 			handler:    func(http.ResponseWriter, *http.Request) {},
 			wantStatus: http.StatusOK,
@@ -457,12 +468,13 @@ func TestRequestLogHandler(t *testing.T) {
 		t.Run(tc.caseName, func(t *testing.T) {
 			buf := captureSlog(t)
 			w := httptest.NewRecorder()
-			requestLogHandler(tc.handler).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/b/k", nil))
+			method := cmp.Or(tc.method, http.MethodGet)
+			requestLogHandler(tc.handler).ServeHTTP(w, httptest.NewRequest(method, "/b/k", nil))
 
 			id := w.Header().Get("x-amz-request-id")
 			assert.Len(t, id, 26)
 			assert.Equal(t, tc.wantStatus, w.Code)
-			assert.Contains(t, buf.String(), `msg="S3 API request" request_id=`+id+" method=GET path=/b/k ")
+			assert.Contains(t, buf.String(), `msg="S3 API request" request_id=`+id+" method="+method+" path=/b/k ")
 			assert.Contains(t, buf.String(), " status="+strconv.Itoa(tc.wantStatus)+" ")
 			if tc.wantBytes != "" {
 				assert.Contains(t, buf.String(), tc.wantBytes)

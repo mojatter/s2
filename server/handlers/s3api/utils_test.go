@@ -361,6 +361,9 @@ func (s *UtilsTestSuite) TestRequestLogOperation() {
 		{caseName: "CompleteMultipartUpload", method: http.MethodPost, target: "/b/k?uploadId=u1", wantLog: "operation=CompleteMultipartUpload upload_id=u1 status="},
 		{caseName: "AbortMultipartUpload", method: http.MethodDelete, target: "/b/k?uploadId=u1", wantLog: "operation=AbortMultipartUpload upload_id=u1 status="},
 		{caseName: "ListParts", method: http.MethodGet, target: "/b/k?uploadId=u1", wantLog: "operation=ListParts upload_id=u1 status="},
+		{caseName: "AbortMultipartUpload on a missing bucket", method: http.MethodDelete, target: "/missing/k?uploadId=u1", wantLog: "operation=AbortMultipartUpload upload_id=u1 status=404"},
+		{caseName: "CreateBucket subresource", method: http.MethodPut, target: "/b?versioning", wantLog: "path=/b status=501"},
+		{caseName: "DeleteBucket subresource", method: http.MethodDelete, target: "/b?cors", wantLog: "path=/b status=501"},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
@@ -372,7 +375,7 @@ func (s *UtilsTestSuite) TestRequestLogOperation() {
 			}
 			s.server.S3Handler().ServeHTTP(httptest.NewRecorder(), req)
 			s.Contains(buf.String(), tc.wantLog)
-			s.Equal(1, strings.Count(buf.String(), "operation="), "one operation per request line")
+			s.Equal(strings.Count(tc.wantLog, "operation="), strings.Count(buf.String(), "operation="))
 		})
 	}
 }
