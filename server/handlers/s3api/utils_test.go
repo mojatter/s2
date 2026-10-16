@@ -323,6 +323,77 @@ func (s *UtilsTestSuite) TestLogS3Error() {
 	}
 }
 
+func (s *UtilsTestSuite) TestLogS3ErrorRequestID() {
+	s.putObject("b", "k", "v")
+	buf := captureSlog(s.T())
+	w := httptest.NewRecorder()
+	s.server.S3Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/b/missing", nil))
+	s.Equal(http.StatusNotFound, w.Code)
+	id := w.Header().Get("x-amz-request-id")
+	s.Len(id, 26)
+	s.Contains(w.Body.String(), "<RequestId>"+id+"</RequestId>")
+	s.Contains(buf.String(), `msg="S3 API error" request_id=`+id+" ")
+}
+
+func (s *UtilsTestSuite) TestRequestLogOperation() {
+	testCases := []struct {
+		caseName string
+		method   string
+		target   string
+		header   map[string]string
+		body     string
+		wantLog  string
+	}{
+		{caseName: "ListBuckets", method: http.MethodGet, target: "/", wantLog: "operation=ListBuckets status="},
+		{caseName: "CreateBucket", method: http.MethodPut, target: "/nb", wantLog: "operation=CreateBucket status="},
+		{caseName: "HeadBucket", method: http.MethodHead, target: "/b", wantLog: "operation=HeadBucket status="},
+		{caseName: "GetBucketLocation", method: http.MethodGet, target: "/b?location", wantLog: "operation=GetBucketLocation status="},
+		{caseName: "ListObjectsV2", method: http.MethodGet, target: "/b?list-type=2", wantLog: "operation=ListObjectsV2 status="},
+		{caseName: "ListMultipartUploads", method: http.MethodGet, target: "/b?uploads", wantLog: "operation=ListMultipartUploads status="},
+		{caseName: "DeleteObjects", method: http.MethodPost, target: "/b?delete", body: "<Delete></Delete>", wantLog: "operation=DeleteObjects status="},
+		{caseName: "GetObject", method: http.MethodGet, target: "/b/k", wantLog: "operation=GetObject status=200"},
+		{caseName: "HeadObject", method: http.MethodHead, target: "/b/k", wantLog: "operation=HeadObject status=200"},
+		{caseName: "PutObject", method: http.MethodPut, target: "/b/k2", body: "v", wantLog: "operation=PutObject status=200"},
+		{caseName: "CopyObject", method: http.MethodPut, target: "/b/k3", header: map[string]string{"x-amz-copy-source": "/b/k"}, wantLog: "operation=CopyObject copy_source=/b/k status=200"},
+		{caseName: "DeleteObject", method: http.MethodDelete, target: "/b/k4", wantLog: "operation=DeleteObject status="},
+		{caseName: "CreateMultipartUpload", method: http.MethodPost, target: "/b/k?uploads", wantLog: "operation=CreateMultipartUpload status=200"},
+		{caseName: "UploadPart", method: http.MethodPut, target: "/b/k?partNumber=3&uploadId=u1", body: "v", wantLog: "operation=UploadPart upload_id=u1 part_number=3 status="},
+		{caseName: "CompleteMultipartUpload", method: http.MethodPost, target: "/b/k?uploadId=u1", wantLog: "operation=CompleteMultipartUpload upload_id=u1 status="},
+		{caseName: "AbortMultipartUpload", method: http.MethodDelete, target: "/b/k?uploadId=u1", wantLog: "operation=AbortMultipartUpload upload_id=u1 status="},
+		{caseName: "ListParts", method: http.MethodGet, target: "/b/k?uploadId=u1", wantLog: "operation=ListParts upload_id=u1 status="},
+		{caseName: "AbortMultipartUpload on a missing bucket", method: http.MethodDelete, target: "/missing/k?uploadId=u1", wantLog: "operation=AbortMultipartUpload upload_id=u1 status=404"},
+		{caseName: "CreateBucket subresource", method: http.MethodPut, target: "/b?versioning", wantLog: "path=/b status=501"},
+		{caseName: "DeleteBucket subresource", method: http.MethodDelete, target: "/b?cors", wantLog: "path=/b status=501"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.putObject("b", "k", "v")
+			buf := captureSlog(s.T())
+			req := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))
+			for k, v := range tc.header {
+				req.Header.Set(k, v)
+			}
+			s.server.S3Handler().ServeHTTP(httptest.NewRecorder(), req)
+			s.Contains(buf.String(), tc.wantLog)
+			s.Equal(strings.Count(tc.wantLog, "operation="), strings.Count(buf.String(), "operation="))
+		})
+	}
+}
+
+func (s *UtilsTestSuite) TestRequestLogOperationRejectedBySigV4() {
+	cfg := server.DefaultConfig()
+	cfg.Root = s.T().TempDir()
+	cfg.User, cfg.Password = "AKID", "secret"
+	srv, err := server.NewServer(context.Background(), cfg)
+	s.Require().NoError(err)
+	buf := captureSlog(s.T())
+	w := httptest.NewRecorder()
+	srv.S3Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/b/k", nil))
+	s.Equal(http.StatusForbidden, w.Code)
+	s.Contains(buf.String(), "S3 API request")
+	s.NotContains(buf.String(), "operation=")
+}
+
 // captureSlog sends slog to a Debug-level buffer until t ends; SetDefault alone does not restore the log package.
 func captureSlog(t *testing.T) *strings.Builder {
 	buf := &strings.Builder{}

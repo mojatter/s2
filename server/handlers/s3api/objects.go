@@ -290,6 +290,7 @@ func buildListBucketResult(p listObjectsParams, objs []s2.Object, prefixes []str
 }
 
 func handleListObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	server.SetS3Operation(r, "ListObjectsV2")
 	ctx := r.Context()
 	p, err := parseListObjectsParams(r)
 	if err != nil {
@@ -336,6 +337,11 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && r.URL.Query().Get("uploadId") != "" {
 		handleListParts(s, w, r)
 		return
+	}
+	if r.Method == http.MethodHead {
+		server.SetS3Operation(r, "HeadObject")
+	} else {
+		server.SetS3Operation(r, "GetObject")
 	}
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
@@ -478,6 +484,7 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		handleCopyObject(s, w, r, copySource)
 		return
 	}
+	server.SetS3Operation(r, "PutObject")
 
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
@@ -538,6 +545,7 @@ func parseMetadataHeaders(r *http.Request) s2.Metadata {
 }
 
 func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, copySource string) {
+	server.SetS3Operation(r, "CopyObject", "copy_source", copySource)
 	ctx := r.Context()
 	dstBucket := r.PathValue("bucket")
 	dstKey := r.PathValue("key")
@@ -636,6 +644,12 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 		writeError(w, r, "NotImplemented", "This operation is not implemented", http.StatusNotImplemented)
 		return
 	}
+	// Named before Buckets.Get, which can fail before the abort is dispatched.
+	if q := r.URL.Query(); q.Has("uploadId") {
+		server.SetS3Operation(r, "AbortMultipartUpload", "upload_id", q.Get("uploadId"))
+	} else {
+		server.SetS3Operation(r, "DeleteObject")
+	}
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
@@ -658,6 +672,7 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 }
 
 func handleDeleteObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	server.SetS3Operation(r, "DeleteObjects")
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
 

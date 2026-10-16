@@ -97,7 +97,7 @@ func logS3Error(r *http.Request, code string, status int, err error, attrs ...an
 	if status >= http.StatusInternalServerError && !errors.Is(err, context.Canceled) {
 		level = slog.LevelError
 	}
-	args := append([]any{"method", r.Method, "path", r.URL.Path, "code", code, "status", status, "error", err}, attrs...)
+	args := append([]any{"request_id", server.RequestIDFromContext(r.Context()), "method", r.Method, "path", r.URL.Path, "code", code, "status", status, "error", err}, attrs...)
 	slog.Log(r.Context(), level, "S3 API error", args...)
 }
 

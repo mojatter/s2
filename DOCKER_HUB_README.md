@@ -52,7 +52,7 @@ services:
 | `S2_SERVER_PASSWORD` | — | Password for authentication |
 | `S2_SERVER_BUCKETS` | — | Comma-separated list of buckets to create on startup |
 | `S2_SERVER_MULTIPART_MAX_AGE` | `86400` | Seconds an unfinished multipart upload stays usable; past it the upload is refused and its parts are reclaimed (negative keeps uploads forever) |
-| `S2_SERVER_LOG_LEVEL` | `info` | Lowest level logged: `debug`, `info`, `warn` or `error`; `debug` adds the detail of 4xx error responses |
+| `S2_SERVER_LOG_LEVEL` | `info` | Lowest level logged: `debug`, `info`, `warn` or `error`; `debug` adds one line per S3 API request and the detail of 4xx error responses |
 | `S2_SERVER_CONFIG` | — | Path to JSON config file |
 
 ### Authentication

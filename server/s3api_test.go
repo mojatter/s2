@@ -1,10 +1,16 @@
 package server
 
 import (
+	"cmp"
 	"context"
+	"io"
+	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -398,4 +404,180 @@ func TestStartSkipsNilFactories(t *testing.T) {
 	// with the factory writes inside Start, so these reads are race-free.
 	assert.True(t, nilCalled, "nil-returning factory should still be invoked")
 	assert.True(t, realCalled, "non-nil factory should be invoked")
+}
+
+func TestRequestLogHandler(t *testing.T) {
+	testCases := []struct {
+		caseName   string
+		method     string
+		handler    http.HandlerFunc
+		wantStatus int
+		wantBytes  string
+		wantBodyID bool
+	}{
+		{
+			caseName: "error response carries the ID",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				WriteS3Error(w, r, "NoSuchKey", "The specified key does not exist.", http.StatusNotFound)
+			},
+			wantStatus: http.StatusNotFound,
+			wantBodyID: true,
+		},
+		{
+			caseName: "write",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte("hello"))
+			},
+			wantStatus: http.StatusOK,
+			wantBytes:  "bytes=5 ",
+		},
+		{
+			caseName: "read from",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = io.Copy(w, io.LimitReader(strings.NewReader("hello world"), 7))
+			},
+			wantStatus: http.StatusPartialContent,
+			wantBytes:  "bytes=7 ",
+		},
+		{
+			caseName: "operation",
+			handler: func(_ http.ResponseWriter, r *http.Request) {
+				SetS3Operation(r, "UploadPart", "upload_id", "u1", "part_number", "3")
+			},
+			wantStatus: http.StatusOK,
+			wantBytes:  "operation=UploadPart upload_id=u1 part_number=3 status=200 bytes=0 ",
+		},
+		{
+			caseName: "head discards the body",
+			method:   http.MethodHead,
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				WriteS3Error(w, r, "NoSuchKey", "The specified key does not exist.", http.StatusNotFound)
+			},
+			wantStatus: http.StatusNotFound,
+			wantBytes:  "bytes=0 ",
+		},
+		{
+			caseName:   "nothing written",
+			handler:    func(http.ResponseWriter, *http.Request) {},
+			wantStatus: http.StatusOK,
+			wantBytes:  "bytes=0 ",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			buf := captureSlog(t)
+			w := httptest.NewRecorder()
+			method := cmp.Or(tc.method, http.MethodGet)
+			requestLogHandler(tc.handler).ServeHTTP(w, httptest.NewRequest(method, "/b/k", nil))
+
+			id := w.Header().Get("x-amz-request-id")
+			assert.Len(t, id, 26)
+			assert.Equal(t, tc.wantStatus, w.Code)
+			assert.Contains(t, buf.String(), `msg="S3 API request" request_id=`+id+" method="+method+" path=/b/k ")
+			assert.Contains(t, buf.String(), " status="+strconv.Itoa(tc.wantStatus)+" ")
+			if tc.wantBytes != "" {
+				assert.Contains(t, buf.String(), tc.wantBytes)
+			}
+			if tc.wantBodyID {
+				assert.Contains(t, w.Body.String(), "<RequestId>"+id+"</RequestId>")
+			}
+		})
+	}
+
+	t.Run("each request gets its own ID", func(t *testing.T) {
+		h := requestLogHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		w1, w2 := httptest.NewRecorder(), httptest.NewRecorder()
+		h.ServeHTTP(w1, httptest.NewRequest(http.MethodGet, "/", nil))
+		h.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/", nil))
+		assert.NotEqual(t, w1.Header().Get("x-amz-request-id"), w2.Header().Get("x-amz-request-id"))
+	})
+}
+
+// readFromRecorder records whether a body reached its ReadFrom.
+type readFromRecorder struct {
+	*httptest.ResponseRecorder
+	readFrom bool
+}
+
+func (w *readFromRecorder) ReadFrom(src io.Reader) (int64, error) {
+	w.readFrom = true
+	return io.Copy(w.ResponseRecorder, src)
+}
+
+func TestRequestLogHandlerReadFrom(t *testing.T) {
+	buf := captureSlog(t)
+	w := &readFromRecorder{ResponseRecorder: httptest.NewRecorder()}
+	requestLogHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.Copy(w, io.LimitReader(strings.NewReader("hello world"), 11))
+	})).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/b/k", nil))
+	assert.True(t, w.readFrom)
+	assert.Equal(t, "hello world", w.Body.String())
+	assert.Contains(t, buf.String(), "status=200 bytes=11 ")
+}
+
+func TestSetS3OperationOutsideS3Handler(t *testing.T) {
+	assert.NotPanics(t, func() { SetS3Operation(httptest.NewRequest(http.MethodGet, "/", nil), "GetObject") })
+}
+
+func TestS3HandlerRequestLog(t *testing.T) {
+	registryMux.Lock()
+	origS3 := s3Handlers
+	s3Handlers = map[string]HandlerFunc{}
+	registryMux.Unlock()
+	defer func() {
+		registryMux.Lock()
+		s3Handlers = origS3
+		registryMux.Unlock()
+	}()
+
+	RegisterS3HandleFunc("GET /{bucket}/{key...}", func(_ *Server, w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(RequestIDFromContext(r.Context())))
+	})
+	cfg := DefaultConfig()
+	cfg.Root = t.TempDir()
+	srv, err := NewServer(context.Background(), cfg)
+	require.NoError(t, err)
+
+	testCases := []struct {
+		caseName   string
+		method     string
+		path       string
+		wantLogged bool
+	}{
+		{caseName: "route", method: http.MethodGet, path: "/b/k", wantLogged: true},
+		{caseName: "rejected path", method: http.MethodGet, path: "/b/./k", wantLogged: true},
+		{caseName: "health check", method: http.MethodGet, path: "/healthz"},
+		{caseName: "CORS preflight", method: http.MethodOptions, path: "/b/k"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			buf := captureSlog(t)
+			w := httptest.NewRecorder()
+			srv.S3Handler().ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+
+			id := w.Header().Get("x-amz-request-id")
+			if !tc.wantLogged {
+				assert.Empty(t, id)
+				assert.NotContains(t, buf.String(), "S3 API request")
+				return
+			}
+			assert.Len(t, id, 26)
+			assert.Contains(t, w.Body.String(), id)
+			assert.Contains(t, buf.String(), "request_id="+id)
+		})
+	}
+}
+
+// captureSlog sends slog to a Debug-level buffer until t ends; SetDefault alone does not restore the log package.
+func captureSlog(t *testing.T) *strings.Builder {
+	buf := &strings.Builder{}
+	prev, prevW, prevFlags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevW)
+		log.SetFlags(prevFlags)
+	})
+	return buf
 }
