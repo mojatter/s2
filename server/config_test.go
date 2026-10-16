@@ -169,6 +169,9 @@ func TestLoadLogLevel(t *testing.T) {
 			}
 			if tc.wantErr {
 				require.Error(t, err)
+				if tc.file != "" {
+					assert.ErrorContains(t, err, "config.json")
+				}
 				return
 			}
 			require.NoError(t, err)

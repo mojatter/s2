@@ -95,7 +95,7 @@ type Config struct {
 	Users []User `json:"users,omitempty"`
 	// Buckets is a list of bucket names to create on startup if they don't already exist.
 	Buckets []string `json:"buckets"`
-	// LogLevel is the lowest level s2-server logs: "debug", "info" (default), "warn" or "error".
+	// LogLevel is the lowest level Run sets on slog's default logger: "debug", "info" (default), "warn" or "error".
 	LogLevel slog.Level `json:"log_level"`
 }
 
@@ -263,7 +263,7 @@ func (cfg *Config) LoadFile(filename string) error {
 		return err
 	}
 	if err := json.Unmarshal(data, cfg); err != nil {
-		return err
+		return fmt.Errorf("%s: %w", filename, err)
 	}
 	return nil
 }
