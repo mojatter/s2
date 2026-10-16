@@ -113,6 +113,7 @@ func initFlags(args []string) (*Flags, error) {
 	return &f, nil
 }
 
+// Run is the s2-server command: it loads the Config, applies its LogLevel to slog's default logger and serves until SIGINT or SIGTERM.
 func Run(args []string) error {
 	f, err := initFlags(args)
 	if err != nil {
@@ -145,6 +146,7 @@ func Run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	slog.SetLogLoggerLevel(cfg.LogLevel)
 	srv, err := NewServer(ctx, cfg)
 	if err != nil {
 		return err

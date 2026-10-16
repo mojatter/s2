@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -133,6 +134,48 @@ func TestLoadEnvMultipartMaxAge(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, cfg.MultipartMaxAge)
+		})
+	}
+}
+
+func TestLoadLogLevel(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		file     string
+		env      string
+		want     slog.Level
+		wantErr  bool
+	}{
+		{caseName: "default", want: slog.LevelInfo},
+		{caseName: "file", file: `{"log_level":"debug"}`, want: slog.LevelDebug},
+		{caseName: "env", env: "warn", want: slog.LevelWarn},
+		{caseName: "env in upper case", env: "ERROR", want: slog.LevelError},
+		{caseName: "env beats file", file: `{"log_level":"debug"}`, env: "info", want: slog.LevelInfo},
+		{caseName: "invalid file", file: `{"log_level":"verbose"}`, wantErr: true},
+		{caseName: "invalid env", env: "verbose", wantErr: true},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			t.Setenv(EnvS2ServerLogLevel, tc.env)
+			cfg := DefaultConfig()
+			var err error
+			if tc.file != "" {
+				path := filepath.Join(t.TempDir(), "config.json")
+				require.NoError(t, os.WriteFile(path, []byte(tc.file), 0o600))
+				err = cfg.LoadFile(path)
+			}
+			if err == nil {
+				err = cfg.LoadEnv()
+			}
+			if tc.wantErr {
+				require.Error(t, err)
+				if tc.file != "" {
+					assert.ErrorContains(t, err, "config.json")
+				}
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.LogLevel)
 		})
 	}
 }

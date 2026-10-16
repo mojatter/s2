@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -43,6 +44,7 @@ const (
 	EnvS2ServerUser            = "S2_SERVER_USER"
 	EnvS2ServerPassword        = "S2_SERVER_PASSWORD" // #nosec G101 -- env var name, not a credential
 	EnvS2ServerBuckets         = "S2_SERVER_BUCKETS"
+	EnvS2ServerLogLevel        = "S2_SERVER_LOG_LEVEL"
 )
 
 // Config is a configuration for the server.
@@ -93,6 +95,8 @@ type Config struct {
 	Users []User `json:"users,omitempty"`
 	// Buckets is a list of bucket names to create on startup if they don't already exist.
 	Buckets []string `json:"buckets"`
+	// LogLevel is the lowest level Run sets on slog's default logger: "debug", "info" (default), "warn" or "error".
+	LogLevel slog.Level `json:"log_level"`
 }
 
 const (
@@ -259,7 +263,7 @@ func (cfg *Config) LoadFile(filename string) error {
 		return err
 	}
 	if err := json.Unmarshal(data, cfg); err != nil {
-		return err
+		return fmt.Errorf("%s: %w", filename, err)
 	}
 	return nil
 }
@@ -311,6 +315,11 @@ func (cfg *Config) LoadEnv() error {
 	}
 	if v := os.Getenv(EnvS2ServerBuckets); v != "" {
 		cfg.Buckets = splitBucketList(v)
+	}
+	if v := os.Getenv(EnvS2ServerLogLevel); v != "" {
+		if err := cfg.LogLevel.UnmarshalText([]byte(v)); err != nil {
+			return fmt.Errorf("invalid %s: %w", EnvS2ServerLogLevel, err)
+		}
 	}
 	return nil
 }

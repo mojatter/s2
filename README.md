@@ -435,6 +435,7 @@ if _, err := strg.Get(ctx, "missing.txt"); errors.Is(err, s2.ErrNotExist) {
 | `S2_SERVER_MAX_UPLOAD_SIZE` | `5368709120` (`16777216` on `memfs`) | Largest object in bytes accepted by PUT, UploadPart and a console upload |
 | `S2_SERVER_MAX_PREVIEW_SIZE` | `10485760` | Largest text file in bytes the console previews |
 | `S2_SERVER_MULTIPART_MAX_AGE` | `86400` | Seconds an unfinished multipart upload stays usable; past it the upload is refused and its parts are reclaimed (negative keeps uploads forever) |
+| `S2_SERVER_LOG_LEVEL` | `info` | Lowest level logged: `debug`, `info`, `warn` or `error`; `debug` adds the detail of 4xx error responses |
 
 Environment variables take precedence over the config file.
 
