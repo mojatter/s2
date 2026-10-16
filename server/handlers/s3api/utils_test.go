@@ -323,6 +323,18 @@ func (s *UtilsTestSuite) TestLogS3Error() {
 	}
 }
 
+func (s *UtilsTestSuite) TestLogS3ErrorRequestID() {
+	s.putObject("b", "k", "v")
+	buf := captureSlog(s.T())
+	w := httptest.NewRecorder()
+	s.server.S3Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/b/missing", nil))
+	s.Equal(http.StatusNotFound, w.Code)
+	id := w.Header().Get("x-amz-request-id")
+	s.Len(id, 26)
+	s.Contains(w.Body.String(), "<RequestId>"+id+"</RequestId>")
+	s.Contains(buf.String(), `msg="S3 API error" request_id=`+id+" ")
+}
+
 // captureSlog sends slog to a Debug-level buffer until t ends; SetDefault alone does not restore the log package.
 func captureSlog(t *testing.T) *strings.Builder {
 	buf := &strings.Builder{}

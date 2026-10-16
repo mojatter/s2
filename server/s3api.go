@@ -1,8 +1,11 @@
 package server
 
 import (
+	"context"
+	"crypto/rand"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -28,8 +31,75 @@ func WriteS3Error(w http.ResponseWriter, r *http.Request, code, message string, 
 		Code:      code,
 		Message:   message,
 		Resource:  r.URL.Path,
-		RequestID: "s2-request-id",
+		RequestID: RequestIDFromContext(r.Context()),
 	})
+}
+
+type requestIDKey struct{}
+
+// RequestIDFromContext returns the ID the S3 API gave the request, or "" outside it.
+func RequestIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(requestIDKey{}).(string)
+	return id
+}
+
+// requestLogHandler gives each request an ID, answers it as x-amz-request-id and logs the request at Debug.
+func requestLogHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := rand.Text()
+		w.Header().Set("x-amz-request-id", id)
+		rw := &responseRecorder{ResponseWriter: w}
+		start := time.Now()
+		next.ServeHTTP(rw, r.WithContext(context.WithValue(r.Context(), requestIDKey{}, id)))
+		slog.Debug("S3 API request", "request_id", id, "method", r.Method, "path", r.URL.Path,
+			"status", rw.statusCode(), "bytes", rw.bytes, "duration", time.Since(start))
+	})
+}
+
+// responseRecorder records the status and body size written through it.
+type responseRecorder struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+func (rw *responseRecorder) WriteHeader(status int) {
+	if rw.status == 0 {
+		rw.status = status
+	}
+	rw.ResponseWriter.WriteHeader(status)
+}
+
+func (rw *responseRecorder) Write(p []byte) (int, error) {
+	if rw.status == 0 {
+		rw.status = http.StatusOK
+	}
+	n, err := rw.ResponseWriter.Write(p)
+	rw.bytes += int64(n)
+	return n, err
+}
+
+// ReadFrom keeps the underlying writer's ReadFrom, which serves a file body with sendfile.
+func (rw *responseRecorder) ReadFrom(src io.Reader) (int64, error) {
+	if rw.status == 0 {
+		rw.status = http.StatusOK
+	}
+	n, err := io.Copy(rw.ResponseWriter, src)
+	rw.bytes += n
+	return n, err
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (rw *responseRecorder) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
+}
+
+// statusCode is the status sent, which is 200 when the handler wrote nothing.
+func (rw *responseRecorder) statusCode() int {
+	if rw.status == 0 {
+		return http.StatusOK
+	}
+	return rw.status
 }
 
 // WriteXML writes v as an XML response body with the given HTTP status.
@@ -47,13 +117,14 @@ func WriteXML(w http.ResponseWriter, status int, v any) {
 var s3Handlers = map[string]HandlerFunc{}
 
 // S3Handler builds an HTTP handler that serves the S3-compatible API:
-// routes registered via RegisterS3HandleFunc, wrapped with the health
-// endpoint at cfg.HealthPath (when set) and permissive CORS headers.
+// routes registered via RegisterS3HandleFunc, wrapped with a request ID and
+// a Debug line per request, the health endpoint at cfg.HealthPath (when set)
+// and permissive CORS headers.
 func (s *Server) S3Handler() http.Handler {
 	reject := func(w http.ResponseWriter, r *http.Request) {
 		WriteS3Error(w, r, "InvalidArgument", "The request path is not valid", http.StatusBadRequest)
 	}
-	return s.buildMux(s3Handlers, cleanPathHandler(reject), healthHandler(s.Config.HealthPath), corsHandler)
+	return s.buildMux(s3Handlers, cleanPathHandler(reject), requestLogHandler, healthHandler(s.Config.HealthPath), corsHandler)
 }
 
 // cleanPathHandler answers with reject when the request path is not already
