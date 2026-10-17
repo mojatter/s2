@@ -377,7 +377,7 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	setObjectHeaders(w, obj, key)
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, rc)
+	server.CopyBody(w, r, rc)
 }
 
 // setObjectHeaders describes obj, once its body has opened, so an error answered for a body replaced since Get carries none of them (#349).
@@ -461,7 +461,7 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, obj s2.Object, k
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, total))
 	w.Header().Set("Content-Length", strconv.FormatUint(length, 10))
 	w.WriteHeader(http.StatusPartialContent)
-	_, _ = io.Copy(w, rc)
+	server.CopyBody(w, r, rc)
 }
 
 func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
