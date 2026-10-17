@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"syscall"
 	"testing"
 
 	"github.com/mojatter/s2"
@@ -394,7 +397,7 @@ func (s *ViewTestSuite) TestHandlePreview() {
 
 const typeBroken = s2.Type("broken-view-test")
 
-// brokenStorage fails Get of broken.txt as an unreachable backend would.
+// brokenStorage fails Get of broken.txt as an unreachable backend would, and the Open of gone.txt and eio.txt.
 type brokenStorage struct {
 	s2.Storage
 }
@@ -411,7 +414,27 @@ func (b brokenStorage) Get(ctx context.Context, name string) (s2.Object, error) 
 	if name == "broken.txt" {
 		return nil, errors.New("backend unreachable")
 	}
-	return b.Storage.Get(ctx, name)
+	obj, err := b.Storage.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	switch name {
+	case "gone.txt":
+		return brokenObject{Object: obj, err: fmt.Errorf("%w: gone.txt", s2.ErrNotExist)}, nil
+	case "eio.txt":
+		return brokenObject{Object: obj, err: syscall.EIO}, nil
+	}
+	return obj, nil
+}
+
+// brokenObject fails its Open with err.
+type brokenObject struct {
+	s2.Object
+	err error
+}
+
+func (o brokenObject) Open() (io.ReadCloser, error) {
+	return nil, o.err
 }
 
 // TestErrorStatus checks the status follows the error, not the handler (#418).
@@ -429,30 +452,42 @@ func (s *ViewTestSuite) TestErrorStatus() {
 	srv, err := server.NewServer(context.Background(), cfg)
 	s.Require().NoError(err)
 	s.Require().NoError(srv.Buckets.Create(context.Background(), "eb"))
+	strg, err := srv.Buckets.Get(context.Background(), "eb")
+	s.Require().NoError(err)
+	for _, name := range []string{"gone.txt", "eio.txt"} {
+		s.Require().NoError(strg.Put(context.Background(), s2.NewObjectBytes(name, []byte("x"))))
+	}
 
 	handlers := []struct {
-		name    string
-		handler func(*server.Server, http.ResponseWriter, *http.Request)
+		caseName string
+		handler  func(*server.Server, http.ResponseWriter, *http.Request)
+		opens    bool
 	}{
-		{name: "view", handler: handleView},
-		{name: "meta", handler: handleMeta},
-		{name: "preview", handler: handlePreview},
+		{caseName: "view", handler: handleView, opens: true},
+		{caseName: "meta", handler: handleMeta},
+		{caseName: "preview", handler: handlePreview, opens: true},
 	}
 	testCases := []struct {
 		caseName   string
 		bucket     string
 		object     string
+		opens      bool
 		wantStatus int
 	}{
 		{caseName: "backend failure", bucket: "eb", object: "broken.txt", wantStatus: http.StatusInternalServerError},
 		{caseName: "invalid name", bucket: "eb", object: "a/../b.txt", wantStatus: http.StatusBadRequest},
 		{caseName: "missing object", bucket: "eb", object: "missing.txt", wantStatus: http.StatusNotFound},
 		{caseName: "missing bucket", bucket: "nope", object: "x.txt", wantStatus: http.StatusNotFound},
+		{caseName: "object gone before Open", bucket: "eb", object: "gone.txt", opens: true, wantStatus: http.StatusNotFound},
+		{caseName: "Open fails", bucket: "eb", object: "eio.txt", opens: true, wantStatus: http.StatusInternalServerError},
 	}
 	for _, h := range handlers {
 		for _, tc := range testCases {
-			s.Run(h.name+"/"+tc.caseName, func() {
-				req := httptest.NewRequest(http.MethodGet, "/buckets/x/"+h.name+"/x", nil)
+			if tc.opens && !h.opens {
+				continue
+			}
+			s.Run(h.caseName+"/"+tc.caseName, func() {
+				req := httptest.NewRequest(http.MethodGet, "/buckets/x/"+h.caseName+"/x", nil)
 				req.SetPathValue("name", tc.bucket)
 				req.SetPathValue("object", tc.object)
 				w := httptest.NewRecorder()

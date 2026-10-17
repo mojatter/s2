@@ -125,7 +125,7 @@ func TestConsoleErrorStatus(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
-			assert.Equal(t, tc.want, ConsoleErrorStatus(tc.err))
+			assert.Equal(t, tc.want, consoleErrorStatus(tc.err))
 		})
 	}
 }

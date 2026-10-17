@@ -61,8 +61,13 @@ func WriteConsoleError(w http.ResponseWriter, r *http.Request, status int, err e
 	http.Error(w, consoleErrorBody(status, err), status)
 }
 
-// ConsoleErrorStatus is the status for err: 400 for a name refused, 404 for a missing bucket or object, 500 otherwise.
-func ConsoleErrorStatus(err error) int {
+// WriteConsoleStorageError answers a storage or bucket error with the status it deserves through WriteConsoleError.
+func WriteConsoleStorageError(w http.ResponseWriter, r *http.Request, err error) {
+	WriteConsoleError(w, r, consoleErrorStatus(err), err)
+}
+
+// consoleErrorStatus is the status for err: 400 for a name refused, 404 for a missing bucket or object, 500 otherwise.
+func consoleErrorStatus(err error) int {
 	var notFound *ErrBucketNotFound
 	switch {
 	case errors.Is(err, s2.ErrInvalidName), errors.Is(err, ErrReservedBucketName):
