@@ -101,6 +101,8 @@
       // A page load or a history restore builds the sidebar anew, scrolled to the top.
       markOpenBucket('always');
       document.addEventListener('htmx:historyRestore', function() { markOpenBucket('always'); });
+      // Back and Forward swap the main view from under a navigation in flight, whose response would still push its URL; htmx's own popstate handler, added later on DOMContentLoaded, runs after this.
+      window.addEventListener('popstate', function() { htmx.trigger('#main-content', 'htmx:abort'); });
       // e.target, not detail.target: a delete's out-of-band reset of the main view reports the replaced list as detail.target.
       document.addEventListener('htmx:afterSwap', function(e) {
         // Moving within a bucket leaves the sidebar where the user put it.
