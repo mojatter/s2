@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"path"
 	"strings"
@@ -44,9 +43,7 @@ func handleView(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	// text/html would otherwise run on the console origin (#199).
 	w.Header().Set("Content-Security-Policy", "sandbox")
 
-	if _, err := io.Copy(w, rc); err != nil {
-		slog.Error("Failed to copy object content", "error", err)
-	}
+	server.CopyBody(w, r, rc)
 }
 
 func handleMeta(s *server.Server, w http.ResponseWriter, r *http.Request) {
