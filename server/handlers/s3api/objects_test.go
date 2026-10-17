@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/iotest"
 
@@ -3269,6 +3270,86 @@ func (s *ObjectsTestSuite) TestHeadObjectDoesNotOpenTheBody() {
 			// An error for a body replaced since Get describes no version of it.
 			s.Empty(resp.Header.Get("ETag"))
 			s.Empty(resp.Header.Get("Last-Modified"))
+		})
+	}
+}
+
+const typeFailing = s2.Type("failing-test")
+
+// failingStorage hands out objects whose body fails with EIO after two bytes.
+type failingStorage struct {
+	s2.Storage
+}
+
+func (f failingStorage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
+	sub, err := f.Storage.Sub(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return failingStorage{sub}, nil
+}
+
+func (f failingStorage) Get(ctx context.Context, name string) (s2.Object, error) {
+	obj, err := f.Storage.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return failingObject{obj}, nil
+}
+
+type failingObject struct {
+	s2.Object
+}
+
+func (failingObject) Open() (io.ReadCloser, error) {
+	return io.NopCloser(io.MultiReader(strings.NewReader("ab"), iotest.ErrReader(syscall.EIO))), nil
+}
+
+func (o failingObject) OpenRange(uint64, uint64) (io.ReadCloser, error) {
+	return o.Open()
+}
+
+// TestGetObjectLogsAFailedBody checks a body that fails mid-copy is logged with the request's ID (#414).
+func (s *ObjectsTestSuite) TestGetObjectLogsAFailedBody() {
+	root := s.T().TempDir()
+	base, err := s2.NewStorage(context.Background(), s2.Config{Type: s2.TypeOSFS, Root: root})
+	s.Require().NoError(err)
+	s2.RegisterNewStorageFunc(typeFailing, func(context.Context, s2.Config) (s2.Storage, error) {
+		return failingStorage{base}, nil
+	})
+	s.T().Cleanup(func() { s2.UnregisterNewStorageFunc(typeFailing) })
+
+	cfg := server.DefaultConfig()
+	cfg.Root = root
+	cfg.Type = typeFailing
+	srv, err := server.NewServer(context.Background(), cfg)
+	s.Require().NoError(err)
+	s.Require().NoError(srv.Buckets.Create(context.Background(), "fb"))
+	s.Require().NoError(base.Put(context.Background(), s2.NewObjectBytes("fb/k", []byte("hello"))))
+	ts := httptest.NewServer(srv.S3Handler())
+	defer ts.Close()
+
+	testCases := []struct {
+		caseName  string
+		rangeSpec string
+	}{
+		{caseName: "GET"},
+		{caseName: "ranged GET", rangeSpec: "bytes=0-3"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			buf := captureSlog(s.T())
+			req, err := http.NewRequest(http.MethodGet, ts.URL+"/fb/k", nil)
+			s.Require().NoError(err)
+			if tc.rangeSpec != "" {
+				req.Header.Set("Range", tc.rangeSpec)
+			}
+			resp, err := ts.Client().Do(req)
+			s.Require().NoError(err)
+			_, _ = io.Copy(io.Discard, resp.Body)
+			s.Require().NoError(resp.Body.Close())
+
+			s.Contains(buf.String(), `level=ERROR msg="Failed to send object body" request_id=`+resp.Header.Get("x-amz-request-id")+" method=GET path=/fb/k bytes=2 ")
 		})
 	}
 }
