@@ -3,8 +3,10 @@ package server
 import (
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -27,20 +29,27 @@ type fileSource struct{ io.Reader }
 func (fileSource) SyscallConn() (syscall.RawConn, error) { return nil, errors.ErrUnsupported }
 
 func TestCopyBody(t *testing.T) {
-	errEIO := syscall.EIO
-	testCases := []struct {
+	type testCase struct {
 		caseName string
 		src      io.Reader
 		writeErr error
 		wantLog  string
-	}{
+	}
+	testCases := []testCase{
 		{caseName: "ok", src: strings.NewReader("hello")},
-		{caseName: "storage read fails", src: io.MultiReader(strings.NewReader("ab"), iotest.ErrReader(errEIO)), wantLog: "level=ERROR"},
-		{caseName: "client gone", src: strings.NewReader("hello"), writeErr: syscall.EPIPE, wantLog: "level=DEBUG"},
-		{caseName: "client write fails otherwise", src: strings.NewReader("hello"), writeErr: errors.New("stream reset"), wantLog: "level=DEBUG"},
-		{caseName: "sendfile source, client gone", src: fileSource{strings.NewReader("hello")}, writeErr: syscall.ECONNRESET, wantLog: "level=DEBUG"},
-		{caseName: "sendfile source, socket not connected", src: fileSource{strings.NewReader("hello")}, writeErr: syscall.ENOTCONN, wantLog: "level=DEBUG"},
-		{caseName: "sendfile source, other failure", src: fileSource{strings.NewReader("hello")}, writeErr: errEIO, wantLog: "level=ERROR"},
+		{caseName: "storage read fails", src: io.MultiReader(strings.NewReader("ab"), iotest.ErrReader(syscall.EIO)), wantLog: "level=ERROR"},
+		{caseName: "client write fails", src: strings.NewReader("hello"), writeErr: errors.New("stream reset"), wantLog: "level=DEBUG"},
+		{caseName: "body longer than its Content-Length", src: strings.NewReader("hello"), writeErr: http.ErrContentLength, wantLog: "level=ERROR"},
+		{caseName: "sendfile source, other failure", src: fileSource{strings.NewReader("hello")}, writeErr: syscall.EIO, wantLog: "level=ERROR"},
+		{
+			caseName: "sendfile source, client gone as net reports it",
+			src:      fileSource{strings.NewReader("hello")},
+			writeErr: &net.OpError{Op: "readfrom", Net: "tcp", Err: os.NewSyscallError("sendfile", clientGoneErrnos[0])},
+			wantLog:  "level=DEBUG",
+		},
+	}
+	for _, errno := range clientGoneErrnos {
+		testCases = append(testCases, testCase{caseName: "sendfile source, " + errno.Error(), src: fileSource{strings.NewReader("hello")}, writeErr: errno, wantLog: "level=DEBUG"})
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {

@@ -22,7 +22,8 @@ func CopyBody(w http.ResponseWriter, r *http.Request, src io.Reader) {
 		return
 	}
 	level := slog.LevelDebug
-	if br.err != nil || (sendfile && !clientGone(err)) {
+	// A body longer than its Content-Length was replaced while being sent.
+	if br.err != nil || errors.Is(err, http.ErrContentLength) || (sendfile && !clientGone(err)) {
 		level = slog.LevelError
 	}
 	args := []any{"method", r.Method, "path", r.URL.Path, "bytes", n, "error", err}
@@ -32,9 +33,14 @@ func CopyBody(w http.ResponseWriter, r *http.Request, src io.Reader) {
 	slog.Log(r.Context(), level, "Failed to send object body", args...)
 }
 
-// clientGone reports an error a write to a closed connection returns.
+// clientGone reports an error a write to a peer that went away returns.
 func clientGone(err error) bool {
-	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ENOTCONN)
+	for _, errno := range clientGoneErrnos {
+		if errors.Is(err, errno) {
+			return true
+		}
+	}
+	return false
 }
 
 // bodyReader records the error its source returns.
