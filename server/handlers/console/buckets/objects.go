@@ -112,7 +112,7 @@ func objectsData(ctx context.Context, s *server.Server, bucket, prefix, search s
 func writeObjectsFragment(r *http.Request, w http.ResponseWriter, s *server.Server, bucket, prefix, search string) {
 	data, err := objectsData(r.Context(), s, bucket, prefix, search)
 	if err != nil {
-		writeStorageError(w, r, err, http.StatusNotFound)
+		writeStorageError(w, r, err)
 		return
 	}
 	var buf bytes.Buffer
@@ -136,7 +136,7 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	data, err := objectsData(ctx, s, name, prefix, search)
 	if err != nil {
-		writeStorageError(w, r, err, http.StatusNotFound)
+		writeStorageError(w, r, err)
 		return
 	}
 	if err := s.RenderConsoleIndex(ctx, w, data); err != nil {
@@ -174,12 +174,7 @@ func handleCreateFolder(s *server.Server, w http.ResponseWriter, r *http.Request
 		}
 	}
 	if err := s.Buckets.CreateFolder(ctx, name, key); err != nil {
-		fallback := http.StatusInternalServerError
-		var notFound *server.ErrBucketNotFound
-		if errors.As(err, &notFound) {
-			fallback = http.StatusNotFound
-		}
-		writeStorageError(w, r, err, fallback)
+		writeStorageError(w, r, err)
 		return
 	}
 
@@ -244,7 +239,7 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 
 	strg, err := s.Buckets.Get(ctx, name)
 	if err != nil {
-		writeStorageError(w, r, err, http.StatusNotFound)
+		writeStorageError(w, r, err)
 		return
 	}
 
@@ -262,7 +257,7 @@ func handleUploadFile(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	}
 	obj := s2.NewObjectReader(key, io.NopCloser(file), s2.MustUint64(header.Size), s2.WithContentType(uploadContentType(header, key)))
 	if err := strg.Put(ctx, obj); err != nil {
-		writeStorageError(w, r, err, http.StatusInternalServerError)
+		writeStorageError(w, r, err)
 		return
 	}
 
@@ -280,7 +275,7 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 
 	strg, err := s.Buckets.Get(ctx, name)
 	if err != nil {
-		writeStorageError(w, r, err, http.StatusNotFound)
+		writeStorageError(w, r, err)
 		return
 	}
 
@@ -311,7 +306,7 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 			for {
 				res, err := strg.List(ctx, s2.ListOptions{Prefix: key, Recursive: true, After: after})
 				if err != nil {
-					writeStorageError(w, r, err, http.StatusInternalServerError)
+					writeStorageError(w, r, err)
 					return
 				}
 				for _, obj := range res.Objects {
@@ -319,7 +314,7 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 						break pagination
 					}
 					if err := strg.Delete(ctx, obj.Name()); err != nil {
-						writeStorageError(w, r, err, http.StatusInternalServerError)
+						writeStorageError(w, r, err)
 						return
 					}
 				}
@@ -329,12 +324,12 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 				after = res.NextAfter
 			}
 		} else if err := strg.DeleteRecursive(ctx, key); err != nil {
-			writeStorageError(w, r, err, http.StatusInternalServerError)
+			writeStorageError(w, r, err)
 			return
 		}
 	} else {
 		if err := strg.Delete(ctx, key); err != nil {
-			writeStorageError(w, r, err, http.StatusInternalServerError)
+			writeStorageError(w, r, err)
 			return
 		}
 	}
@@ -412,13 +407,7 @@ func pastSearchRange(name, listPrefix string) bool {
 	return name > listPrefix && !strings.HasPrefix(name, listPrefix)
 }
 
-// writeStorageError answers with 400 for a name the storage refuses and with
-// fallback otherwise, so a rejected key never reads as a server fault or as a
-// missing bucket.
-func writeStorageError(w http.ResponseWriter, r *http.Request, err error, fallback int) {
-	status := fallback
-	if errors.Is(err, s2.ErrInvalidName) {
-		status = http.StatusBadRequest
-	}
-	server.WriteConsoleError(w, r, status, err)
+// writeStorageError answers err with the status it deserves, so a backend failure never reads as a missing bucket.
+func writeStorageError(w http.ResponseWriter, r *http.Request, err error) {
+	server.WriteConsoleError(w, r, server.ConsoleErrorStatus(err), err)
 }

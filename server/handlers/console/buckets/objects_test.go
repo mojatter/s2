@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
+	"errors"
 	"fmt"
 	"html"
 	"iter"
@@ -775,6 +776,63 @@ func (s *ObjectsTestSuite) TestConsoleAnswers400ForARefusedName() {
 			w := httptest.NewRecorder()
 			tc.call(w, req)
 			s.Equal(http.StatusBadRequest, w.Code, w.Body.String())
+		})
+	}
+}
+
+const typeBrokenList = s2.Type("broken-list-test")
+
+// brokenListStorage fails every List as an unreachable backend would.
+type brokenListStorage struct {
+	s2.Storage
+}
+
+func (b brokenListStorage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
+	sub, err := b.Storage.Sub(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return brokenListStorage{sub}, nil
+}
+
+func (brokenListStorage) List(context.Context, s2.ListOptions) (s2.ListResult, error) {
+	return s2.ListResult{}, errors.New("backend unreachable")
+}
+
+// TestConsoleAnswers500ForABackendFailure checks a failed listing is not answered as a missing bucket (#418).
+func (s *ObjectsTestSuite) TestConsoleAnswers500ForABackendFailure() {
+	root := s.T().TempDir()
+	base, err := s2.NewStorage(context.Background(), s2.Config{Type: s2.TypeOSFS, Root: root})
+	s.Require().NoError(err)
+	s2.RegisterNewStorageFunc(typeBrokenList, func(context.Context, s2.Config) (s2.Storage, error) {
+		return brokenListStorage{base}, nil
+	})
+	s.T().Cleanup(func() { s2.UnregisterNewStorageFunc(typeBrokenList) })
+	cfg := server.DefaultConfig()
+	cfg.Root = root
+	cfg.Type = typeBrokenList
+	srv, err := server.NewServer(context.Background(), cfg)
+	s.Require().NoError(err)
+	s.Require().NoError(srv.Buckets.Create(context.Background(), "bb"))
+
+	testCases := []struct {
+		caseName  string
+		hxRequest bool
+	}{
+		{caseName: "full page"},
+		{caseName: "htmx fragment", hxRequest: true},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			req := httptest.NewRequest("GET", "/buckets/bb", nil)
+			req.SetPathValue("name", "bb")
+			if tc.hxRequest {
+				req.Header.Set("HX-Request", "true")
+			}
+			w := httptest.NewRecorder()
+			handleObjects(srv, w, req)
+			s.Equal(http.StatusInternalServerError, w.Code)
+			s.Equal("Internal Server Error\n", w.Body.String())
 		})
 	}
 }

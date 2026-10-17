@@ -61,6 +61,18 @@ func WriteConsoleError(w http.ResponseWriter, r *http.Request, status int, err e
 	http.Error(w, consoleErrorBody(status, err), status)
 }
 
+// ConsoleErrorStatus is the status for err: 400 for a name refused, 404 for a missing bucket or object, 500 otherwise.
+func ConsoleErrorStatus(err error) int {
+	var notFound *ErrBucketNotFound
+	switch {
+	case errors.Is(err, s2.ErrInvalidName), errors.Is(err, ErrReservedBucketName):
+		return http.StatusBadRequest
+	case errors.As(err, &notFound), errors.Is(err, s2.ErrNotExist):
+		return http.StatusNotFound
+	}
+	return http.StatusInternalServerError
+}
+
 // consoleErrorBody keeps the text s2 writes about the client's own names and answers the status text otherwise.
 func consoleErrorBody(status int, err error) string {
 	var notFound *ErrBucketNotFound

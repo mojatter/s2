@@ -3,6 +3,7 @@ package objects
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -388,5 +389,76 @@ func (s *ViewTestSuite) TestHandlePreview() {
 				s.NotContains(body, notWant)
 			}
 		})
+	}
+}
+
+const typeBroken = s2.Type("broken-view-test")
+
+// brokenStorage fails Get of broken.txt as an unreachable backend would.
+type brokenStorage struct {
+	s2.Storage
+}
+
+func (b brokenStorage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
+	sub, err := b.Storage.Sub(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return brokenStorage{sub}, nil
+}
+
+func (b brokenStorage) Get(ctx context.Context, name string) (s2.Object, error) {
+	if name == "broken.txt" {
+		return nil, errors.New("backend unreachable")
+	}
+	return b.Storage.Get(ctx, name)
+}
+
+// TestErrorStatus checks the status follows the error, not the handler (#418).
+func (s *ViewTestSuite) TestErrorStatus() {
+	root := s.T().TempDir()
+	base, err := s2.NewStorage(context.Background(), s2.Config{Type: s2.TypeOSFS, Root: root})
+	s.Require().NoError(err)
+	s2.RegisterNewStorageFunc(typeBroken, func(context.Context, s2.Config) (s2.Storage, error) {
+		return brokenStorage{base}, nil
+	})
+	s.T().Cleanup(func() { s2.UnregisterNewStorageFunc(typeBroken) })
+	cfg := server.DefaultConfig()
+	cfg.Root = root
+	cfg.Type = typeBroken
+	srv, err := server.NewServer(context.Background(), cfg)
+	s.Require().NoError(err)
+	s.Require().NoError(srv.Buckets.Create(context.Background(), "eb"))
+
+	handlers := []struct {
+		name    string
+		handler func(*server.Server, http.ResponseWriter, *http.Request)
+	}{
+		{name: "view", handler: handleView},
+		{name: "meta", handler: handleMeta},
+		{name: "preview", handler: handlePreview},
+	}
+	testCases := []struct {
+		caseName   string
+		bucket     string
+		object     string
+		wantStatus int
+	}{
+		{caseName: "backend failure", bucket: "eb", object: "broken.txt", wantStatus: http.StatusInternalServerError},
+		{caseName: "invalid name", bucket: "eb", object: "a/../b.txt", wantStatus: http.StatusBadRequest},
+		{caseName: "missing object", bucket: "eb", object: "missing.txt", wantStatus: http.StatusNotFound},
+		{caseName: "missing bucket", bucket: "nope", object: "x.txt", wantStatus: http.StatusNotFound},
+	}
+	for _, h := range handlers {
+		for _, tc := range testCases {
+			s.Run(h.name+"/"+tc.caseName, func() {
+				req := httptest.NewRequest(http.MethodGet, "/buckets/x/"+h.name+"/x", nil)
+				req.SetPathValue("name", tc.bucket)
+				req.SetPathValue("object", tc.object)
+				w := httptest.NewRecorder()
+				h.handler(srv, w, req)
+				s.Equal(tc.wantStatus, w.Code)
+			})
+		}
 	}
 }
