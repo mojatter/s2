@@ -1808,50 +1808,105 @@ func (s *ObjectsTestSuite) TestBrowserMarksABucketOnceItOpens() {
 	}
 }
 
-// TestBrowserMarksTheBucketThatLandsAfterTheListIsReplaced holds a bucket's GET in Chrome, checks the pending entry shows it, and lets a create replace the list meanwhile, so the entry clicked is detached when the bucket lands (#403).
-func (s *ObjectsTestSuite) TestBrowserMarksTheBucketThatLandsAfterTheListIsReplaced() {
-	s.createBucket("a")
-	s.createBucket("b")
-	s.createBucket("c")
-	browserCtx, consoleURL := s.newBrowser()
-	var target *chromedp.Target
-	s.Require().NoError(chromedp.Do(browserCtx,
-		chromedp.EmulateViewport(1280, 800),
-		chromedp.Navigate(consoleURL+"/buckets/a"),
-		chromedp.WaitVisible(chromedp.CSS(`.bucket-item[title="b"]`)),
-		chromedp.Func(func(ctx context.Context, t *chromedp.Target) error {
-			target = t
-			_, err := cdp.Call(ctx, t, fetch.Enable, fetch.EnableParams{Patterns: []*fetch.RequestPattern{{URLPattern: "*/buckets/b"}}})
-			return err
-		}),
-	))
-	// Subscribed before the click, so the pause cannot be missed.
-	next, stop := iter.Pull2(cdp.Events(browserCtx, target, fetch.RequestPaused))
-	defer stop()
+// TestBrowserCancelsAHeldNavigation holds a bucket's GET in Chrome, checks the pending entry shows it, and moves on meanwhile, so the held response never lands over the later view (#422).
+func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
+	testCases := []struct {
+		caseName string
+		move     func(ctx context.Context) error
+		wantURL  string
+		wantMark string
+	}{
+		{
+			caseName: "another bucket clicked",
+			move: func(ctx context.Context) error {
+				return chromedp.Do(ctx, chromedp.Click(chromedp.CSS(`.bucket-item[title="c"]`)))
+			},
+			wantURL:  "/buckets/c",
+			wantMark: "c",
+		},
+		{
+			caseName: "a folder of the open bucket clicked",
+			move: func(ctx context.Context) error {
+				return chromedp.Do(ctx, chromedp.Click(chromedp.CSS(`#main-content a[title="f/"]`)))
+			},
+			wantURL:  "/buckets/a?prefix=f/",
+			wantMark: "a",
+		},
+		{
+			// The create opens the new bucket by clicking its entry, which replaces the held request too.
+			caseName: "a bucket created and opened",
+			move: func(ctx context.Context) error {
+				return chromedp.Do(ctx,
+					chromedp.Click(chromedp.CSS(".section-header .btn")),
+					chromedp.SendKeys(chromedp.CSS(".new-bucket-form input[name=name]"), "zz"),
+					chromedp.Click(chromedp.CSS(".new-bucket-form button[type=submit]")),
+				)
+			},
+			wantURL:  "/buckets/zz",
+			wantMark: "zz",
+		},
+		{
+			// htmx restores the page without aborting a request in flight, whose response would still push its URL.
+			caseName: "back pressed",
+			move: func(ctx context.Context) error {
+				return chromedp.Do(ctx, chromedp.Evaluate[chromedp.Void](`history.back()`))
+			},
+			wantURL: "/",
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.createBucket("a")
+			s.createBucket("b")
+			s.createBucket("c")
+			s.putObject("a", "f/x.txt", "x")
+			browserCtx, consoleURL := s.newBrowser()
+			var target *chromedp.Target
+			s.Require().NoError(chromedp.Do(browserCtx,
+				chromedp.EmulateViewport(1280, 800),
+				// Opened by a click, so Back has a page to return to.
+				chromedp.Navigate(consoleURL+"/"),
+				chromedp.Click(chromedp.CSS(`.bucket-item[title="a"]`)),
+				chromedp.WaitVisible(chromedp.CSS(`#main-content a[title="f/"]`)),
+				chromedp.Func(func(ctx context.Context, t *chromedp.Target) error {
+					target = t
+					_, err := cdp.Call(ctx, t, fetch.Enable, fetch.EnableParams{Patterns: []*fetch.RequestPattern{{URLPattern: "*/buckets/b"}}})
+					return err
+				}),
+				// Watches b's own xhr: the entry that sent it can be detached before the abort, so htmx's events would not reach document.
+				chromedp.Evaluate[chromedp.Void](`window.bAborted = false; document.addEventListener('htmx:beforeRequest', e => {
+					if (e.detail.pathInfo.requestPath.endsWith('/buckets/b')) e.detail.xhr.addEventListener('abort', () => { window.bAborted = true; });
+				})`),
+			))
+			// Subscribed before the click, so the pause cannot be missed.
+			next, stop := iter.Pull2(cdp.Events(browserCtx, target, fetch.RequestPaused))
+			defer stop()
 
-	s.Require().NoError(chromedp.Do(browserCtx, chromedp.Click(chromedp.CSS(`.bucket-item[title="b"]`))))
-	paused, err, ok := next()
-	s.Require().True(ok, "the GET of b must pause")
-	s.Require().NoError(err)
-	// Marked only once b opens; move the pointer off so :hover is not what shows, and outlast the entries' 0.2s transition.
-	s.Require().NoError(chromedp.Do(browserCtx, chromedp.MouseEvent(chromedp.MouseMoved, 1000, 700), chromedp.Sleep(500*time.Millisecond)))
-	pending, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`(() => { const bg = t => getComputedStyle(document.querySelector('.bucket-item[title="' + t + '"]')).backgroundColor; return bg('b') !== bg('c'); })()`))
-	s.Require().NoError(err)
-	s.True(pending, "the clicked entry must show its request is pending")
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Click(chromedp.CSS(`.bucket-item[title="b"]`))))
+			paused, err, ok := next()
+			s.Require().True(ok, "the GET of b must pause")
+			s.Require().NoError(err)
+			// Marked only once b opens; move the pointer off so :hover is not what shows, and outlast the entries' 0.2s transition.
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.MouseEvent(chromedp.MouseMoved, 1000, 700), chromedp.Sleep(500*time.Millisecond)))
+			pending, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`(() => { const bg = t => getComputedStyle(document.querySelector('.bucket-item[title="' + t + '"]')).backgroundColor; return bg('b') !== bg('c'); })()`))
+			s.Require().NoError(err)
+			s.True(pending, "the clicked entry must show its request is pending")
 
-	s.Require().NoError(chromedp.Do(browserCtx,
-		chromedp.Click(chromedp.CSS(".section-header .btn")),
-		chromedp.SendKeys(chromedp.CSS(".new-bucket-form input[name=name]"), "zz"),
-		chromedp.Click(chromedp.CSS(".new-bucket-form button[type=submit]")),
-	))
-	_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/zz' && document.querySelector('.bucket-item.active')?.title === 'zz' || null`, chromedp.WithPollingTimeout(5*time.Second)))
-	s.Require().NoError(err, "open zz while b is held")
+			s.Require().NoError(tc.move(browserCtx))
+			landed := `location.pathname + location.search === '` + tc.wantURL + `' && (document.querySelector('.bucket-item.active')?.title ?? '') === '` + tc.wantMark + `'`
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](landed+` || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "move on while b is held")
+			aborted, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`window.bAborted`))
+			s.Require().NoError(err)
+			s.True(aborted, "the held request must be aborted")
 
-	_, err = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: paused.RequestID})
-	s.Require().NoError(err)
-	// The URL moves before after-request runs, so wait for the mark itself.
-	_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && document.querySelector('.bucket-item.active')?.title === 'b' || null`, chromedp.WithPollingTimeout(5*time.Second)))
-	s.Require().NoError(err, "b lands and is marked")
+			// An aborted request is gone from the fetch domain, so its error is not the point.
+			_, _ = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: paused.RequestID})
+			stayed, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](landed+` && !document.querySelector('.bucket-item.htmx-request')`))
+			s.Require().NoError(err)
+			s.True(stayed, "b must not land over the later view")
+		})
+	}
 }
 
 // TestBrowserKeepsTheNameColumnReadable checks in Chrome that the object table hides metadata columns by its own width, so Name stays readable beside the sidebar (#394).

@@ -57,10 +57,10 @@
     <h1 title="{{.BucketName}}">{{.BucketName}}</h1>
   </div>
   <div class="breadcrumbs">
-    <a href="/buckets/{{pathEscape .BucketName}}" hx-get="/buckets/{{pathEscape .BucketName}}" hx-target="#main-content" hx-push-url="true">root</a>
+    <a href="/buckets/{{pathEscape .BucketName}}" hx-get="/buckets/{{pathEscape .BucketName}}" hx-target="#main-content" hx-push-url="true" hx-sync="#main-content:replace">root</a>
     {{range .Breadcrumbs}}
     <span class="separator">/</span>
-    <a href="/buckets/{{pathEscape $.BucketName}}?prefix={{.Prefix | urlquery}}" hx-get="/buckets/{{pathEscape $.BucketName}}?prefix={{.Prefix | urlquery}}" hx-target="#main-content" hx-push-url="true" title="{{.Name}}">{{.Name}}</a>
+    <a href="/buckets/{{pathEscape $.BucketName}}?prefix={{.Prefix | urlquery}}" hx-get="/buckets/{{pathEscape $.BucketName}}?prefix={{.Prefix | urlquery}}" hx-target="#main-content" hx-push-url="true" hx-sync="#main-content:replace" title="{{.Name}}">{{.Name}}</a>
     {{end}}
   </div>
   <div class="toolbar">
@@ -92,12 +92,12 @@
 <div class="main-view">
   <div class="table-controls">
     <div class="table-controls-left">
-      <form hx-get="/buckets/{{pathEscape .BucketName}}" hx-target="#main-content" hx-push-url="true" class="search-form">
+      <form hx-get="/buckets/{{pathEscape .BucketName}}" hx-target="#main-content" hx-push-url="true" hx-sync="#main-content:replace" class="search-form">
         <input type="hidden" name="prefix" value="{{.CurrentPrefix}}">
         <input type="search" name="search" value="{{.Search}}" placeholder="Search by prefix..." class="search-input">
       </form>
       {{if .Search}}
-      <a href="/buckets/{{pathEscape .BucketName}}?prefix={{.CurrentPrefix | urlquery}}" hx-get="/buckets/{{pathEscape .BucketName}}?prefix={{.CurrentPrefix | urlquery}}" hx-target="#main-content" hx-push-url="true" class="search-chip" title="Clear search">
+      <a href="/buckets/{{pathEscape .BucketName}}?prefix={{.CurrentPrefix | urlquery}}" hx-get="/buckets/{{pathEscape .BucketName}}?prefix={{.CurrentPrefix | urlquery}}" hx-target="#main-content" hx-push-url="true" hx-sync="#main-content:replace" class="search-chip" title="Clear search">
         {{.Search}} <span>✕</span>
       </a>
       {{end}}
@@ -134,7 +134,7 @@
               <span class="obj-icon">
                 <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-arrow-back"></use></svg>
               </span>
-              <a href="/buckets/{{pathEscape .BucketName}}?prefix={{.ParentPrefix | urlquery}}" hx-get="/buckets/{{pathEscape .BucketName}}?prefix={{.ParentPrefix | urlquery}}" hx-target="#main-content" hx-push-url="true">.. (Parent Directory)</a>
+              <a href="/buckets/{{pathEscape .BucketName}}?prefix={{.ParentPrefix | urlquery}}" hx-get="/buckets/{{pathEscape .BucketName}}?prefix={{.ParentPrefix | urlquery}}" hx-target="#main-content" hx-push-url="true" hx-sync="#main-content:replace">.. (Parent Directory)</a>
             </div>
           </td>
           <td>-</td>
@@ -150,7 +150,7 @@
               <span class="obj-icon folder-icon">
                 <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-folder"></use></svg>
               </span>
-              <a href="/buckets/{{pathEscape $.BucketName}}?prefix={{. | urlquery}}/" hx-get="/buckets/{{pathEscape $.BucketName}}?prefix={{. | urlquery}}/" hx-target="#main-content" hx-push-url="true" title="{{baseName .}}/">{{baseName .}}/</a>
+              <a href="/buckets/{{pathEscape $.BucketName}}?prefix={{. | urlquery}}/" hx-get="/buckets/{{pathEscape $.BucketName}}?prefix={{. | urlquery}}/" hx-target="#main-content" hx-push-url="true" hx-sync="#main-content:replace" title="{{baseName .}}/">{{baseName .}}/</a>
             </div>
           </td>
           <td>-</td>
@@ -209,7 +209,7 @@
 
   <div id="gallery-view" class="gallery-grid" style="display:none;">
     {{if .HasParent}}
-    <a href="/buckets/{{pathEscape .BucketName}}?prefix={{.ParentPrefix | urlquery}}" hx-get="/buckets/{{pathEscape .BucketName}}?prefix={{.ParentPrefix | urlquery}}" hx-target="#main-content" hx-push-url="true" class="gallery-card gallery-folder">
+    <a href="/buckets/{{pathEscape .BucketName}}?prefix={{.ParentPrefix | urlquery}}" hx-get="/buckets/{{pathEscape .BucketName}}?prefix={{.ParentPrefix | urlquery}}" hx-target="#main-content" hx-push-url="true" hx-sync="#main-content:replace" class="gallery-card gallery-folder">
       <div class="gallery-folder-icon">
         <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-arrow-back"></use></svg>
       </div>
@@ -219,7 +219,7 @@
 
     {{range .Prefixes}}
     <div class="gallery-card gallery-folder" data-name="{{baseName .}}/">
-      <a href="/buckets/{{pathEscape $.BucketName}}?prefix={{. | urlquery}}/" hx-get="/buckets/{{pathEscape $.BucketName}}?prefix={{. | urlquery}}/" hx-target="#main-content" hx-push-url="true" class="gallery-card-body">
+      <a href="/buckets/{{pathEscape $.BucketName}}?prefix={{. | urlquery}}/" hx-get="/buckets/{{pathEscape $.BucketName}}?prefix={{. | urlquery}}/" hx-target="#main-content" hx-push-url="true" hx-sync="#main-content:replace" class="gallery-card-body">
         <div class="gallery-folder-icon">
           <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-folder"></use></svg>
         </div>
