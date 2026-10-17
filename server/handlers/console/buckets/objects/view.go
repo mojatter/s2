@@ -20,19 +20,19 @@ func handleView(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
-		server.WriteConsoleError(w, r, http.StatusNotFound, err)
+		server.WriteConsoleStorageError(w, r, err)
 		return
 	}
 
 	obj, err := strg.Get(ctx, objectName)
 	if err != nil {
-		server.WriteConsoleError(w, r, http.StatusNotFound, err)
+		server.WriteConsoleStorageError(w, r, err)
 		return
 	}
 
 	rc, err := obj.Open()
 	if err != nil {
-		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
+		server.WriteConsoleStorageError(w, r, err)
 		return
 	}
 	defer func() { _ = rc.Close() }()
@@ -53,13 +53,13 @@ func handleMeta(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
-		server.WriteConsoleError(w, r, http.StatusNotFound, err)
+		server.WriteConsoleStorageError(w, r, err)
 		return
 	}
 
 	obj, err := strg.Get(ctx, objectName)
 	if err != nil {
-		server.WriteConsoleError(w, r, http.StatusNotFound, err)
+		server.WriteConsoleStorageError(w, r, err)
 		return
 	}
 
@@ -85,13 +85,13 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	strg, err := s.Buckets.Get(ctx, bucketName)
 	if err != nil {
-		server.WriteConsoleError(w, r, http.StatusNotFound, err)
+		server.WriteConsoleStorageError(w, r, err)
 		return
 	}
 
 	obj, err := strg.Get(ctx, objectName)
 	if err != nil {
-		server.WriteConsoleError(w, r, http.StatusNotFound, err)
+		server.WriteConsoleStorageError(w, r, err)
 		return
 	}
 
@@ -102,7 +102,7 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	if previewType == "text" {
 		rc, err := obj.Open()
 		if err != nil {
-			server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
+			server.WriteConsoleStorageError(w, r, err)
 			return
 		}
 		defer func() { _ = rc.Close() }()

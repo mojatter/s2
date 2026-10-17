@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/md5" // #nosec G501 -- MD5 is required for S3-compatible ETag
+	"errors"
 	"fmt"
 	"html"
 	"iter"
@@ -775,6 +776,106 @@ func (s *ObjectsTestSuite) TestConsoleAnswers400ForARefusedName() {
 			w := httptest.NewRecorder()
 			tc.call(w, req)
 			s.Equal(http.StatusBadRequest, w.Code, w.Body.String())
+		})
+	}
+}
+
+const typeBrokenList = s2.Type("broken-list-test")
+
+// brokenListStorage fails every List, Put and Delete as an unreachable backend would.
+type brokenListStorage struct {
+	s2.Storage
+}
+
+func (b brokenListStorage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
+	sub, err := b.Storage.Sub(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return brokenListStorage{sub}, nil
+}
+
+func (brokenListStorage) List(context.Context, s2.ListOptions) (s2.ListResult, error) {
+	return s2.ListResult{}, errors.New("backend unreachable")
+}
+
+func (brokenListStorage) Put(context.Context, s2.Object) error {
+	return errors.New("backend unreachable")
+}
+
+func (brokenListStorage) Delete(context.Context, string) error {
+	return errors.New("backend unreachable")
+}
+
+// TestConsoleAnswers500ForABackendFailure checks a backend failure is not answered as a missing bucket or object (#418).
+func (s *ObjectsTestSuite) TestConsoleAnswers500ForABackendFailure() {
+	root := s.T().TempDir()
+	base, err := s2.NewStorage(context.Background(), s2.Config{Type: s2.TypeOSFS, Root: root})
+	s.Require().NoError(err)
+	s2.RegisterNewStorageFunc(typeBrokenList, func(context.Context, s2.Config) (s2.Storage, error) {
+		return brokenListStorage{base}, nil
+	})
+	s.T().Cleanup(func() { s2.UnregisterNewStorageFunc(typeBrokenList) })
+	// The bucket is made through the working storage, since the broken one cannot write.
+	plain := server.DefaultConfig()
+	plain.Root = root
+	plainSrv, err := server.NewServer(context.Background(), plain)
+	s.Require().NoError(err)
+	s.Require().NoError(plainSrv.Buckets.Create(context.Background(), "bb"))
+	cfg := server.DefaultConfig()
+	cfg.Root = root
+	cfg.Type = typeBrokenList
+	srv, err := server.NewServer(context.Background(), cfg)
+	s.Require().NoError(err)
+
+	testCases := []struct {
+		caseName string
+		call     func(w http.ResponseWriter, r *http.Request)
+		req      func() *http.Request
+	}{
+		{
+			caseName: "list as a full page",
+			call:     func(w http.ResponseWriter, r *http.Request) { handleObjects(srv, w, r) },
+			req:      func() *http.Request { return httptest.NewRequest("GET", "/buckets/bb", nil) },
+		},
+		{
+			caseName: "list as an htmx fragment",
+			call:     func(w http.ResponseWriter, r *http.Request) { handleObjects(srv, w, r) },
+			req: func() *http.Request {
+				r := httptest.NewRequest("GET", "/buckets/bb", nil)
+				r.Header.Set("HX-Request", "true")
+				return r
+			},
+		},
+		{
+			caseName: "upload",
+			call:     func(w http.ResponseWriter, r *http.Request) { handleUploadFile(srv, w, r) },
+			req: func() *http.Request {
+				body := &bytes.Buffer{}
+				mw := multipart.NewWriter(body)
+				fw, err := mw.CreateFormFile("file", "x.txt")
+				s.Require().NoError(err)
+				_, _ = fw.Write([]byte("x"))
+				s.Require().NoError(mw.Close())
+				r := httptest.NewRequest("POST", "/buckets/bb/upload", body)
+				r.Header.Set("Content-Type", mw.FormDataContentType())
+				return r
+			},
+		},
+		{
+			caseName: "delete",
+			call:     func(w http.ResponseWriter, r *http.Request) { handleDeleteObject(srv, w, r) },
+			req:      func() *http.Request { return httptest.NewRequest("DELETE", "/buckets/bb/objects?key=x.txt", nil) },
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			req := tc.req()
+			req.SetPathValue("name", "bb")
+			w := httptest.NewRecorder()
+			tc.call(w, req)
+			s.Equal(http.StatusInternalServerError, w.Code)
+			s.Equal("Internal Server Error\n", w.Body.String())
 		})
 	}
 }

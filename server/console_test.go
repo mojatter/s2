@@ -110,6 +110,26 @@ func TestConsoleLoadsNothingFromOtherHosts(t *testing.T) {
 	}
 }
 
+func TestConsoleErrorStatus(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		err      error
+		want     int
+	}{
+		{caseName: "invalid name", err: fmt.Errorf("%w: a/../b", s2.ErrInvalidName), want: http.StatusBadRequest},
+		{caseName: "reserved bucket name", err: ErrReservedBucketName, want: http.StatusBadRequest},
+		{caseName: "missing bucket", err: &ErrBucketNotFound{Name: "b"}, want: http.StatusNotFound},
+		{caseName: "missing object", err: fmt.Errorf("%w: k", s2.ErrNotExist), want: http.StatusNotFound},
+		{caseName: "modified", err: s2.ErrModified, want: http.StatusInternalServerError},
+		{caseName: "backend failure", err: errors.New("permission denied"), want: http.StatusInternalServerError},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			assert.Equal(t, tc.want, consoleErrorStatus(tc.err))
+		})
+	}
+}
+
 func TestWriteConsoleError(t *testing.T) {
 	testCases := []struct {
 		caseName string
