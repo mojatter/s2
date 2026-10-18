@@ -336,7 +336,8 @@
   }
 
   document.addEventListener('htmx:afterSettle', function(evt) {
-    const id = evt.detail.target.id;
+    // A history restore settles with an empty detail.
+    const id = evt.detail.target?.id;
     if (id === 'main-content') {
       initGalleryView();
     } else if (id === 'preview-dialog') {
