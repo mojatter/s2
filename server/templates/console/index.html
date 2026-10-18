@@ -78,7 +78,7 @@
         </svg>
       </button>
 
-      <div id="main-content">
+      <div id="main-content" hx-history-elt>
         {{if .BucketName}}{{template "console/buckets/objects.html" .}}{{else}}{{template "console/empty.html" .}}{{end}}
       </div>
 
@@ -115,9 +115,10 @@
           el.classList.toggle('active', open);
         });
       };
-      // A page load or a history restore builds the sidebar anew, scrolled to the top.
+      // A page load builds the sidebar anew, scrolled to the top.
       markOpenBucket('always');
-      document.addEventListener('htmx:historyRestore', function() { markOpenBucket('always'); });
+      // A history restore swaps only the main view, so the live sidebar keeps its buckets; a preview open over the view goes with it.
+      document.addEventListener('htmx:historyRestore', function() { markOpenBucket('new'); document.getElementById('preview-dialog').close(); });
       // e.target, not detail.target: a delete's out-of-band reset of the main view reports the replaced list as detail.target.
       document.addEventListener('htmx:afterSwap', function(e) {
         // Moving within a bucket leaves the sidebar where the user put it.

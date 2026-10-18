@@ -336,12 +336,12 @@
   }
 
   document.addEventListener('htmx:afterSettle', function(evt) {
-    // A history restore settles with an empty detail.
-    const id = evt.detail.target?.id;
+    // The swapped element is where the event fires; a history restore settles with no detail.target.
+    const id = evt.target.id;
     if (id === 'main-content') {
       initGalleryView();
     } else if (id === 'preview-dialog') {
-      evt.detail.target.showModal();
+      evt.target.showModal();
     }
   });
 
