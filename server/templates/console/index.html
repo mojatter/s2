@@ -9,7 +9,7 @@
   <script>
     // A restore past htmx's cache is a bare XHR that hx-sync does not reach, kept here so what replaces it can abort it.
     let restoreXhr = null;
-    // Back and Forward swap the main view from under a navigation in flight, whose response would still push its URL; in head, which a history restore does not re-run, and before htmx's own popstate handler of DOMContentLoaded.
+    // Back and Forward swap the main view from under a navigation in flight, whose response would still push its URL; in head, before htmx's own popstate handler of DOMContentLoaded.
     window.addEventListener('popstate', function() { htmx.trigger('#main-content', 'htmx:abort'); if (restoreXhr) restoreXhr.abort(); });
     // A restore past the cache and a main-view request that pushes a URL each abort the other when about to land, whichever is first.
     document.addEventListener('htmx:beforeHistoryUpdate', function() { if (restoreXhr) restoreXhr.abort(); });
@@ -22,6 +22,11 @@
       restoreXhr.addEventListener('error', function() { reloadIfStillOn(e.detail.path); });
     });
     document.addEventListener('htmx:historyCacheMissLoadError', function(e) { reloadIfStillOn(e.detail.path); });
+    // An answer for the main view or the preview sent from a view the user has since left would cover the later one, so it is dropped; the work it did stays done.
+    document.addEventListener('htmx:beforeSwap', function(e) {
+      const id = e.detail.target?.id;
+      if ((id === 'main-content' || id === 'preview-dialog') && e.detail.requestConfig?.headers['HX-Current-URL'] !== location.href) e.detail.shouldSwap = false;
+    });
   </script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -102,7 +107,7 @@
       if (collapsed) {
         layout.classList.add('layout--sidebar-collapsed');
       }
-      // Mark the entry of the bucket the URL shows. htmx snapshots the page and pushes the URL before it swaps, so marking after the swap keeps Back right, and a failed open swaps nothing.
+      // Mark the entry of the bucket the URL shows. htmx snapshots the main view and pushes the URL before it swaps, so marking after the swap keeps Back right, and a failed open swaps nothing.
       // scroll is 'always', 'new' (only to an entry not marked before) or 'none'.
       const markOpenBucket = function(scroll) {
         let name = null;
@@ -117,8 +122,8 @@
       };
       // A page load builds the sidebar anew, scrolled to the top.
       markOpenBucket('always');
-      // A history restore swaps only the main view, so the live sidebar keeps its buckets; a preview open over the view goes with it.
-      document.addEventListener('htmx:historyRestore', function() { markOpenBucket('new'); document.getElementById('preview-dialog').close(); });
+      // A history restore swaps only the main view, which the afterSwap listener marks; a preview open over the view goes with it.
+      document.addEventListener('htmx:historyRestore', function() { document.getElementById('preview-dialog').close(); });
       // e.target, not detail.target: a delete's out-of-band reset of the main view reports the replaced list as detail.target.
       document.addEventListener('htmx:afterSwap', function(e) {
         // Moving within a bucket leaves the sidebar where the user put it.
@@ -143,6 +148,8 @@
         const name = form.elements.name.value;
         form.reset();
         form.classList.remove('active');
+        // The live list shows the new bucket; opening it would undo a Back pressed meanwhile.
+        if (event.detail.requestConfig.headers['HX-Current-URL'] !== location.href) return;
         // Open it as a click on its new entry does, which also pushes its URL (htmx.ajax takes no pushUrl); htmx wires the entry once the new list settles.
         document.querySelector('.bucket-list').addEventListener('htmx:afterSettle', function() {
           Array.from(document.querySelectorAll('.bucket-item')).find(a => a.title === name)?.click();

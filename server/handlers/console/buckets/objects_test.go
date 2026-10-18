@@ -1728,6 +1728,16 @@ func (s *ObjectsTestSuite) TestGalleryView_ThumbnailAndPersistenceAcrossReload()
 		_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/gallery' && getComputedStyle(document.getElementById('gallery-view')).display === 'none' || null`, chromedp.WithPollingTimeout(5*time.Second)))
 		s.Require().NoError(err, "back must show the list view")
 	})
+
+	s.Run("forward closes the preview left open", func() {
+		s.Require().NoError(chromedp.Do(browserCtx,
+			chromedp.Click(chromedp.CSS(`#list-view button[hx-target="#preview-dialog"]`)),
+			chromedp.WaitVisible(chromedp.CSS(`#preview-dialog[open]`)),
+			chromedp.Evaluate[chromedp.Void](`history.forward()`),
+		))
+		_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/other' && !document.getElementById('preview-dialog').open || null`, chromedp.WithPollingTimeout(5*time.Second)))
+		s.Require().NoError(err, "forward must close the preview")
+	})
 }
 
 // TestBrowserOverviewRunsTheObjectsScript checks in Chrome that the objects script, loaded on every page, throws nothing on the overview, which has no object views.
@@ -2005,6 +2015,86 @@ func (s *ObjectsTestSuite) TestBrowserListsTheBucketsAsTheyAreAfterBack() {
 			layouts, err := chromedp.Run(browserCtx, chromedp.Evaluate[int](`document.querySelectorAll('.layout').length`))
 			s.Require().NoError(err)
 			s.Equal(1, layouts)
+		})
+	}
+}
+
+// TestBrowserDropsAStaleAnswerAfterBack holds a request of a's view in Chrome, presses Back to b and releases it, so its answer does not cover b (#433).
+func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
+	const state = `location.pathname + ' ' + (document.querySelector('#main-content h1')?.textContent ?? '') + ' open=' + document.getElementById('preview-dialog').open + ' [' + [...document.querySelectorAll('.bucket-item')].map(a => a.title).join(' ') + ']'`
+	testCases := []struct {
+		caseName  string
+		pattern   string
+		act       string
+		wantState string
+	}{
+		{
+			caseName:  "a folder created",
+			pattern:   "*/buckets/a/folders",
+			act:       `(() => { const f = document.querySelector('.new-folder-form'); f.querySelector('input[name=folder_name]').value = 'nf'; f.requestSubmit(); })()`,
+			wantState: "/buckets/b b open=false [a b]",
+		},
+		{
+			caseName:  "a preview opened",
+			pattern:   "*/buckets/a/preview/*",
+			act:       `document.querySelector('#list-view button[hx-target="#preview-dialog"]').click()`,
+			wantState: "/buckets/b b open=false [a b]",
+		},
+		{
+			// The live list shows the new bucket, which is not opened over the Back.
+			caseName:  "a bucket created",
+			pattern:   "*/buckets",
+			act:       `(() => { const f = document.querySelector('.new-bucket-form'); f.elements.name.value = 'zz'; f.requestSubmit(); })()`,
+			wantState: "/buckets/b b open=false [a b zz]",
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.createBucket("a")
+			s.createBucket("b")
+			s.putObject("a", "x.txt", "x")
+			browserCtx, consoleURL := s.newBrowser()
+			s.Require().NoError(chromedp.Do(browserCtx,
+				chromedp.EmulateViewport(1280, 800),
+				chromedp.Navigate(consoleURL+"/buckets/b"),
+				chromedp.WaitVisible(chromedp.CSS(`.bucket-item[title="a"]`)),
+				chromedp.Click(chromedp.CSS(`.bucket-item[title="a"]`)),
+			))
+			_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/a' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "open a")
+			var target *chromedp.Target
+			s.Require().NoError(chromedp.Do(browserCtx,
+				chromedp.Func(func(ctx context.Context, t *chromedp.Target) error {
+					target = t
+					_, err := cdp.Call(ctx, t, fetch.Enable, fetch.EnableParams{Patterns: []*fetch.RequestPattern{{URLPattern: tc.pattern}}})
+					return err
+				}),
+				// Watches the held request's own xhr: the element that sent it can be gone once b is restored.
+				chromedp.Evaluate[chromedp.Void](`window.heldDone = false; document.addEventListener('htmx:beforeRequest', e => {
+					e.detail.xhr.addEventListener('loadend', () => { window.heldDone = true; });
+				}, {once: true})`),
+			))
+			// Subscribed before the request, so the pause cannot be missed.
+			next, stop := iter.Pull2(cdp.Events(browserCtx, target, fetch.RequestPaused))
+			defer stop()
+
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](tc.act)))
+			held, err, ok := next()
+			s.Require().True(ok, "the request must pause")
+			s.Require().NoError(err)
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`history.back()`)))
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && document.querySelector('#main-content h1')?.textContent === 'b' || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "back to b")
+
+			_, err = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: held.RequestID})
+			s.Require().NoError(err)
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`window.heldDone || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "the held request must end")
+			// Outlasts the settle and a click a create would make on its new entry.
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Sleep(500*time.Millisecond)))
+			got, err := chromedp.Run(browserCtx, chromedp.Evaluate[string](state))
+			s.Require().NoError(err)
+			s.Equal(tc.wantState, got, "URL, heading, preview and buckets")
 		})
 	}
 }
