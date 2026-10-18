@@ -75,3 +75,14 @@ bench-warp: build
 	  --concurrent=$(BENCH_CONC) \
 	  --duration=$(BENCH_TIME) \
 	  --no-color
+
+# Replaces the console's vendored htmx with HTMX_VERSION from jsDelivr, checks the version it reports, and prints its sha384 to compare with jsDelivr's.
+.PHONY: update-htmx
+update-htmx:
+	@test -n "$(HTMX_VERSION)" || (echo "usage: make update-htmx HTMX_VERSION=x.y.z" && exit 1)
+	@tmp=$$(mktemp) && \
+	  curl -fsSL -o $$tmp https://cdn.jsdelivr.net/npm/htmx.org@$(HTMX_VERSION)/dist/htmx.min.js && \
+	  grep -qF 'version:"$(HTMX_VERSION)"' $$tmp && \
+	  cp $$tmp server/static/htmx.min.js; \
+	  status=$$?; rm -f $$tmp; exit $$status
+	@echo "sha384-$$(openssl dgst -sha384 -binary server/static/htmx.min.js | openssl base64 -A)"
