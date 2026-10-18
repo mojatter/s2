@@ -1893,6 +1893,18 @@ func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
 			wantMark: "zz",
 		},
 		{
+			// The delete resets the main view out of band, so it aborts the held request itself.
+			caseName: "another bucket deleted",
+			move: func(ctx context.Context) error {
+				return chromedp.Do(ctx,
+					// hx-confirm asks window.confirm, which headless Chrome would leave open.
+					chromedp.Evaluate[chromedp.Void](`window.confirm = () => true`),
+					chromedp.Evaluate[chromedp.Void](`document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/c"]').click()`),
+				)
+			},
+			wantURL: "/",
+		},
+		{
 			// htmx restores the page without aborting a request in flight, whose response would still push its URL.
 			caseName: "back pressed",
 			move: func(ctx context.Context) error {
@@ -1934,8 +1946,10 @@ func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
 					return err
 				}),
 				// Watches b's own xhr: the entry that sent it can be detached before the abort, so htmx's events would not reach document.
-				chromedp.Evaluate[chromedp.Void](`window.bAborted = false; document.addEventListener('htmx:beforeRequest', e => {
-					if (e.detail.pathInfo.requestPath.endsWith('/buckets/b')) e.detail.xhr.addEventListener('abort', () => { window.bAborted = true; });
+				chromedp.Evaluate[chromedp.Void](`window.bAborted = false; window.bDone = false; document.addEventListener('htmx:beforeRequest', e => {
+					if (!e.detail.pathInfo.requestPath.endsWith('/buckets/b')) return;
+					e.detail.xhr.addEventListener('abort', () => { window.bAborted = true; });
+					e.detail.xhr.addEventListener('loadend', () => { window.bDone = true; });
 				})`),
 			))
 			// Subscribed before the click, so the pause cannot be missed.
@@ -1962,6 +1976,9 @@ func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
 
 			// An aborted request is gone from the fetch domain, so its error is not the point.
 			_, _ = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: paused.RequestID})
+			// loadend follows the swap and push of a response that got through, so checking after it catches one.
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`window.bDone || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "b's xhr must end")
 			stayed, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](landed+` && !document.querySelector('.bucket-item.htmx-request')`))
 			s.Require().NoError(err)
 			s.True(stayed, "b must not land over the later view")
