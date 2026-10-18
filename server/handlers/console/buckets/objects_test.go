@@ -78,11 +78,49 @@ func (s *ObjectsTestSuite) TestHandleObjects() {
 		bucketName      string
 		url             string
 		htmx            bool
+		historyRestore  bool
 		wantCode        int
 		wantContains    []string
 		wantNotContains []string
 		wantHeader      map[string]string
 	}{
+		{
+			caseName:       "a restore past the history cache gets the whole page",
+			setup:          func() { s.createBucket("restore"); s.putObject("restore", "readme.txt", "hello") },
+			bucketName:     "restore",
+			url:            "/buckets/restore",
+			htmx:           true,
+			historyRestore: true,
+			wantCode:       http.StatusOK,
+			wantContains:   []string{`class="sidebar"`, `id="main-content"`, "readme.txt"},
+		},
+		{
+			caseName:       "a restore without HX-Request gets the whole page",
+			setup:          func() { s.createBucket("restore-plain"); s.putObject("restore-plain", "readme.txt", "hello") },
+			bucketName:     "restore-plain",
+			url:            "/buckets/restore-plain",
+			historyRestore: true,
+			wantCode:       http.StatusOK,
+			wantContains:   []string{`class="sidebar"`, "readme.txt"},
+		},
+		{
+			caseName:       "a restore to a missing bucket is still not found",
+			setup:          func() {},
+			bucketName:     "nope-restore",
+			url:            "/buckets/nope-restore",
+			htmx:           true,
+			historyRestore: true,
+			wantCode:       http.StatusNotFound,
+			wantContains:   []string{"bucket not found"},
+		},
+		{
+			caseName:     "a page load gets the whole page",
+			setup:        func() { s.createBucket("page"); s.putObject("page", "readme.txt", "hello") },
+			bucketName:   "page",
+			url:          "/buckets/page",
+			wantCode:     http.StatusOK,
+			wantContains: []string{`class="sidebar"`, "readme.txt"},
+		},
 		{
 			caseName:     "empty bucket",
 			setup:        func() { s.createBucket("empty") },
@@ -93,13 +131,14 @@ func (s *ObjectsTestSuite) TestHandleObjects() {
 			wantContains: []string{"This folder is empty"},
 		},
 		{
-			caseName:     "with objects",
-			setup:        func() { s.createBucket("files"); s.putObject("files", "readme.txt", "hello") },
-			bucketName:   "files",
-			url:          "/buckets/files",
-			htmx:         true,
-			wantCode:     http.StatusOK,
-			wantContains: []string{"readme.txt"},
+			caseName:        "with objects",
+			setup:           func() { s.createBucket("files"); s.putObject("files", "readme.txt", "hello") },
+			bucketName:      "files",
+			url:             "/buckets/files",
+			htmx:            true,
+			wantCode:        http.StatusOK,
+			wantContains:    []string{"readme.txt"},
+			wantNotContains: []string{`class="sidebar"`},
 		},
 		{
 			caseName: "with prefix",
@@ -277,6 +316,9 @@ func (s *ObjectsTestSuite) TestHandleObjects() {
 			if tc.htmx {
 				req.Header.Set("HX-Request", "true")
 			}
+			if tc.historyRestore {
+				req.Header.Set("HX-History-Restore-Request", "true")
+			}
 			w := httptest.NewRecorder()
 			handleObjects(s.server, w, req)
 
@@ -288,6 +330,7 @@ func (s *ObjectsTestSuite) TestHandleObjects() {
 			for _, notWant := range tc.wantNotContains {
 				s.NotContains(body, notWant)
 			}
+			s.Equal("HX-Request, HX-History-Restore-Request", w.Header().Get("Vary"))
 			for k, v := range tc.wantHeader {
 				s.Equal(v, w.Header().Get(k))
 			}
@@ -1808,9 +1851,13 @@ func (s *ObjectsTestSuite) TestBrowserMarksABucketOnceItOpens() {
 		gone     bool
 		create   string
 		back     bool
+		miss     bool
+		lost     bool
 		wantName string
 	}{
 		{caseName: "back restores the earlier mark", back: true, wantName: "a"},
+		{caseName: "back past the history cache restores the page and its mark", back: true, miss: true, wantName: "a"},
+		{caseName: "back past the history cache to a deleted bucket shows it is gone", back: true, miss: true, lost: true},
 		{caseName: "a bucket that fails to open is not marked", gone: true, wantName: "a"},
 		{caseName: "back after a create restores the earlier mark", create: "zz", back: true, wantName: "a"},
 	}
@@ -1843,13 +1890,222 @@ func (s *ObjectsTestSuite) TestBrowserMarksABucketOnceItOpens() {
 			if tc.back {
 				_, err := chromedp.Run(browserCtx, chromedp.Poll[string](`location.pathname === '/buckets/`+opened+`' ? 'opened' : null`, chromedp.WithPollingTimeout(5*time.Second)))
 				s.Require().NoError(err, "open "+opened)
+				if tc.miss {
+					// Without its snapshot htmx fetches the page with HX-Request and swaps the response into body.
+					s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`sessionStorage.removeItem('htmx-history-cache')`)))
+				}
+				if tc.lost {
+					s.Require().NoError(s.server.Buckets.Delete(context.Background(), "a"))
+					s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`history.back()`)))
+					// The page reloads, which ends any Poll running on it, so each check is its own evaluation.
+					s.Eventually(func() bool {
+						gone, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`location.pathname === '/buckets/a' && document.body.innerText.includes('bucket not found')`))
+						return err == nil && gone
+					}, 5*time.Second, 100*time.Millisecond, "the restored URL must show that a is gone, not b's page")
+					return
+				}
 				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`history.back()`)))
-				_, err = chromedp.Run(browserCtx, chromedp.Poll[string](`location.pathname === '/buckets/a' ? 'a' : null`, chromedp.WithPollingTimeout(5*time.Second)))
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[string](`location.pathname === '/buckets/a' && document.querySelector('#main-content h1')?.textContent === 'a' ? 'a' : null`, chromedp.WithPollingTimeout(5*time.Second)))
 				s.Require().NoError(err, "go back to a")
 			}
+			layouts, err := chromedp.Run(browserCtx, chromedp.Evaluate[int](`document.querySelectorAll('.layout').length`))
+			s.Require().NoError(err)
+			s.Equal(1, layouts, "one page layout, around the main view")
 			got, err := chromedp.Run(browserCtx, chromedp.Evaluate[string](active))
 			s.Require().NoError(err)
 			s.Equal(tc.wantName, got)
+		})
+	}
+}
+
+// TestBrowserHandlesARestorePastTheCache fires htmx's cache-miss events by hand in Chrome, so the head listeners abort or reload without a server held mid-restore (#421).
+func (s *ObjectsTestSuite) TestBrowserHandlesARestorePastTheCache() {
+	const here = `location.pathname + location.search`
+	const elsewhere = `'/buckets/elsewhere'`
+	testCases := []struct {
+		caseName       string
+		path           string
+		act            string
+		wantReload     bool
+		wantAborted    bool
+		wantNavAborted bool
+	}{
+		{caseName: "back aborts the restore in flight", path: here, act: `window.dispatchEvent(new PopStateEvent('popstate', {state: null}))`, wantAborted: true, wantNavAborted: true},
+		{caseName: "a request about to push its URL aborts the restore in flight", path: here, act: `document.body.dispatchEvent(new CustomEvent('htmx:beforeHistoryUpdate', {bubbles: true, detail: {}}))`, wantAborted: true},
+		{caseName: "a request that pushes no URL leaves the restore alone", path: here, act: `document.body.dispatchEvent(new CustomEvent('htmx:beforeRequest', {bubbles: true, detail: {target: document.getElementById('main-content')}}))`},
+		{caseName: "a restore about to land aborts the main view request", path: here, act: `document.body.dispatchEvent(new CustomEvent('htmx:historyCacheMissLoad', {bubbles: true, detail: {path: path, xhr: xhr}}))`, wantNavAborted: true},
+		{caseName: "a failed restore of this URL reloads", path: here, act: `document.body.dispatchEvent(new CustomEvent('htmx:historyCacheMissLoadError', {bubbles: true, detail: {path: path}}))`, wantReload: true},
+		{caseName: "a failed restore of another URL does not reload", path: elsewhere, act: `document.body.dispatchEvent(new CustomEvent('htmx:historyCacheMissLoadError', {bubbles: true, detail: {path: path}}))`},
+		{caseName: "a restore of this URL lost on the network reloads", path: here, act: `xhr.dispatchEvent(new Event('error'))`, wantReload: true},
+		{caseName: "a restore of another URL lost on the network does not reload", path: elsewhere, act: `xhr.dispatchEvent(new Event('error'))`},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.createBucket("a")
+			browserCtx, consoleURL := s.newBrowser()
+			s.Require().NoError(chromedp.Do(browserCtx,
+				chromedp.EmulateViewport(1280, 800),
+				chromedp.Navigate(consoleURL+"/buckets/a"),
+				chromedp.WaitVisible(chromedp.CSS(`.bucket-item[title="a"]`)),
+			))
+			// A stand-in for htmx's restore XHR, handed to the listeners as htmx does before it sends.
+			script := `(() => {
+				window.__stay = true;
+				window.__aborted = false;
+				window.__navAborted = false;
+				document.getElementById('main-content').addEventListener('htmx:abort', () => { window.__navAborted = true; });
+				const xhr = Object.assign(new EventTarget(), {abort() { window.__aborted = true; }});
+				const path = ` + tc.path + `;
+				document.body.dispatchEvent(new CustomEvent('htmx:historyCacheMiss', {bubbles: true, detail: {path: path, xhr: xhr}}));
+				` + tc.act + `;
+			})()`
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](script)))
+			if tc.wantReload {
+				// The reload ends any Poll running on the page, so each check is its own evaluation.
+				s.Eventually(func() bool {
+					gone, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`window.__stay !== true && document.readyState === 'complete'`))
+					return err == nil && gone
+				}, 5*time.Second, 100*time.Millisecond, "the page must reload")
+				return
+			}
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Sleep(300*time.Millisecond)))
+			stayed, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`window.__stay === true`))
+			s.Require().NoError(err)
+			s.True(stayed, "the page must not reload")
+			aborted, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`window.__aborted`))
+			s.Require().NoError(err)
+			s.Equal(tc.wantAborted, aborted, "the restore")
+			navAborted, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`window.__navAborted`))
+			s.Require().NoError(err)
+			s.Equal(tc.wantNavAborted, navAborted, "the main view request")
+		})
+	}
+}
+
+// TestBrowserOrdersARestoreAgainstANavigation holds a restore past the cache in Chrome while the user acts, so whichever lands, the URL, the view and the mark agree (#421).
+func (s *ObjectsTestSuite) TestBrowserOrdersARestoreAgainstANavigation() {
+	const state = `location.pathname + location.search + ' ' + (document.querySelector('#main-content h1')?.textContent ?? '') + ' ' + (document.querySelector('.bucket-item.active')?.title ?? '') + ' ' + document.querySelectorAll('.layout').length`
+	testCases := []struct {
+		caseName    string
+		goneC       bool
+		holdC       bool
+		move        func(ctx context.Context) error
+		wantState   string
+		wantAborted bool
+	}{
+		{
+			caseName: "another bucket clicked",
+			move: func(ctx context.Context) error {
+				return chromedp.Do(ctx, chromedp.Click(chromedp.CSS(`.bucket-item[title="c"]`)))
+			},
+			wantState:   "/buckets/c c c 1",
+			wantAborted: true,
+		},
+		{
+			// htmx swaps nothing for the 404 and pushes no URL, so the restore is still the page to show.
+			caseName: "a bucket that fails to open clicked",
+			goneC:    true,
+			move: func(ctx context.Context) error {
+				return chromedp.Do(ctx, chromedp.Click(chromedp.CSS(`.bucket-item[title="c"]`)))
+			},
+			wantState: "/buckets/a a a 1",
+		},
+		{
+			// The restore replaces body, so c's response would land in a detached main view and still push its URL.
+			caseName: "another bucket clicked, answering after the restore",
+			holdC:    true,
+			move: func(ctx context.Context) error {
+				return chromedp.Do(ctx, chromedp.Click(chromedp.CSS(`.bucket-item[title="c"]`)))
+			},
+			wantState: "/buckets/a a a 1",
+		},
+		{
+			// A folder created pushes no URL, so the restore still lands over b's refreshed view.
+			caseName: "a folder created",
+			move: func(ctx context.Context) error {
+				return chromedp.Do(ctx, chromedp.Evaluate[chromedp.Void](`(() => { const f = document.querySelector('.new-folder-form'); f.querySelector('input[name=folder_name]').value = 'nf'; f.requestSubmit(); })()`))
+			},
+			wantState: "/buckets/a a a 1",
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.createBucket("a")
+			s.createBucket("b")
+			s.createBucket("c")
+			browserCtx, consoleURL := s.newBrowser()
+			s.Require().NoError(chromedp.Do(browserCtx,
+				chromedp.EmulateViewport(1280, 800),
+				chromedp.Navigate(consoleURL+"/buckets/a"),
+				chromedp.WaitVisible(chromedp.CSS(`.bucket-item[title="b"]`)),
+				chromedp.Click(chromedp.CSS(`.bucket-item[title="b"]`)),
+			))
+			_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "open b")
+			if tc.goneC {
+				s.Require().NoError(s.server.Buckets.Delete(context.Background(), "c"))
+			}
+			patterns := []*fetch.RequestPattern{{URLPattern: "*/buckets/a"}}
+			if tc.holdC {
+				patterns = append(patterns, &fetch.RequestPattern{URLPattern: "*/buckets/c"})
+			}
+			var target *chromedp.Target
+			s.Require().NoError(chromedp.Do(browserCtx,
+				chromedp.Func(func(ctx context.Context, t *chromedp.Target) error {
+					target = t
+					_, err := cdp.Call(ctx, t, fetch.Enable, fetch.EnableParams{Patterns: patterns})
+					return err
+				}),
+				// Without its snapshot Back restores a by its own XHR, which the fetch domain holds.
+				chromedp.Evaluate[chromedp.Void](`sessionStorage.removeItem('htmx-history-cache');
+					window.rAborted = false; window.rDone = false; window.cDone = false;
+					document.addEventListener('htmx:historyCacheMiss', e => {
+						e.detail.xhr.addEventListener('abort', () => { window.rAborted = true; });
+						e.detail.xhr.addEventListener('loadend', () => { window.rDone = true; });
+					});
+					document.addEventListener('htmx:beforeRequest', e => {
+						if (e.detail.pathInfo.requestPath.endsWith('/buckets/c')) e.detail.xhr.addEventListener('loadend', () => { window.cDone = true; });
+					})`),
+			))
+			// Subscribed before Back, so the pause cannot be missed.
+			next, stop := iter.Pull2(cdp.Events(browserCtx, target, fetch.RequestPaused))
+			defer stop()
+
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`history.back()`)))
+			restore, err, ok := next()
+			s.Require().True(ok, "the restore of a must pause")
+			s.Require().NoError(err)
+
+			s.Require().NoError(tc.move(browserCtx))
+			var heldC fetch.RequestID
+			if tc.holdC {
+				held, err, ok := next()
+				s.Require().True(ok, "the GET of c must pause")
+				s.Require().NoError(err)
+				heldC = held.RequestID
+			} else {
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`!document.querySelector('.htmx-request') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "the request of the move must end")
+			}
+
+			// An aborted request is gone from the fetch domain, so its error is not the point.
+			_, _ = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: restore.RequestID})
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`window.rDone || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "the restore's xhr must end")
+			if tc.holdC {
+				_, _ = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: heldC})
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`window.cDone || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "c's xhr must end")
+			}
+
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`!document.querySelector('.htmx-request, .htmx-swapping, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err)
+			got, err := chromedp.Run(browserCtx, chromedp.Evaluate[string](state))
+			s.Require().NoError(err)
+			s.Equal(tc.wantState, got, "URL, heading, mark and layouts")
+			aborted, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`window.rAborted`))
+			s.Require().NoError(err)
+			s.Equal(tc.wantAborted, aborted, "the restore")
 		})
 	}
 }

@@ -7,8 +7,21 @@
   <title>S2 | Web Console</title>
   <script src="/static/htmx.min.js"></script>
   <script>
+    // A restore past htmx's cache is a bare XHR that hx-sync does not reach, kept here so what replaces it can abort it.
+    let restoreXhr = null;
     // Back and Forward swap the main view from under a navigation in flight, whose response would still push its URL; in head, which a history restore does not re-run, and before htmx's own popstate handler of DOMContentLoaded.
-    window.addEventListener('popstate', function() { htmx.trigger('#main-content', 'htmx:abort'); });
+    window.addEventListener('popstate', function() { htmx.trigger('#main-content', 'htmx:abort'); if (restoreXhr) restoreXhr.abort(); });
+    // A restore past the cache and a main-view request that pushes a URL each abort the other when about to land, whichever is first.
+    document.addEventListener('htmx:beforeHistoryUpdate', function() { if (restoreXhr) restoreXhr.abort(); });
+    document.addEventListener('htmx:historyCacheMissLoad', function() { htmx.trigger('#main-content', 'htmx:abort'); });
+    // htmx swaps nothing when such a restore fails, which would leave the earlier page under the restored URL, unless the user has moved on meanwhile.
+    function reloadIfStillOn(path) { if (path === location.pathname + location.search) location.reload(); }
+    document.addEventListener('htmx:historyCacheMiss', function(e) {
+      restoreXhr = e.detail.xhr;
+      // A network failure fires no htmx event.
+      restoreXhr.addEventListener('error', function() { reloadIfStillOn(e.detail.path); });
+    });
+    document.addEventListener('htmx:historyCacheMissLoadError', function(e) { reloadIfStillOn(e.detail.path); });
   </script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
