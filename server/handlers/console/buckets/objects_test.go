@@ -1679,6 +1679,7 @@ func (s *ObjectsTestSuite) TestGalleryView_ThumbnailAndPersistenceAcrossReload()
 	browserCtx, consoleURL := s.newBrowser()
 	s.createBucket("gallery")
 	s.createBucket("other")
+	s.putObject("other", "note.txt", "note")
 	ctx := context.Background()
 	strg, err := s.server.Buckets.Get(ctx, "gallery")
 	s.Require().NoError(err)
@@ -1735,8 +1736,18 @@ func (s *ObjectsTestSuite) TestGalleryView_ThumbnailAndPersistenceAcrossReload()
 			chromedp.WaitVisible(chromedp.CSS(`#preview-dialog[open]`)),
 			chromedp.Evaluate[chromedp.Void](`history.forward()`),
 		))
-		_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/other' && !document.getElementById('preview-dialog').open || null`, chromedp.WithPollingTimeout(5*time.Second)))
-		s.Require().NoError(err, "forward must close the preview")
+		_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/other' && !document.getElementById('preview-dialog').open && document.getElementById('preview-dialog').childElementCount === 0 || null`, chromedp.WithPollingTimeout(5*time.Second)))
+		s.Require().NoError(err, "forward must close and empty the preview")
+	})
+
+	s.Run("closing the preview empties it", func() {
+		s.Require().NoError(chromedp.Do(browserCtx,
+			chromedp.Click(chromedp.CSS(`#list-view button[hx-target="#preview-dialog"]`)),
+			chromedp.WaitVisible(chromedp.CSS(`#preview-dialog[open] .modal-close`)),
+			chromedp.Click(chromedp.CSS(`#preview-dialog .modal-close`)),
+		))
+		_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`!document.getElementById('preview-dialog').open && document.getElementById('preview-dialog').childElementCount === 0 || null`, chromedp.WithPollingTimeout(5*time.Second)))
+		s.Require().NoError(err, "a closed preview must be emptied")
 	})
 }
 

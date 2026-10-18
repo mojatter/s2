@@ -95,7 +95,8 @@
 
   <div class="sidebar-backdrop" onclick="toggleSidebar()"></div>
 
-  <dialog id="preview-dialog" onclick="if(event.target===this)this.close()">
+  <!-- Emptied on close, however it closes, so a playing video or audio preview stops. -->
+  <dialog id="preview-dialog" onclick="if(event.target===this)this.close()" onclose="this.replaceChildren()">
   </dialog>
 
   <script>
