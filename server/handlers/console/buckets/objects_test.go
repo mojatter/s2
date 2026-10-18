@@ -78,11 +78,49 @@ func (s *ObjectsTestSuite) TestHandleObjects() {
 		bucketName      string
 		url             string
 		htmx            bool
+		historyRestore  bool
 		wantCode        int
 		wantContains    []string
 		wantNotContains []string
 		wantHeader      map[string]string
 	}{
+		{
+			caseName:       "a restore past the history cache gets the whole page",
+			setup:          func() { s.createBucket("restore"); s.putObject("restore", "readme.txt", "hello") },
+			bucketName:     "restore",
+			url:            "/buckets/restore",
+			htmx:           true,
+			historyRestore: true,
+			wantCode:       http.StatusOK,
+			wantContains:   []string{`class="sidebar"`, `id="main-content"`, "readme.txt"},
+		},
+		{
+			caseName:       "a restore without HX-Request gets the whole page",
+			setup:          func() { s.createBucket("restore-plain"); s.putObject("restore-plain", "readme.txt", "hello") },
+			bucketName:     "restore-plain",
+			url:            "/buckets/restore-plain",
+			historyRestore: true,
+			wantCode:       http.StatusOK,
+			wantContains:   []string{`class="sidebar"`, "readme.txt"},
+		},
+		{
+			caseName:       "a restore to a missing bucket is still not found",
+			setup:          func() {},
+			bucketName:     "nope-restore",
+			url:            "/buckets/nope-restore",
+			htmx:           true,
+			historyRestore: true,
+			wantCode:       http.StatusNotFound,
+			wantContains:   []string{"bucket not found"},
+		},
+		{
+			caseName:     "a page load gets the whole page",
+			setup:        func() { s.createBucket("page"); s.putObject("page", "readme.txt", "hello") },
+			bucketName:   "page",
+			url:          "/buckets/page",
+			wantCode:     http.StatusOK,
+			wantContains: []string{`class="sidebar"`, "readme.txt"},
+		},
 		{
 			caseName:     "empty bucket",
 			setup:        func() { s.createBucket("empty") },
@@ -93,13 +131,14 @@ func (s *ObjectsTestSuite) TestHandleObjects() {
 			wantContains: []string{"This folder is empty"},
 		},
 		{
-			caseName:     "with objects",
-			setup:        func() { s.createBucket("files"); s.putObject("files", "readme.txt", "hello") },
-			bucketName:   "files",
-			url:          "/buckets/files",
-			htmx:         true,
-			wantCode:     http.StatusOK,
-			wantContains: []string{"readme.txt"},
+			caseName:        "with objects",
+			setup:           func() { s.createBucket("files"); s.putObject("files", "readme.txt", "hello") },
+			bucketName:      "files",
+			url:             "/buckets/files",
+			htmx:            true,
+			wantCode:        http.StatusOK,
+			wantContains:    []string{"readme.txt"},
+			wantNotContains: []string{`class="sidebar"`},
 		},
 		{
 			caseName: "with prefix",
@@ -277,6 +316,9 @@ func (s *ObjectsTestSuite) TestHandleObjects() {
 			if tc.htmx {
 				req.Header.Set("HX-Request", "true")
 			}
+			if tc.historyRestore {
+				req.Header.Set("HX-History-Restore-Request", "true")
+			}
 			w := httptest.NewRecorder()
 			handleObjects(s.server, w, req)
 
@@ -288,6 +330,7 @@ func (s *ObjectsTestSuite) TestHandleObjects() {
 			for _, notWant := range tc.wantNotContains {
 				s.NotContains(body, notWant)
 			}
+			s.Equal("HX-Request, HX-History-Restore-Request", w.Header().Get("Vary"))
 			for k, v := range tc.wantHeader {
 				s.Equal(v, w.Header().Get(k))
 			}
@@ -1808,9 +1851,11 @@ func (s *ObjectsTestSuite) TestBrowserMarksABucketOnceItOpens() {
 		gone     bool
 		create   string
 		back     bool
+		miss     bool
 		wantName string
 	}{
 		{caseName: "back restores the earlier mark", back: true, wantName: "a"},
+		{caseName: "back past the history cache restores the page and its mark", back: true, miss: true, wantName: "a"},
 		{caseName: "a bucket that fails to open is not marked", gone: true, wantName: "a"},
 		{caseName: "back after a create restores the earlier mark", create: "zz", back: true, wantName: "a"},
 	}
@@ -1843,10 +1888,17 @@ func (s *ObjectsTestSuite) TestBrowserMarksABucketOnceItOpens() {
 			if tc.back {
 				_, err := chromedp.Run(browserCtx, chromedp.Poll[string](`location.pathname === '/buckets/`+opened+`' ? 'opened' : null`, chromedp.WithPollingTimeout(5*time.Second)))
 				s.Require().NoError(err, "open "+opened)
+				if tc.miss {
+					// Without its snapshot htmx fetches the page with HX-Request and swaps the response into body.
+					s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`sessionStorage.removeItem('htmx-history-cache')`)))
+				}
 				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`history.back()`)))
-				_, err = chromedp.Run(browserCtx, chromedp.Poll[string](`location.pathname === '/buckets/a' ? 'a' : null`, chromedp.WithPollingTimeout(5*time.Second)))
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[string](`location.pathname === '/buckets/a' && document.querySelector('#main-content h1')?.textContent === 'a' ? 'a' : null`, chromedp.WithPollingTimeout(5*time.Second)))
 				s.Require().NoError(err, "go back to a")
 			}
+			layouts, err := chromedp.Run(browserCtx, chromedp.Evaluate[int](`document.querySelectorAll('.layout').length`))
+			s.Require().NoError(err)
+			s.Equal(1, layouts, "one page layout, around the main view")
 			got, err := chromedp.Run(browserCtx, chromedp.Evaluate[string](active))
 			s.Require().NoError(err)
 			s.Equal(tc.wantName, got)

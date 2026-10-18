@@ -106,9 +106,7 @@ func objectsData(ctx context.Context, s *server.Server, bucket, prefix, search s
 	}, nil
 }
 
-// writeObjectsFragment renders the objects.html fragment for htmx partial swaps.
-// Used by both handleObjects (on HX-Request) and the mutating POST/DELETE
-// handlers to re-render the list after a state change.
+// writeObjectsFragment renders the objects.html fragment for an htmx swap.
 func writeObjectsFragment(r *http.Request, w http.ResponseWriter, s *server.Server, bucket, prefix, search string) {
 	data, err := objectsData(r.Context(), s, bucket, prefix, search)
 	if err != nil {
@@ -129,7 +127,9 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	prefix := strings.TrimRight(r.URL.Query().Get("prefix"), "/")
 	search := r.URL.Query().Get("search")
 
-	if r.Header.Get("HX-Request") == "true" {
+	w.Header().Add("Vary", "HX-Request, HX-History-Restore-Request")
+	// A restore past htmx's history cache swaps the response into body, so it gets the whole page.
+	if r.Header.Get("HX-Request") == "true" && r.Header.Get("HX-History-Restore-Request") != "true" {
 		writeObjectsFragment(r, w, s, name, prefix, search)
 		return
 	}
