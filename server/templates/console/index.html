@@ -9,6 +9,8 @@
   <script>
     // Back and Forward swap the main view from under a navigation in flight, whose response would still push its URL; in head, which a history restore does not re-run, and before htmx's own popstate handler of DOMContentLoaded.
     window.addEventListener('popstate', function() { htmx.trigger('#main-content', 'htmx:abort'); });
+    // htmx swaps nothing when a restore past its cache fails, which would leave the earlier page under the restored URL, unless the user has moved on meanwhile.
+    document.addEventListener('htmx:historyCacheMissLoadError', function(e) { if (e.detail.path === location.pathname + location.search) location.reload(); });
   </script>
   <link rel="stylesheet" href="/static/style.css">
 </head>

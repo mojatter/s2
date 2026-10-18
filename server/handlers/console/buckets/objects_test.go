@@ -1852,10 +1852,12 @@ func (s *ObjectsTestSuite) TestBrowserMarksABucketOnceItOpens() {
 		create   string
 		back     bool
 		miss     bool
+		lost     bool
 		wantName string
 	}{
 		{caseName: "back restores the earlier mark", back: true, wantName: "a"},
 		{caseName: "back past the history cache restores the page and its mark", back: true, miss: true, wantName: "a"},
+		{caseName: "back past the history cache to a deleted bucket shows it is gone", back: true, miss: true, lost: true},
 		{caseName: "a bucket that fails to open is not marked", gone: true, wantName: "a"},
 		{caseName: "back after a create restores the earlier mark", create: "zz", back: true, wantName: "a"},
 	}
@@ -1891,6 +1893,16 @@ func (s *ObjectsTestSuite) TestBrowserMarksABucketOnceItOpens() {
 				if tc.miss {
 					// Without its snapshot htmx fetches the page with HX-Request and swaps the response into body.
 					s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`sessionStorage.removeItem('htmx-history-cache')`)))
+				}
+				if tc.lost {
+					s.Require().NoError(s.server.Buckets.Delete(context.Background(), "a"))
+					s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`history.back()`)))
+					// The page reloads, which ends any Poll running on it, so each check is its own evaluation.
+					s.Eventually(func() bool {
+						gone, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`location.pathname === '/buckets/a' && document.body.innerText.includes('bucket not found')`))
+						return err == nil && gone
+					}, 5*time.Second, 100*time.Millisecond, "the restored URL must show that a is gone, not b's page")
+					return
 				}
 				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`history.back()`)))
 				_, err = chromedp.Run(browserCtx, chromedp.Poll[string](`location.pathname === '/buckets/a' && document.querySelector('#main-content h1')?.textContent === 'a' ? 'a' : null`, chromedp.WithPollingTimeout(5*time.Second)))
