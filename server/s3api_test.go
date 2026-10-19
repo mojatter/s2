@@ -92,6 +92,8 @@ func TestS3HandlerAndConsoleHandler(t *testing.T) {
 		h.ServeHTTP(w, httptest.NewRequest("GET", "/s3-only", nil))
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Equal(t, "s3", w.Body.String())
+		assert.Equal(t, "*", w.Header().Get("Access-Control-Expose-Headers"))
+		assert.Empty(t, w.Header().Get("Access-Control-Allow-Credentials"))
 
 		w = httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest("GET", "/console-only", nil))
@@ -159,6 +161,9 @@ func TestCORSHandler(t *testing.T) {
 			// Authorization request header per the Fetch spec, so it must
 			// be listed explicitly for browser SigV4 requests to work.
 			assert.Contains(t, w.Header().Get("Access-Control-Allow-Headers"), "Authorization")
+			assert.Equal(t, "*", w.Header().Get("Access-Control-Expose-Headers"))
+			// Expose-Headers "*" turns into a literal name once credentials are allowed.
+			assert.Empty(t, w.Header().Get("Access-Control-Allow-Credentials"))
 		})
 	}
 }

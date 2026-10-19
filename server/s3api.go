@@ -189,6 +189,8 @@ func corsHandler(next http.Handler) http.Handler {
 		h.Set("Access-Control-Allow-Origin", "*")
 		h.Set("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE, HEAD, OPTIONS")
 		h.Set("Access-Control-Allow-Headers", "Authorization, *")
+		// Lets browser script read ETag, x-amz-request-id and x-amz-meta-*; "*" holds as s2-server never allows credentials.
+		h.Set("Access-Control-Expose-Headers", "*")
 		h.Set("Access-Control-Max-Age", "86400")
 
 		if r.Method == http.MethodOptions {
