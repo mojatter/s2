@@ -1678,6 +1678,8 @@ func (s *ObjectsTestSuite) TestBrowserActsOnTheClickedName() {
 func (s *ObjectsTestSuite) TestGalleryView_ThumbnailAndPersistenceAcrossReload() {
 	browserCtx, consoleURL := s.newBrowser()
 	s.createBucket("gallery")
+	s.createBucket("other")
+	s.putObject("other", "note.txt", "note")
 	ctx := context.Background()
 	strg, err := s.server.Buckets.Get(ctx, "gallery")
 	s.Require().NoError(err)
@@ -1711,6 +1713,41 @@ func (s *ObjectsTestSuite) TestGalleryView_ThumbnailAndPersistenceAcrossReload()
 		s.Require().NoError(chromedp.Do(browserCtx,
 			chromedp.WaitVisible(thumb),
 		))
+	})
+
+	s.Run("back sets the view mode chosen since", func() {
+		s.Require().NoError(chromedp.Do(browserCtx,
+			// The page may be narrow enough to hide the sidebar in its drawer.
+			chromedp.Evaluate[chromedp.Void](`document.querySelector('.bucket-item[title="other"]').click()`),
+			chromedp.WaitVisible(chromedp.CSS(`#main-content h1[title="other"]`)),
+			// A settle still to come would set up the restored view itself.
+			chromedp.WaitNotPresent(chromedp.CSS(`.htmx-request, .htmx-settling`)),
+			chromedp.Click(chromedp.CSS(`button[title="List View"]`)),
+			chromedp.Evaluate[chromedp.Void](`history.back()`),
+		))
+		// The cached view shows the gallery, so only setting it up again on the restore brings back the list.
+		_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/gallery' && document.querySelector('#main-content h1[title="gallery"]') && getComputedStyle(document.getElementById('gallery-view')).display === 'none' || null`, chromedp.WithPollingTimeout(5*time.Second)))
+		s.Require().NoError(err, "back must show the list view")
+	})
+
+	s.Run("forward closes the preview left open", func() {
+		s.Require().NoError(chromedp.Do(browserCtx,
+			chromedp.Click(chromedp.CSS(`#list-view button[hx-target="#preview-dialog"]`)),
+			chromedp.WaitVisible(chromedp.CSS(`#preview-dialog[open]`)),
+			chromedp.Evaluate[chromedp.Void](`history.forward()`),
+		))
+		_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/other' && !document.getElementById('preview-dialog').open && document.getElementById('preview-dialog').childElementCount === 0 || null`, chromedp.WithPollingTimeout(5*time.Second)))
+		s.Require().NoError(err, "forward must close and empty the preview")
+	})
+
+	s.Run("closing the preview empties it", func() {
+		s.Require().NoError(chromedp.Do(browserCtx,
+			chromedp.Click(chromedp.CSS(`#list-view button[hx-target="#preview-dialog"]`)),
+			chromedp.WaitVisible(chromedp.CSS(`#preview-dialog[open] .modal-close`)),
+			chromedp.Click(chromedp.CSS(`#preview-dialog .modal-close`)),
+		))
+		_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`!document.getElementById('preview-dialog').open && document.getElementById('preview-dialog').childElementCount === 0 || null`, chromedp.WithPollingTimeout(5*time.Second)))
+		s.Require().NoError(err, "a closed preview must be emptied")
 	})
 }
 
@@ -1823,7 +1860,7 @@ func (s *ObjectsTestSuite) TestBrowserRevealsTheOpenBucket() {
 				s.Require().NoError(err, "open the sidebar")
 			}
 			if tc.back {
-				// A history restore rebuilds the sidebar scrolled to the top, with the entry already marked.
+				// A history restore keeps the sidebar and moves the mark to the restored bucket.
 				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Click(chromedp.CSS(`.bucket-item[title="b00"]`))))
 				_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/b00' && document.querySelector('.bucket-item.active')?.title === 'b00' || null`, chromedp.WithPollingTimeout(5*time.Second)))
 				s.Require().NoError(err, "open b00")
@@ -1891,7 +1928,7 @@ func (s *ObjectsTestSuite) TestBrowserMarksABucketOnceItOpens() {
 				_, err := chromedp.Run(browserCtx, chromedp.Poll[string](`location.pathname === '/buckets/`+opened+`' ? 'opened' : null`, chromedp.WithPollingTimeout(5*time.Second)))
 				s.Require().NoError(err, "open "+opened)
 				if tc.miss {
-					// Without its snapshot htmx fetches the page with HX-Request and swaps the response into body.
+					// Without its snapshot htmx fetches the whole page with HX-Request and swaps its main view in.
 					s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`sessionStorage.removeItem('htmx-history-cache')`)))
 				}
 				if tc.lost {
@@ -1914,6 +1951,227 @@ func (s *ObjectsTestSuite) TestBrowserMarksABucketOnceItOpens() {
 			got, err := chromedp.Run(browserCtx, chromedp.Evaluate[string](active))
 			s.Require().NoError(err)
 			s.Equal(tc.wantName, got)
+		})
+	}
+}
+
+// TestBrowserListsTheBucketsAsTheyAreAfterBack checks in Chrome that Back shows the bucket list as it is now, not as htmx cached it with the page.
+func (s *ObjectsTestSuite) TestBrowserListsTheBucketsAsTheyAreAfterBack() {
+	testCases := []struct {
+		caseName string
+		act      func(ctx context.Context) error
+		back     int
+		want     string
+		wantMark string
+	}{
+		{
+			// The delete pushes / once the page with b listed is cached.
+			caseName: "a bucket deleted, then back",
+			act: func(ctx context.Context) error {
+				if err := chromedp.Do(ctx,
+					// hx-confirm asks window.confirm, which headless Chrome would leave open.
+					chromedp.Evaluate[chromedp.Void](`window.confirm = () => true`),
+					chromedp.Evaluate[chromedp.Void](`document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/b"]').click()`),
+				); err != nil {
+					return err
+				}
+				_, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/' && !document.querySelector('.bucket-item[title="b"]') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				return err
+			},
+			back:     1,
+			want:     "a",
+			wantMark: "a",
+		},
+		{
+			// a's page was cached before zz existed, when b was opened.
+			caseName: "a bucket created two pages on, then back to before it",
+			act: func(ctx context.Context) error {
+				if err := chromedp.Do(ctx, chromedp.Click(chromedp.CSS(`.bucket-item[title="b"]`))); err != nil {
+					return err
+				}
+				if _, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second))); err != nil {
+					return err
+				}
+				if err := chromedp.Do(ctx,
+					chromedp.Click(chromedp.CSS(".section-header .btn")),
+					chromedp.SendKeys(chromedp.CSS(".new-bucket-form input[name=name]"), "zz"),
+					chromedp.Click(chromedp.CSS(".new-bucket-form button[type=submit]")),
+				); err != nil {
+					return err
+				}
+				_, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/buckets/zz' && document.querySelector('.bucket-item.active')?.title === 'zz' || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				return err
+			},
+			back:     2,
+			want:     "a b zz",
+			wantMark: "a",
+		},
+		{
+			// The Back's popstate lands before the list settles, when the create would click its new entry.
+			caseName: "a bucket created, back pressed as its answer lands",
+			act: func(ctx context.Context) error {
+				if err := chromedp.Do(ctx, chromedp.Click(chromedp.CSS(`.bucket-item[title="b"]`))); err != nil {
+					return err
+				}
+				if _, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second))); err != nil {
+					return err
+				}
+				if err := chromedp.Do(ctx,
+					// Added after the form's own after-request handler, so the create has already queued its click; a long settle keeps that click after the popstate whatever its latency.
+					chromedp.Evaluate[chromedp.Void](`(() => { htmx.config.defaultSettleDelay = 200; const f = document.querySelector('.new-bucket-form'); f.addEventListener('htmx:afterRequest', () => history.back(), {once: true}); f.elements.name.value = 'zy'; f.requestSubmit(); })()`),
+				); err != nil {
+					return err
+				}
+				_, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/buckets/a' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				return err
+			},
+			want:     "a b zy",
+			wantMark: "a",
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			// Each row starts from its own storage, so a bucket a prior row created is not in its list.
+			s.SetupTest()
+			s.createBucket("a")
+			s.createBucket("b")
+			browserCtx, consoleURL := s.newBrowser()
+			s.Require().NoError(chromedp.Do(browserCtx,
+				chromedp.EmulateViewport(1280, 800),
+				chromedp.Navigate(consoleURL+"/buckets/a"),
+				chromedp.WaitVisible(chromedp.CSS(`.bucket-item[title="b"]`)),
+			))
+			s.Require().NoError(tc.act(browserCtx))
+			if tc.back > 0 {
+				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](fmt.Sprintf(`history.go(-%d)`, tc.back))))
+			}
+			landed := `location.pathname === '/buckets/a' && [...document.querySelectorAll('.bucket-item')].map(a => a.title).join(' ') === '` + tc.want + `' && document.querySelector('.bucket-item.active')?.title === '` + tc.wantMark + `'`
+			_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](landed+` || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			got, _ := chromedp.Run(browserCtx, chromedp.Evaluate[string](`location.pathname + ' [' + [...document.querySelectorAll('.bucket-item')].map(a => a.title).join(' ') + '] ' + (document.querySelector('.bucket-item.active')?.title ?? '')`))
+			s.Require().NoError(err, "back must show the buckets as they are, got "+got)
+			layouts, err := chromedp.Run(browserCtx, chromedp.Evaluate[int](`document.querySelectorAll('.layout').length`))
+			s.Require().NoError(err)
+			s.Equal(1, layouts)
+		})
+	}
+}
+
+// TestBrowserClosesTheDrawerOnBack checks in Chrome at 600px that Back closes an open drawer, which restoring the main view alone would leave over the restored page.
+func (s *ObjectsTestSuite) TestBrowserClosesTheDrawerOnBack() {
+	const drawerOpen = `(() => { const r = document.querySelector('.sidebar').getBoundingClientRect(); return r.left === 0 && r.width >= 280; })() || null`
+	testCases := []struct {
+		caseName string
+		miss     bool
+	}{
+		{caseName: "back"},
+		{caseName: "back past the history cache", miss: true},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.createBucket("a")
+			s.createBucket("b")
+			browserCtx, consoleURL := s.newBrowser()
+			s.Require().NoError(chromedp.Do(browserCtx,
+				chromedp.EmulateViewport(600, 800),
+				chromedp.Navigate(consoleURL+"/buckets/a"),
+				chromedp.WaitReady(chromedp.CSS(`.bucket-item[title="b"]`)),
+				chromedp.Click(chromedp.CSS(".mobile-sidebar-toggle")),
+			))
+			_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](drawerOpen, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "open the drawer")
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Click(chromedp.CSS(`.bucket-item[title="b"]`))))
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "open b")
+			if tc.miss {
+				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`sessionStorage.removeItem('htmx-history-cache')`)))
+			}
+			// Opened again over b, so only Back can close it; clicked by script, since the drawer may still be sliding shut over the toggle.
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`document.querySelector('.mobile-sidebar-toggle').click()`)))
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](drawerOpen, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "open the drawer over b")
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`history.back()`)))
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/a' && document.querySelector('#main-content h1[title="a"]') && document.querySelector('.layout').classList.contains('layout--sidebar-collapsed') && document.querySelector('.bucket-item.active')?.title === 'a' || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "back must close the drawer")
+		})
+	}
+}
+
+// TestBrowserDropsAStaleAnswerAfterBack holds a request of a's view in Chrome, presses Back to b and releases it, so its answer does not cover b (#433).
+func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
+	const state = `location.pathname + ' ' + (document.querySelector('#main-content h1')?.textContent ?? '') + ' open=' + document.getElementById('preview-dialog').open + ' [' + [...document.querySelectorAll('.bucket-item')].map(a => a.title).join(' ') + ']'`
+	testCases := []struct {
+		caseName  string
+		pattern   string
+		act       string
+		wantState string
+	}{
+		{
+			caseName:  "a folder created",
+			pattern:   "*/buckets/a/folders",
+			act:       `(() => { const f = document.querySelector('.new-folder-form'); f.querySelector('input[name=folder_name]').value = 'nf'; f.requestSubmit(); })()`,
+			wantState: "/buckets/b b open=false [a b]",
+		},
+		{
+			caseName:  "a preview opened",
+			pattern:   "*/buckets/a/preview/*",
+			act:       `document.querySelector('#list-view button[hx-target="#preview-dialog"]').click()`,
+			wantState: "/buckets/b b open=false [a b]",
+		},
+		{
+			// The live list shows the new bucket, which is not opened over the Back.
+			caseName:  "a bucket created",
+			pattern:   "*/buckets",
+			act:       `(() => { const f = document.querySelector('.new-bucket-form'); f.elements.name.value = 'zz'; f.requestSubmit(); })()`,
+			wantState: "/buckets/b b open=false [a b zz]",
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.createBucket("a")
+			s.createBucket("b")
+			s.putObject("a", "x.txt", "x")
+			browserCtx, consoleURL := s.newBrowser()
+			s.Require().NoError(chromedp.Do(browserCtx,
+				chromedp.EmulateViewport(1280, 800),
+				chromedp.Navigate(consoleURL+"/buckets/b"),
+				chromedp.WaitVisible(chromedp.CSS(`.bucket-item[title="a"]`)),
+				chromedp.Click(chromedp.CSS(`.bucket-item[title="a"]`)),
+			))
+			_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/a' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "open a")
+			var target *chromedp.Target
+			s.Require().NoError(chromedp.Do(browserCtx,
+				chromedp.Func(func(ctx context.Context, t *chromedp.Target) error {
+					target = t
+					_, err := cdp.Call(ctx, t, fetch.Enable, fetch.EnableParams{Patterns: []*fetch.RequestPattern{{URLPattern: tc.pattern}}})
+					return err
+				}),
+				// Watches the held request's own xhr: the element that sent it can be gone once b is restored.
+				chromedp.Evaluate[chromedp.Void](`window.heldDone = false; document.addEventListener('htmx:beforeRequest', e => {
+					e.detail.xhr.addEventListener('loadend', () => { window.heldDone = true; });
+				}, {once: true})`),
+			))
+			// Subscribed before the request, so the pause cannot be missed.
+			next, stop := iter.Pull2(cdp.Events(browserCtx, target, fetch.RequestPaused))
+			defer stop()
+
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](tc.act)))
+			held, err, ok := next()
+			s.Require().True(ok, "the request must pause")
+			s.Require().NoError(err)
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`history.back()`)))
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && document.querySelector('#main-content h1')?.textContent === 'b' || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "back to b")
+
+			_, err = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: held.RequestID})
+			s.Require().NoError(err)
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`window.heldDone || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "the held request must end")
+			// Outlasts the settle and a click a create would make on its new entry.
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Sleep(500*time.Millisecond)))
+			got, err := chromedp.Run(browserCtx, chromedp.Evaluate[string](state))
+			s.Require().NoError(err)
+			s.Equal(tc.wantState, got, "URL, heading, preview and buckets")
 		})
 	}
 }
@@ -2011,7 +2269,7 @@ func (s *ObjectsTestSuite) TestBrowserOrdersARestoreAgainstANavigation() {
 			wantState: "/buckets/a a a 1",
 		},
 		{
-			// The restore replaces body, so c's response would land in a detached main view and still push its URL.
+			// c's response would land over the restored view and push its URL unless the restore aborts it.
 			caseName: "another bucket clicked, answering after the restore",
 			holdC:    true,
 			move: func(ctx context.Context) error {
@@ -2167,7 +2425,7 @@ func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
 				return chromedp.Do(ctx, chromedp.Evaluate[chromedp.Void](`history.back()`))
 			},
 			wantURL: "/",
-			// Forward restores a page again, which re-runs the scripts in body but not those in head.
+			// Forward restores a page again, which must not add the popstate listener again.
 			after: func(ctx context.Context) error {
 				if err := chromedp.Do(ctx, chromedp.Evaluate[chromedp.Void](`history.forward()`)); err != nil {
 					return err
@@ -2187,9 +2445,11 @@ func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
 			var target *chromedp.Target
 			s.Require().NoError(chromedp.Do(browserCtx,
 				chromedp.EmulateViewport(1280, 800),
-				// Counts the popstate listeners added, which a history restore must not add again.
+				// Counts the popstate listeners of head and the afterSwap ones of body added, which a history restore must not add again (#435).
 				chromedp.Func(func(ctx context.Context, t *chromedp.Target) error {
-					_, err := cdp.Call(ctx, t, page.AddScriptToEvaluateOnNewDocument, page.AddScriptToEvaluateOnNewDocumentParams{Source: `window.popstateAdds = 0; const add = window.addEventListener; window.addEventListener = function(type, ...rest) { if (type === 'popstate') window.popstateAdds++; return add.call(this, type, ...rest); };`})
+					_, err := cdp.Call(ctx, t, page.AddScriptToEvaluateOnNewDocument, page.AddScriptToEvaluateOnNewDocumentParams{Source: `window.popstateAdds = 0; window.afterSwapAdds = 0;
+						const add = window.addEventListener; window.addEventListener = function(type, ...rest) { if (type === 'popstate') window.popstateAdds++; return add.call(this, type, ...rest); };
+						const addDoc = document.addEventListener; document.addEventListener = function(type, ...rest) { if (type === 'htmx:afterSwap') window.afterSwapAdds++; return addDoc.call(this, type, ...rest); };`})
 					return err
 				}),
 				// Opened by a click, so Back has a page to return to.
@@ -2245,6 +2505,9 @@ func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
 			adds, err := chromedp.Run(browserCtx, chromedp.Evaluate[int](`window.popstateAdds`))
 			s.Require().NoError(err)
 			s.Equal(1, adds, "the popstate listener must be added once")
+			swapAdds, err := chromedp.Run(browserCtx, chromedp.Evaluate[int](`window.afterSwapAdds`))
+			s.Require().NoError(err)
+			s.Equal(1, swapAdds, "the afterSwap listener of body must be added once")
 		})
 	}
 }
