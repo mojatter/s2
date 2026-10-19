@@ -9,8 +9,8 @@
   <script>
     // A restore past htmx's cache is a bare XHR that hx-sync does not reach, kept here so what replaces it can abort it.
     let restoreXhr = null;
-    // Back and Forward swap the main view from under a navigation in flight, whose response would still push its URL, and a preview open over the view goes with it; in head, before htmx's own popstate handler of DOMContentLoaded.
-    window.addEventListener('popstate', function() { htmx.trigger('#main-content', 'htmx:abort'); if (restoreXhr) restoreXhr.abort(); document.getElementById('preview-dialog')?.close(); });
+    // Back and Forward swap the main view from under a navigation in flight, whose response would still push its URL, and a preview open over the view goes with it, as does the drawer on narrow; in head, before htmx's own popstate handler of DOMContentLoaded.
+    window.addEventListener('popstate', function() { htmx.trigger('#main-content', 'htmx:abort'); if (restoreXhr) restoreXhr.abort(); document.getElementById('preview-dialog')?.close(); closeSidebarOnNarrow(); });
     // A restore past the cache and a main-view request that pushes a URL each abort the other when about to land, whichever is first.
     document.addEventListener('htmx:beforeHistoryUpdate', function() { if (restoreXhr) restoreXhr.abort(); });
     document.addEventListener('htmx:historyCacheMissLoad', function() { htmx.trigger('#main-content', 'htmx:abort'); });

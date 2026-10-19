@@ -2025,12 +2025,14 @@ func (s *ObjectsTestSuite) TestBrowserListsTheBucketsAsTheyAreAfterBack() {
 				_, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/buckets/a' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second)))
 				return err
 			},
-			want:     "a b zy zz",
+			want:     "a b zy",
 			wantMark: "a",
 		},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
+			// Each row starts from its own storage, so a bucket a prior row created is not in its list.
+			s.SetupTest()
 			s.createBucket("a")
 			s.createBucket("b")
 			browserCtx, consoleURL := s.newBrowser()
@@ -2050,6 +2052,46 @@ func (s *ObjectsTestSuite) TestBrowserListsTheBucketsAsTheyAreAfterBack() {
 			layouts, err := chromedp.Run(browserCtx, chromedp.Evaluate[int](`document.querySelectorAll('.layout').length`))
 			s.Require().NoError(err)
 			s.Equal(1, layouts)
+		})
+	}
+}
+
+// TestBrowserClosesTheDrawerOnBack checks in Chrome at 600px that Back closes an open drawer, which restoring the main view alone would leave over the restored page.
+func (s *ObjectsTestSuite) TestBrowserClosesTheDrawerOnBack() {
+	const drawerOpen = `(() => { const r = document.querySelector('.sidebar').getBoundingClientRect(); return r.left === 0 && r.width >= 280; })() || null`
+	testCases := []struct {
+		caseName string
+		miss     bool
+	}{
+		{caseName: "back"},
+		{caseName: "back past the history cache", miss: true},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.createBucket("a")
+			s.createBucket("b")
+			browserCtx, consoleURL := s.newBrowser()
+			s.Require().NoError(chromedp.Do(browserCtx,
+				chromedp.EmulateViewport(600, 800),
+				chromedp.Navigate(consoleURL+"/buckets/a"),
+				chromedp.WaitReady(chromedp.CSS(`.bucket-item[title="b"]`)),
+				chromedp.Click(chromedp.CSS(".mobile-sidebar-toggle")),
+			))
+			_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](drawerOpen, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "open the drawer")
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Click(chromedp.CSS(`.bucket-item[title="b"]`))))
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "open b")
+			if tc.miss {
+				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`sessionStorage.removeItem('htmx-history-cache')`)))
+			}
+			// Opened again over b, so only Back can close it; clicked by script, since the drawer may still be sliding shut over the toggle.
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`document.querySelector('.mobile-sidebar-toggle').click()`)))
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](drawerOpen, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "open the drawer over b")
+			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`history.back()`)))
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/a' && document.querySelector('#main-content h1[title="a"]') && document.querySelector('.layout').classList.contains('layout--sidebar-collapsed') && document.querySelector('.bucket-item.active')?.title === 'a' || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err, "back must close the drawer")
 		})
 	}
 }
