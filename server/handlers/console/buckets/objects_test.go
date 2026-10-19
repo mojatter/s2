@@ -1726,7 +1726,7 @@ func (s *ObjectsTestSuite) TestGalleryView_ThumbnailAndPersistenceAcrossReload()
 			chromedp.Evaluate[chromedp.Void](`history.back()`),
 		))
 		// The cached view shows the gallery, so only setting it up again on the restore brings back the list.
-		_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/gallery' && getComputedStyle(document.getElementById('gallery-view')).display === 'none' || null`, chromedp.WithPollingTimeout(5*time.Second)))
+		_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/gallery' && document.querySelector('#main-content h1[title="gallery"]') && getComputedStyle(document.getElementById('gallery-view')).display === 'none' || null`, chromedp.WithPollingTimeout(5*time.Second)))
 		s.Require().NoError(err, "back must show the list view")
 	})
 
@@ -2006,6 +2006,28 @@ func (s *ObjectsTestSuite) TestBrowserListsTheBucketsAsTheyAreAfterBack() {
 			want:     "a b zz",
 			wantMark: "a",
 		},
+		{
+			// The Back's popstate lands before the list settles, when the create would click its new entry.
+			caseName: "a bucket created, back pressed as its answer lands",
+			act: func(ctx context.Context) error {
+				if err := chromedp.Do(ctx, chromedp.Click(chromedp.CSS(`.bucket-item[title="b"]`))); err != nil {
+					return err
+				}
+				if _, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second))); err != nil {
+					return err
+				}
+				if err := chromedp.Do(ctx,
+					// Added after the form's own after-request handler, so the create has already queued its click; a long settle keeps that click after the popstate whatever its latency.
+					chromedp.Evaluate[chromedp.Void](`(() => { htmx.config.defaultSettleDelay = 200; const f = document.querySelector('.new-bucket-form'); f.addEventListener('htmx:afterRequest', () => history.back(), {once: true}); f.elements.name.value = 'zy'; f.requestSubmit(); })()`),
+				); err != nil {
+					return err
+				}
+				_, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/buckets/a' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				return err
+			},
+			want:     "a b zy zz",
+			wantMark: "a",
+		},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
@@ -2018,7 +2040,9 @@ func (s *ObjectsTestSuite) TestBrowserListsTheBucketsAsTheyAreAfterBack() {
 				chromedp.WaitVisible(chromedp.CSS(`.bucket-item[title="b"]`)),
 			))
 			s.Require().NoError(tc.act(browserCtx))
-			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](fmt.Sprintf(`history.go(-%d)`, tc.back))))
+			if tc.back > 0 {
+				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](fmt.Sprintf(`history.go(-%d)`, tc.back))))
+			}
 			landed := `location.pathname === '/buckets/a' && [...document.querySelectorAll('.bucket-item')].map(a => a.title).join(' ') === '` + tc.want + `' && document.querySelector('.bucket-item.active')?.title === '` + tc.wantMark + `'`
 			_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](landed+` || null`, chromedp.WithPollingTimeout(5*time.Second)))
 			got, _ := chromedp.Run(browserCtx, chromedp.Evaluate[string](`location.pathname + ' [' + [...document.querySelectorAll('.bucket-item')].map(a => a.title).join(' ') + '] ' + (document.querySelector('.bucket-item.active')?.title ?? '')`))
