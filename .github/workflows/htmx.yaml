@@ -1,0 +1,50 @@
+name: htmx
+
+on:
+  schedule:
+    - cron: '0 3 1 * *'  # 1st of every month, 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+# A dispatch landing on the cron run waits, so both do not miss each other's issue.
+concurrency: htmx
+
+jobs:
+  htmx:
+    runs-on: ubuntu-latest
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@v7
+      -
+        # Only the vendored major version, so a new major stays a deliberate migration.
+        name: Open an issue for a newer htmx release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current=$(grep -o 'version:"[0-9.]*"' server/static/htmx.min.js | cut -d'"' -f2 || true)
+          major=${current%%.*}
+          latest=$(curl -fsSL https://registry.npmjs.org/htmx.org \
+                | jq -r --arg re "^${major}\\.[0-9]+\\.[0-9]+$" '.versions | keys[] | select(test($re))' \
+                | sort -V | tail -1)
+          echo "vendored $current, latest $major.x $latest"
+          if [ -z "$current" ] || [ -z "$latest" ]; then echo "version not found" && exit 1; fi
+          if [ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)" = "$current" ]; then exit 0; fi
+          title="console: Update htmx to $latest"
+          # A closed issue counts too, so a version declined once is not proposed again; the list API, unlike search, has no indexing lag.
+          titles=$(gh issue list --state all --limit 1000 --json title -q '.[].title')
+          if grep -qxF "$title" <<<"$titles"; then
+            echo "already proposed: $title" && exit 0
+          fi
+          gh issue create --title "$title" --label dependencies --body "$(printf '%s\n' \
+            "htmx $latest is out; the console vendors $current (https://github.com/mojatter/s2/blob/main/server/static/htmx.min.js)." \
+            "" \
+            "Before updating, read the changes since $current in https://github.com/bigskysoftware/htmx/blob/master/CHANGELOG.md, and check Back and Forward in the console, which restore pages from htmx's history cache. Close this issue to decline the version; it will not be proposed again." \
+            "" \
+            "To update, run \`make update-htmx HTMX_VERSION=$latest\`, compare the printed sha384 with jsDelivr's, and run the console browser tests (\`cd server && go test ./...\`)." \
+            "" \
+            "Opened by https://github.com/mojatter/s2/blob/main/.github/workflows/htmx.yaml.")"
