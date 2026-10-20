@@ -408,6 +408,7 @@ func TestWritesHoldTheLock(t *testing.T) {
 		seed     []string // objects put through the root before each run; a/b/x if empty
 		sub      string   // the op runs through this Sub; "sidecar" is SubSidecar
 		lockOnly bool     // the locker has no SLock
+		noRename bool     // the filesystem has no Rename, so a write streams in its first section
 		reads    bool     // the op's stats and opens must run under its lock too
 		op       func(context.Context, s2.Storage) error
 		want     []lockReq // every call, in order, as the root's locker sees it
@@ -433,6 +434,7 @@ func TestWritesHoldTheLock(t *testing.T) {
 		},
 		{
 			caseName: "copy",
+			reads:    true,
 			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "a/b/x", "c/y") },
 			want:     []lockReq{s("."), s("A/B/X"), x("C/Y"), s("."), x("C/Y")},
 			waitOn:   []string{"A/B/X", "C/Y"},
@@ -441,6 +443,7 @@ func TestWritesHoldTheLock(t *testing.T) {
 		},
 		{
 			caseName: "copy sorts its source after its destination",
+			reads:    true,
 			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "a/b/x", "a/a") },
 			want:     []lockReq{s("."), x("A/A"), s("A/B/X"), s("."), x("A/A")},
 			waitOn:   []string{"A/A", "A/B/X"},
@@ -448,7 +451,28 @@ func TestWritesHoldTheLock(t *testing.T) {
 			readOn:   "A/B/X",
 		},
 		{
+			caseName: "copy without rename",
+			noRename: true,
+			reads:    true,
+			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "a/b/x", "c/y") },
+			want:     []lockReq{s("."), s("A/B/X"), x("C/Y")}, // one section: the body streams under it
+			waitOn:   []string{"A/B/X", "C/Y"},
+			freeOn:   "A/B/Y",
+			readOn:   "A/B/X",
+		},
+		{
+			caseName: "copy through a sub locks the parent's names",
+			sub:      "a",
+			reads:    true,
+			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "b/x", "c/y") },
+			want:     []lockReq{s("."), s("A/B/X"), x("A/C/Y"), s("."), x("A/C/Y")},
+			waitOn:   []string{"A/B/X", "A/C/Y"},
+			freeOn:   "A/B/Y",
+			readOn:   "A/B/X",
+		},
+		{
 			caseName: "copy onto itself",
+			reads:    true,
 			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "a/b/x", "a/b/x") },
 			want:     []lockReq{s("."), x("A/B/X"), s("."), x("A/B/X")}, // one lock, not a self-deadlock
 			waitOn:   []string{"A/B/X"},
@@ -456,6 +480,7 @@ func TestWritesHoldTheLock(t *testing.T) {
 		},
 		{
 			caseName: "copy onto a case-only spelling",
+			reads:    true,
 			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "a/b/x", "A/B/X") },
 			want:     []lockReq{s("."), x("A/B/X"), s("."), x("A/B/X")}, // folded to one name, taken exclusively once
 			waitOn:   []string{"A/B/X"},
@@ -600,7 +625,10 @@ func TestWritesHoldTheLock(t *testing.T) {
 				}
 				return d
 			}
-			fsys := hook(memfs.New())
+			var fsys iofs.FS = hook(memfs.New())
+			if tc.noRename {
+				fsys = noRenameFS{fsys.(writeRemoveFS)}
+			}
 			var lk NameLocker = spy
 			if tc.lockOnly {
 				lk = lockOnly{spy}
