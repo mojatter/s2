@@ -172,6 +172,48 @@ func TestNameLocker(t *testing.T) {
 	}
 }
 
+func TestNameLockerFreeLockAllocs(t *testing.T) {
+	// A call that queues instead would wait for a grant that never comes, so it fails here rather than hangs.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	testCases := []struct {
+		caseName  string
+		held      *lockReq
+		shared    bool
+		maxAllocs float64
+	}{
+		// The entry and the unlock closure; a free lock queues no waiter.
+		{caseName: "exclusive", shared: false, maxAllocs: 2},
+		{caseName: "shared", shared: true, maxAllocs: 2},
+		// The unlock closure alone: the held reader's entry is reused.
+		{caseName: "shared joins a reader", held: &lockReq{name: "a", shared: true}, shared: true, maxAllocs: 1},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			l := newNameLocker()
+			unlockHeld := func() {}
+			if tc.held != nil {
+				unlock, err := tc.held.take(ctx, l)
+				require.NoError(t, err)
+				unlockHeld = unlock
+			}
+
+			r := lockReq{name: "a", shared: tc.shared}
+			allocs := testing.AllocsPerRun(100, func() {
+				unlock, err := r.take(ctx, l)
+				if err != nil {
+					t.Fatal(err)
+				}
+				unlock()
+			})
+			unlockHeld()
+			assert.LessOrEqual(t, allocs, tc.maxAllocs)
+			assert.Empty(t, l.m)
+		})
+	}
+}
+
 func TestNameLockerCancel(t *testing.T) {
 	ctx := context.Background()
 	testCases := []struct {
