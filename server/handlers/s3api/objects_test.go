@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -948,6 +949,14 @@ func (s *ObjectsTestSuite) TestHeadObject() {
 		handleGetObject(s.server, w, req)
 
 		s.Equal(http.StatusNotFound, w.Code)
+	})
+
+	s.Run("last-modified is in GMT on a host outside UTC", func() {
+		stored := time.Date(2026, 10, 21, 9, 30, 0, 0, time.FixedZone("UTC+9", 9*60*60))
+		w := httptest.NewRecorder()
+		setObjectHeaders(w, s2.NewObjectBytes("file.txt", nil, s2.WithLastModified(stored)), "file.txt")
+
+		s.Equal("Wed, 21 Oct 2026 00:30:00 GMT", w.Header().Get("Last-Modified"))
 	})
 }
 
@@ -3350,6 +3359,171 @@ func (s *ObjectsTestSuite) TestGetObjectLogsAFailedBody() {
 			s.Require().NoError(resp.Body.Close())
 
 			s.Contains(buf.String(), `level=ERROR msg="Failed to send object body" request_id=`+resp.Header.Get("x-amz-request-id")+" method=GET path=/fb/k bytes=2 ")
+		})
+	}
+}
+
+func (s *ObjectsTestSuite) TestConditionalRequests() {
+	s.putObject("cond", "src.txt", "data")
+	head := httptest.NewRecorder()
+	headReq := httptest.NewRequest("HEAD", "/cond/src.txt", nil)
+	headReq.SetPathValue("bucket", "cond")
+	headReq.SetPathValue("key", "src.txt")
+	handleGetObject(s.server, head, headReq)
+	s.Require().Equal(http.StatusOK, head.Code)
+	etag, lm := head.Header().Get("ETag"), head.Header().Get("Last-Modified")
+	modified, err := http.ParseTime(lm)
+	s.Require().NoError(err)
+	past := modified.Add(-time.Hour).Format(http.TimeFormat)
+	future := modified.Add(time.Hour).Format(http.TimeFormat)
+	other := `"0123456789abcdef0123456789abcdef"`
+
+	testCases := []struct {
+		caseName   string
+		method     string // GET, HEAD or COPY (a CopyObject of src.txt)
+		headers    map[string]string
+		addHeaders map[string]string // added as a second line of the same header
+		dstBucket  string            // COPY's destination bucket; cond if empty
+		wantStatus int
+	}{
+		{caseName: "no condition", method: "GET", wantStatus: http.StatusOK},
+		{caseName: "if-match hit", method: "GET", headers: map[string]string{"If-Match": etag}, wantStatus: http.StatusOK},
+		{caseName: "if-match bare etag", method: "GET", headers: map[string]string{"If-Match": strings.Trim(etag, `"`)}, wantStatus: http.StatusOK},
+		{caseName: "if-match in a list", method: "GET", headers: map[string]string{"If-Match": other + ", " + etag}, wantStatus: http.StatusOK},
+		{caseName: "if-match any", method: "GET", headers: map[string]string{"If-Match": "*"}, wantStatus: http.StatusOK},
+		{caseName: "if-match any after a tag", method: "GET", headers: map[string]string{"If-Match": other + ", *"}, wantStatus: http.StatusOK},
+		{caseName: "if-match trailing comma miss", method: "GET", headers: map[string]string{"If-Match": other + ","}, wantStatus: http.StatusPreconditionFailed},
+		{caseName: "if-match miss", method: "GET", headers: map[string]string{"If-Match": other}, wantStatus: http.StatusPreconditionFailed},
+		{caseName: "if-match weak is no strong match", method: "GET", headers: map[string]string{"If-Match": "W/" + etag}, wantStatus: http.StatusPreconditionFailed},
+		{caseName: "if-unmodified-since past", method: "GET", headers: map[string]string{"If-Unmodified-Since": past}, wantStatus: http.StatusPreconditionFailed},
+		{caseName: "if-unmodified-since its own time", method: "GET", headers: map[string]string{"If-Unmodified-Since": lm}, wantStatus: http.StatusOK},
+		{caseName: "if-match overrides if-unmodified-since", method: "GET", headers: map[string]string{"If-Match": etag, "If-Unmodified-Since": past}, wantStatus: http.StatusOK},
+		{caseName: "if-none-match hit", method: "GET", headers: map[string]string{"If-None-Match": etag}, wantStatus: http.StatusNotModified},
+		{caseName: "if-none-match weak hit", method: "GET", headers: map[string]string{"If-None-Match": "W/" + etag}, wantStatus: http.StatusNotModified},
+		{caseName: "if-none-match any", method: "GET", headers: map[string]string{"If-None-Match": "*"}, wantStatus: http.StatusNotModified},
+		{caseName: "if-none-match miss", method: "GET", headers: map[string]string{"If-None-Match": other}, wantStatus: http.StatusOK},
+		{caseName: "if-none-match any on a second line", method: "GET", headers: map[string]string{"If-None-Match": other}, addHeaders: map[string]string{"If-None-Match": "*"}, wantStatus: http.StatusNotModified},
+		{caseName: "if-none-match trailing comma miss", method: "GET", headers: map[string]string{"If-None-Match": other + ","}, wantStatus: http.StatusOK},
+		{caseName: "if-none-match on a second line", method: "GET", headers: map[string]string{"If-None-Match": other}, addHeaders: map[string]string{"If-None-Match": etag}, wantStatus: http.StatusNotModified},
+		{caseName: "if-match on a second line", method: "GET", headers: map[string]string{"If-Match": other}, addHeaders: map[string]string{"If-Match": etag}, wantStatus: http.StatusOK},
+		{caseName: "if-modified-since its own time", method: "GET", headers: map[string]string{"If-Modified-Since": lm}, wantStatus: http.StatusNotModified},
+		{caseName: "if-modified-since past", method: "GET", headers: map[string]string{"If-Modified-Since": past}, wantStatus: http.StatusOK},
+		{caseName: "if-none-match overrides if-modified-since", method: "GET", headers: map[string]string{"If-None-Match": other, "If-Modified-Since": future}, wantStatus: http.StatusOK},
+		{caseName: "malformed date is ignored", method: "GET", headers: map[string]string{"If-Modified-Since": "yesterday"}, wantStatus: http.StatusOK},
+		{caseName: "if-match fails before if-none-match", method: "GET", headers: map[string]string{"If-Match": other, "If-None-Match": etag}, wantStatus: http.StatusPreconditionFailed},
+		{caseName: "conditions come before range", method: "GET", headers: map[string]string{"If-None-Match": etag, "Range": "bytes=0-1"}, wantStatus: http.StatusNotModified},
+		{caseName: "head if-none-match hit", method: "HEAD", headers: map[string]string{"If-None-Match": etag}, wantStatus: http.StatusNotModified},
+		{caseName: "head if-match miss", method: "HEAD", headers: map[string]string{"If-Match": other}, wantStatus: http.StatusPreconditionFailed},
+		{caseName: "copy if-match hit", method: "COPY", headers: map[string]string{"x-amz-copy-source-if-match": etag}, wantStatus: http.StatusOK},
+		{caseName: "copy if-match miss", method: "COPY", headers: map[string]string{"x-amz-copy-source-if-match": other}, wantStatus: http.StatusPreconditionFailed},
+		{caseName: "copy if-unmodified-since past", method: "COPY", headers: map[string]string{"x-amz-copy-source-if-unmodified-since": past}, wantStatus: http.StatusPreconditionFailed},
+		{caseName: "copy if-none-match hit is 412", method: "COPY", headers: map[string]string{"x-amz-copy-source-if-none-match": etag}, wantStatus: http.StatusPreconditionFailed},
+		{caseName: "copy if-modified-since its own time is 412", method: "COPY", headers: map[string]string{"x-amz-copy-source-if-modified-since": lm}, wantStatus: http.StatusPreconditionFailed},
+		{caseName: "copy ignores a get condition", method: "COPY", headers: map[string]string{"If-Match": other}, wantStatus: http.StatusOK},
+		{caseName: "copy to a missing bucket is 404 before its condition", method: "COPY", headers: map[string]string{"x-amz-copy-source-if-match": other}, dstBucket: "nope", wantStatus: http.StatusNotFound},
+	}
+	for i, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			dst := fmt.Sprintf("dst%d.txt", i)
+			var req *http.Request
+			if tc.method == "COPY" {
+				bucket := cmp.Or(tc.dstBucket, "cond")
+				req = httptest.NewRequest("PUT", "/"+bucket+"/"+dst, nil)
+				req.SetPathValue("bucket", bucket)
+				req.SetPathValue("key", dst)
+				req.Header.Set("x-amz-copy-source", "/cond/src.txt")
+			} else {
+				req = httptest.NewRequest(tc.method, "/cond/src.txt", nil)
+				req.SetPathValue("bucket", "cond")
+				req.SetPathValue("key", "src.txt")
+			}
+			for k, v := range tc.headers {
+				req.Header.Set(k, v)
+			}
+			for k, v := range tc.addHeaders {
+				req.Header.Add(k, v)
+			}
+			w := httptest.NewRecorder()
+			if tc.method == "COPY" {
+				handlePutObject(s.server, w, req)
+			} else {
+				handleGetObject(s.server, w, req)
+			}
+
+			s.Equal(tc.wantStatus, w.Code)
+			switch tc.wantStatus {
+			case http.StatusNotModified:
+				s.Equal(etag, w.Header().Get("ETag"))
+				s.Equal(lm, w.Header().Get("Last-Modified"))
+				s.Empty(w.Header().Get("Content-Length"))
+				s.Empty(w.Body.String())
+			case http.StatusPreconditionFailed:
+				var errResp ErrorResponse
+				s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+				s.Equal("PreconditionFailed", errResp.Code)
+				s.Empty(w.Header().Get("ETag"))
+			case http.StatusNotFound:
+				var errResp ErrorResponse
+				s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+				s.Equal("NoSuchBucket", errResp.Code)
+			}
+			if tc.method == "COPY" && tc.dstBucket == "" {
+				getW := httptest.NewRecorder()
+				getReq := httptest.NewRequest("GET", "/cond/"+dst, nil)
+				getReq.SetPathValue("bucket", "cond")
+				getReq.SetPathValue("key", dst)
+				handleGetObject(s.server, getW, getReq)
+				// A refused copy writes nothing.
+				s.Equal(tc.wantStatus == http.StatusOK, getW.Code == http.StatusOK)
+			}
+		})
+	}
+}
+
+// The inputs fs cannot produce: an unknown ETag, a weak stored one, no modification time.
+func TestEvalPreconditionsOnStubs(t *testing.T) {
+	past := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Format(http.TimeFormat)
+	unknown := s2.NewObjectBytes("x", nil, s2.WithLastModified(time.Time{})) // ETag "" and a zero LastModified
+	testCases := []struct {
+		caseName string
+		obj      s2.Object
+		headers  map[string]string
+		want     int
+	}{
+		{caseName: "unknown etag and a trailing comma", obj: unknown, headers: map[string]string{"If-Match": `"x",`}, want: http.StatusPreconditionFailed},
+		{caseName: "unknown etag and if-none-match", obj: unknown, headers: map[string]string{"If-None-Match": `"x",`}, want: 0},
+		{caseName: "unknown etag and any", obj: unknown, headers: map[string]string{"If-Match": "*"}, want: 0},
+		{caseName: "no modification time and if-modified-since", obj: unknown, headers: map[string]string{"If-Modified-Since": past}, want: 0},
+		{caseName: "no modification time and if-unmodified-since", obj: unknown, headers: map[string]string{"If-Unmodified-Since": past}, want: 0},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			h := http.Header{}
+			for k, v := range tc.headers {
+				h.Set(k, v)
+			}
+			require.Equal(t, tc.want, evalPreconditions(h, "", tc.obj))
+		})
+	}
+}
+
+func TestEtagListMatches(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		list     string
+		etag     string
+		weak     bool
+		want     bool
+	}{
+		{caseName: "weak stored tag, weak compare", list: `W/"a"`, etag: `W/"a"`, weak: true, want: true},
+		{caseName: "weak stored tag, strong candidate, weak compare", list: `"a"`, etag: `W/"a"`, weak: true, want: true},
+		{caseName: "weak stored tag, strong compare", list: `"a"`, etag: `W/"a"`, weak: false, want: false},
+		{caseName: "weak stored tag, any", list: "*", etag: `W/"a"`, weak: false, want: true},
+		{caseName: "empty candidate, unknown etag", list: `"x",`, etag: "", weak: true, want: false},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			require.Equal(t, tc.want, etagListMatches(tc.list, tc.etag, tc.weak))
 		})
 	}
 }
