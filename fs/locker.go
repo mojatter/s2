@@ -206,6 +206,11 @@ func (s *storage) lockRoot(ctx context.Context, fn func() error) error {
 
 // lockNames runs fn with the root shared and names held exclusively; a locker without SLock holds the root alone.
 func (s *storage) lockNames(ctx context.Context, names []string, fn func() error) error {
+	return s.lockReading(ctx, nil, names, fn)
+}
+
+// lockReading is lockNames that also holds reads shared, in byte order with names; one key in both is held exclusively, once.
+func (s *storage) lockReading(ctx context.Context, reads, names []string, fn func() error) error {
 	sl, ok := s.lk.(SharedNameLocker)
 	if !ok {
 		return s.lockRoot(ctx, fn)
@@ -216,8 +221,17 @@ func (s *storage) lockNames(ctx context.Context, names []string, fn func() error
 	}
 	defer unlock()
 
-	for _, key := range s.qualifiedNames(names) {
-		unlock, err := sl.Lock(ctx, key)
+	exclusive := s.qualifiedNames(names)
+	keys := exclusive
+	if len(reads) > 0 {
+		keys = s.qualifiedNames(append(slices.Clip(reads), names...))
+	}
+	for _, key := range keys {
+		take := sl.SLock
+		if _, found := slices.BinarySearch(exclusive, key); found {
+			take = sl.Lock
+		}
+		unlock, err := take(ctx, key)
 		if err != nil {
 			return err
 		}
