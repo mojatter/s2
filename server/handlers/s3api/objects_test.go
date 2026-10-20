@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -948,6 +949,14 @@ func (s *ObjectsTestSuite) TestHeadObject() {
 		handleGetObject(s.server, w, req)
 
 		s.Equal(http.StatusNotFound, w.Code)
+	})
+
+	s.Run("last-modified is in GMT on a host outside UTC", func() {
+		stored := time.Date(2026, 10, 21, 9, 30, 0, 0, time.FixedZone("UTC+9", 9*60*60))
+		w := httptest.NewRecorder()
+		setObjectHeaders(w, s2.NewObjectBytes("file.txt", nil, s2.WithLastModified(stored)), "file.txt")
+
+		s.Equal("Wed, 21 Oct 2026 00:30:00 GMT", w.Header().Get("Last-Modified"))
 	})
 }
 

@@ -385,7 +385,7 @@ func setObjectHeaders(w http.ResponseWriter, obj s2.Object, key string) {
 	for k, v := range obj.Metadata() {
 		w.Header().Set("x-amz-meta-"+k, v)
 	}
-	w.Header().Set("Last-Modified", obj.LastModified().Format(http.TimeFormat))
+	w.Header().Set("Last-Modified", obj.LastModified().UTC().Format(http.TimeFormat))
 	w.Header().Set("ETag", obj.ETag())
 	w.Header().Set("Content-Type", server.ResolveContentType(obj, key))
 	w.Header().Set("Content-Length", strconv.FormatUint(obj.Length(), 10))
