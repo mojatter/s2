@@ -218,6 +218,7 @@ An `osfs` or `memfs` object is two files, its body and its metadata file, each r
 - Writing `a` and `a/x` at once leaves one of them; the other fails with `s2.ErrInvalidName`.
 - `Delete` of a name that is a directory, a prefix rather than a key, removes nothing and succeeds.
 - `PutMetadata` syncs the metadata file under its key's lock, and on a filesystem without rename a write holds its key while it streams, so a `Get` of that key waits for the whole body.
+- `Copy` holds its source shared, so a `Get` or another `Copy` of it runs alongside and only a write of the source waits for it; on a filesystem without rename that section lasts while the body streams.
 - `fs.MigrateMeta` takes no lock; run it while nothing writes.
 - A symlinked directory inside a root is not supported: a listing shows it as an object, and deleting an object under it removes the link.
 
@@ -228,7 +229,7 @@ Each row is one or more sections; within a section the root is taken first, then
 | Operation | Calls |
 |---|---|
 | `Put`, `Upload` | `SLock(".")` + `Lock(name)`, once to create the temp files and once to publish them |
-| `Copy` | `SLock(".")` + `Lock(src)` and `Lock(dst)`, then `SLock(".")` + `Lock(dst)` to publish |
+| `Copy` | `SLock(".")` + `SLock(src)` and `Lock(dst)` (`Lock` once when they fold to one name), then `SLock(".")` + `Lock(dst)` to publish |
 | `PutMetadata`, `Delete` | `SLock(".")` + `Lock(name)` |
 | `Move` | `SLock(".")` + `Lock(src)` and `Lock(dst)`; on a filesystem without rename, `Copy` then `Delete` |
 | `DeleteRecursive` | `SLock(".")` + `Lock(name)` per object, then `Lock(".")` per directory and once more to prune |

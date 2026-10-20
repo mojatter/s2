@@ -413,6 +413,7 @@ func TestWritesHoldTheLock(t *testing.T) {
 		want     []lockReq // every call, in order, as the root's locker sees it
 		waitOn   []string  // besides "." when the op asks for it, names whose exclusive lock the op waits behind
 		freeOn   string    // a name whose exclusive lock the op does not wait behind
+		readOn   string    // a name whose shared lock the op does not wait behind
 	}{
 		{
 			caseName: "put",
@@ -433,14 +434,30 @@ func TestWritesHoldTheLock(t *testing.T) {
 		{
 			caseName: "copy",
 			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "a/b/x", "c/y") },
-			want:     []lockReq{s("."), x("A/B/X"), x("C/Y"), s("."), x("C/Y")},
+			want:     []lockReq{s("."), s("A/B/X"), x("C/Y"), s("."), x("C/Y")},
 			waitOn:   []string{"A/B/X", "C/Y"},
 			freeOn:   "A/B/Y",
+			readOn:   "A/B/X",
+		},
+		{
+			caseName: "copy sorts its source after its destination",
+			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "a/b/x", "a/a") },
+			want:     []lockReq{s("."), x("A/A"), s("A/B/X"), s("."), x("A/A")},
+			waitOn:   []string{"A/A", "A/B/X"},
+			freeOn:   "A/B/Y",
+			readOn:   "A/B/X",
 		},
 		{
 			caseName: "copy onto itself",
 			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "a/b/x", "a/b/x") },
 			want:     []lockReq{s("."), x("A/B/X"), s("."), x("A/B/X")}, // one lock, not a self-deadlock
+			waitOn:   []string{"A/B/X"},
+			freeOn:   "A/B/Y",
+		},
+		{
+			caseName: "copy onto a case-only spelling",
+			op:       func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "a/b/x", "A/B/X") },
+			want:     []lockReq{s("."), x("A/B/X"), s("."), x("A/B/X")}, // folded to one name, taken exclusively once
 			waitOn:   []string{"A/B/X"},
 			freeOn:   "A/B/Y",
 		},
@@ -638,9 +655,17 @@ func TestWritesHoldTheLock(t *testing.T) {
 			seed()
 			unlock, err := spy.Lock(ctx, tc.freeOn)
 			require.NoError(t, err)
-			defer unlock()
-
 			require.NoError(t, tc.op(ctx, strg), "behind %q", tc.freeOn)
+			unlock()
+
+			if tc.readOn != "" {
+				seed()
+				unlock, err := spy.SLock(ctx, tc.readOn)
+				require.NoError(t, err)
+				defer unlock()
+
+				require.NoError(t, tc.op(ctx, strg), "behind a reader of %q", tc.readOn)
+			}
 		})
 	}
 }

@@ -489,18 +489,18 @@ func (s *storage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOptions)
 	defer func() { _ = rc.Close() }()
 
 	m := meta{ContentType: obj.ContentType(), Metadata: obj.Metadata()}
-	etag, err := s.write(ctx, []string{name}, name, func() (io.Reader, meta, error) { return rc, m, nil })
+	etag, err := s.write(ctx, nil, name, func() (io.Reader, meta, error) { return rc, m, nil })
 	return s2.UploadResult{ETag: etag}, err
 }
 
-// write stores what open yields under name; open runs inside the first section, which holds locks.
-func (s *storage) write(ctx context.Context, locks []string, name string, open func() (io.Reader, meta, error)) (string, error) {
+// write stores what open yields under name; open runs inside the first section, which also holds reads shared.
+func (s *storage) write(ctx context.Context, reads []string, name string, open func() (io.Reader, meta, error)) (string, error) {
 	if _, ok := s.fsys.(wfs.RenameFS); !ok {
 		var (
 			etag string
 			ran  bool
 		)
-		err := s.lockNames(ctx, locks, func() error {
+		err := s.lockReading(ctx, reads, []string{name}, func() error {
 			src, m, err := open()
 			if err != nil {
 				return err
@@ -520,7 +520,7 @@ func (s *storage) write(ctx context.Context, locks []string, name string, open f
 		m   meta
 		p   *pending
 	)
-	err := s.lockNames(ctx, locks, func() (err error) {
+	err := s.lockReading(ctx, reads, []string{name}, func() (err error) {
 		if src, m, err = open(); err != nil {
 			return err
 		}
@@ -720,7 +720,7 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 			return err
 		}
 	}
-	// The source's metadata file and body are read in one section; the open handle keeps that body.
+	// The source's metadata file and body are read in one section, the source held shared; the open handle keeps that body.
 	var rc io.ReadCloser
 	defer func() {
 		if rc != nil {
@@ -728,7 +728,7 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 		}
 	}()
 
-	_, err := s.write(ctx, []string{src, dst}, dst, func() (io.Reader, meta, error) {
+	_, err := s.write(ctx, []string{src}, dst, func() (io.Reader, meta, error) {
 		srcObj, body, err := s.openSource(src)
 		if err != nil {
 			return nil, meta{}, err
@@ -739,7 +739,7 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 	return err
 }
 
-// openSource gets src and opens its body, so both come from one version. Callers hold src's lock.
+// openSource gets src and opens its body, so both come from one version. Callers hold src's lock, shared or not.
 func (s *storage) openSource(src string) (*object, io.ReadCloser, error) {
 	srcObj, err := s.get(src)
 	if err != nil {
