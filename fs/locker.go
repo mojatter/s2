@@ -243,6 +243,13 @@ func (s *storage) slockName(ctx context.Context, name string, fn func() error) e
 
 // qualify qualifies name by the storage's prefix and folds it, as every lock call names it.
 func (s *storage) qualify(name string) string {
+	if s.prefix == "" {
+		// path.Join("", name) cleans name too, but allocates even when it is already clean.
+		if name == "" {
+			return ""
+		}
+		return foldName(path.Clean(name))
+	}
 	return foldName(path.Join(s.prefix, name))
 }
 

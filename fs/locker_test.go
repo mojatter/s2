@@ -4,6 +4,7 @@ import (
 	"context"
 	iofs "io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -288,6 +289,31 @@ func TestFoldName(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
 			require.Equal(t, tc.want, foldName(tc.in))
+		})
+	}
+}
+
+func TestQualify(t *testing.T) {
+	names := []string{"", ".", "a.txt", "dir/a.txt", "dir//a.txt", "./a.txt", "dir/", "../a.txt", "/a.txt"}
+	testCases := []struct {
+		caseName string
+		prefix   string
+	}{
+		{caseName: "root", prefix: ""},
+		{caseName: "sub", prefix: "bucket"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			s := &storage{prefix: tc.prefix}
+			for _, name := range names {
+				require.Equal(t, foldName(path.Join(tc.prefix, name)), s.qualify(name), name)
+			}
+			// At the root, a name already clean and folded is returned as is.
+			if tc.prefix == "" {
+				var sink string
+				allocs := testing.AllocsPerRun(100, func() { sink = s.qualify("A.TXT") })
+				assert.Zero(t, allocs, sink)
+			}
 		})
 	}
 }
