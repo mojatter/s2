@@ -106,10 +106,10 @@ The `osfs` backend stores objects as plain files on disk under the configured ro
 
 ```
 $S2_SERVER_ROOT/
-├── .buckets/               # per-bucket state (internal, not a bucket)
+├── .buckets/               # per-bucket state: creation time, multipart generation (internal, not a bucket)
 ├── .multipart/             # in-progress multipart uploads (internal, not a bucket)
 ├── assets/                 # each top-level dir is a bucket
-│   ├── .keep               # bucket marker (tracks creation time)
+│   ├── .keep               # bucket marker
 │   ├── .meta/
 │   │   └── logo.png        # JSON metadata file for logo.png (etag, content_type, metadata)
 │   ├── logo.png
@@ -147,7 +147,7 @@ volumes:
 
 The bind-mounted directory is auto-recognized as a bucket — no `S2_SERVER_BUCKETS` entry needed.
 
-> **Note:** Without a `.keep` file, the bucket's creation timestamp falls back to the current time (cosmetic only).
+> **Note:** s2 records a bucket's creation time under `.buckets/` when it creates the bucket. A bind-mounted directory, or a bucket created by an older s2, uses its `.keep` file's modification time instead, and the current time without one (cosmetic only).
 
 ## Install
 

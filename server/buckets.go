@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path"
 	"strings"
 	"sync"
@@ -21,6 +23,11 @@ const keepFile = ".keep"
 
 // bucketStateDir holds per-bucket state beside the buckets, as multipartDir does.
 const bucketStateDir = ".buckets"
+
+// bucketState is the body Create writes to a bucket's state file; one recorded lazily by Generation is empty.
+type bucketState struct {
+	CreatedAt time.Time `json:"created_at"`
+}
 
 func isKeepFile(name string) bool {
 	return path.Base(name) == keepFile
@@ -50,7 +57,7 @@ func (e *ErrBucketNotFound) Error() string {
 type Buckets struct {
 	strg         s2.Storage
 	reservedName string     // bucket name that collides with cfg.HealthPath; "" if none
-	stateMu      sync.Mutex // serializes the lazy write of a generation marker
+	stateMu      sync.Mutex // serializes writes of a bucket's state file
 }
 
 func newBuckets(ctx context.Context, cfg *Config) (*Buckets, error) {
@@ -151,11 +158,16 @@ func (bs *Buckets) Get(ctx context.Context, name string) (s2.Storage, error) {
 	return bs.strg.Sub(ctx, name)
 }
 
-// CreatedAt returns the bucket's .keep time; zero when s2 did not create the bucket.
+// CreatedAt returns the time Create recorded, else the bucket's .keep time; zero when s2 did not create the bucket.
 func (bs *Buckets) CreatedAt(ctx context.Context, name string) (time.Time, error) {
 	if !isBucketName(name) {
 		return time.Time{}, &ErrBucketNotFound{Name: name}
 	}
+	created, err := bs.recordedCreatedAt(ctx, name)
+	if err != nil || !created.IsZero() {
+		return created, err
+	}
+	// Buckets created before the state file carried the time keep the .keep one.
 	sub, err := bs.strg.Sub(ctx, name)
 	if err != nil {
 		return time.Time{}, err
@@ -168,6 +180,40 @@ func (bs *Buckets) CreatedAt(ctx context.Context, name string) (time.Time, error
 		return time.Time{}, err
 	}
 	return obj.LastModified(), nil
+}
+
+// recordedCreatedAt reads the time Create wrote to the state file, which clients cannot reach; zero when there is none.
+func (bs *Buckets) recordedCreatedAt(ctx context.Context, name string) (time.Time, error) {
+	strg, err := bs.state(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	obj, err := strg.Get(ctx, name)
+	if isNotExist(err) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	if obj.Length() == 0 {
+		return time.Time{}, nil
+	}
+	rc, err := obj.Open()
+	if isNotExist(err) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	defer rc.Close() //nolint:errcheck // read-only
+
+	var st bucketState
+	if err := json.NewDecoder(rc).Decode(&st); err != nil {
+		slog.WarnContext(ctx, "Unreadable bucket state", "bucket", name, "error", err)
+		return time.Time{}, nil
+	}
+	return st.CreatedAt, nil
 }
 
 // state returns the storage holding per-bucket state.
@@ -251,7 +297,15 @@ func (bs *Buckets) Create(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	if err := meta.Put(ctx, s2.NewObjectBytes(name, []byte{})); err != nil {
+	body, err := json.Marshal(bucketState{CreatedAt: time.Now().UTC()})
+	if err != nil {
+		return err
+	}
+	// Under stateMu, so a lazy generation write cannot replace the body with an empty one.
+	bs.stateMu.Lock()
+	err = meta.Put(ctx, s2.NewObjectBytes(name, body))
+	bs.stateMu.Unlock()
+	if err != nil {
 		return err
 	}
 	sub, err := bs.strg.Sub(ctx, name)

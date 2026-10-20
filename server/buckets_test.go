@@ -282,6 +282,20 @@ func (s *BucketsTestSuite) TestCreateFolderMissingBucket() {
 
 func (s *BucketsTestSuite) TestCreatedAt() {
 	hourAgo := time.Now().Add(-time.Hour).Truncate(time.Second)
+	setState := func(ctx context.Context, bs *Buckets, body string) {
+		strg, err := bs.state(ctx)
+		s.Require().NoError(err)
+		s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("photos", []byte(body))))
+	}
+	dropState := func(ctx context.Context, bs *Buckets) {
+		strg, err := bs.state(ctx)
+		s.Require().NoError(err)
+		s.Require().NoError(strg.Delete(ctx, "photos"))
+	}
+	ageKeep := func(root string) {
+		s.Require().NoError(os.Chtimes(filepath.Join(root, "photos", keepFile), hourAgo, hourAgo))
+	}
+	recorded := `{"created_at":"` + hourAgo.UTC().Format(time.RFC3339Nano) + `"}`
 	testCases := []struct {
 		caseName string
 		prepare  func(ctx context.Context, root string, bs *Buckets)
@@ -295,9 +309,18 @@ func (s *BucketsTestSuite) TestCreatedAt() {
 			},
 		},
 		{
+			caseName: "creating records the date",
+			prepare: func(_ context.Context, root string, _ *Buckets) {
+				ageKeep(root)
+			},
+			want: func(got time.Time) {
+				s.WithinDuration(time.Now(), got, time.Minute)
+			},
+		},
+		{
 			caseName: "re-creating keeps the date",
 			prepare: func(ctx context.Context, root string, bs *Buckets) {
-				s.Require().NoError(os.Chtimes(filepath.Join(root, "photos", keepFile), hourAgo, hourAgo))
+				setState(ctx, bs, recorded)
 				s.Require().NoError(bs.Create(ctx, "photos"))
 			},
 			want: func(got time.Time) { s.True(got.Equal(hourAgo), got) },
@@ -305,15 +328,62 @@ func (s *BucketsTestSuite) TestCreatedAt() {
 		{
 			caseName: "deleting and creating again moves it",
 			prepare: func(ctx context.Context, root string, bs *Buckets) {
-				s.Require().NoError(os.Chtimes(filepath.Join(root, "photos", keepFile), hourAgo, hourAgo))
+				setState(ctx, bs, recorded)
 				s.Require().NoError(bs.Delete(ctx, "photos"))
 				s.Require().NoError(bs.Create(ctx, "photos"))
 			},
 			want: func(got time.Time) { s.True(got.After(hourAgo), got) },
 		},
 		{
+			caseName: "rewriting .keep leaves the date",
+			prepare: func(ctx context.Context, root string, bs *Buckets) {
+				setState(ctx, bs, recorded)
+				sub, err := bs.strg.Sub(ctx, "photos")
+				s.Require().NoError(err)
+				s.Require().NoError(sub.Put(ctx, s2.NewObjectBytes(keepFile, []byte{})))
+			},
+			want: func(got time.Time) { s.True(got.Equal(hourAgo), got) },
+		},
+		{
+			caseName: "deleting .keep leaves the date",
+			prepare: func(ctx context.Context, root string, bs *Buckets) {
+				setState(ctx, bs, recorded)
+				sub, err := bs.strg.Sub(ctx, "photos")
+				s.Require().NoError(err)
+				s.Require().NoError(sub.Delete(ctx, keepFile))
+			},
+			want: func(got time.Time) { s.True(got.Equal(hourAgo), got) },
+		},
+		{
+			caseName: "a bucket created before the time was recorded keeps its .keep date",
+			prepare: func(ctx context.Context, root string, bs *Buckets) {
+				setState(ctx, bs, "")
+				ageKeep(root)
+			},
+			want: func(got time.Time) { s.True(got.Equal(hourAgo), got) },
+		},
+		{
+			caseName: "a generation recorded lazily keeps the .keep date",
+			prepare: func(ctx context.Context, root string, bs *Buckets) {
+				dropState(ctx, bs)
+				_, err := bs.Generation(ctx, "photos")
+				s.Require().NoError(err)
+				ageKeep(root)
+			},
+			want: func(got time.Time) { s.True(got.Equal(hourAgo), got) },
+		},
+		{
+			caseName: "an unreadable state falls back to the .keep date",
+			prepare: func(ctx context.Context, root string, bs *Buckets) {
+				setState(ctx, bs, "not json")
+				ageKeep(root)
+			},
+			want: func(got time.Time) { s.True(got.Equal(hourAgo), got) },
+		},
+		{
 			caseName: "a bucket s2 did not create is undated",
 			prepare: func(ctx context.Context, _ string, bs *Buckets) {
+				dropState(ctx, bs)
 				sub, err := bs.strg.Sub(ctx, "photos")
 				s.Require().NoError(err)
 				s.Require().NoError(sub.Delete(ctx, keepFile))
@@ -324,6 +394,7 @@ func (s *BucketsTestSuite) TestCreatedAt() {
 		{
 			caseName: "creating over a directory s2 did not make leaves it undated",
 			prepare: func(ctx context.Context, _ string, bs *Buckets) {
+				dropState(ctx, bs)
 				sub, err := bs.strg.Sub(ctx, "photos")
 				s.Require().NoError(err)
 				s.Require().NoError(sub.Delete(ctx, keepFile))
@@ -772,4 +843,44 @@ func (s *BucketsTestSuite) TestGenerationIsRecordedOnce() {
 			s.Equal(first, third)
 		})
 	}
+}
+
+// A lazy generation write that took the lock first must not leave Create's body empty.
+func (s *BucketsTestSuite) TestCreateKeepsItsBodyOverALazyGeneration() {
+	ctx := context.Background()
+	base, err := s2.NewStorage(ctx, s2.Config{Type: s2.TypeMemFS})
+	s.Require().NoError(err)
+
+	parked, release := make(chan struct{}), make(chan struct{})
+	hook := &getHook{name: "photos", parkOn: 2, onMiss: func() {
+		close(parked)
+		<-release
+	}}
+	bs := &Buckets{strg: hookedStorage{base, hook}}
+
+	genDone := make(chan error, 1)
+	go func() {
+		_, err := bs.Generation(ctx, "photos")
+		genDone <- err
+	}()
+	<-parked
+
+	createDone := make(chan error, 1)
+	go func() { createDone <- bs.Create(ctx, "photos") }()
+	select {
+	case <-createDone:
+		s.FailNow("Create wrote the state file while a lazy generation held the lock")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+	s.Require().NoError(<-genDone)
+	s.Require().NoError(<-createDone)
+
+	strg, err := bs.state(ctx)
+	s.Require().NoError(err)
+	obj, err := strg.Get(ctx, "photos")
+	s.Require().NoError(err)
+	s.NotZero(obj.Length(), "the lazy write must not leave the body empty")
+	s.Equal(int64(2), hook.putNamed.Load())
 }
