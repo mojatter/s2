@@ -70,9 +70,14 @@ func (l *nameLocker) lock(ctx context.Context, name string, shared bool) (func()
 		e = &lockEntry{}
 		l.m[name] = e
 	}
+	// Granted at once with nothing queued, so the call needs no waiter.
+	if len(e.queue) == 0 && e.tryLock(shared) {
+		l.mu.Unlock()
+		return func() { l.release(name, e, shared) }, nil
+	}
 	w := &waiter{shared: shared, ch: make(chan struct{})}
+	// No grant: the head is blocked, whether it is w, just refused, or an older waiter grant already stopped at.
 	e.queue = append(e.queue, w)
-	e.grant()
 	l.mu.Unlock()
 
 	select {
@@ -94,21 +99,26 @@ func (l *nameLocker) lock(ctx context.Context, name string, shared bool) (func()
 	return nil, ctx.Err()
 }
 
-// grant hands the lock to the waiters at the head of the queue; a writer there holds later readers back.
+// grant hands the lock to the waiters at the head of the queue until one is blocked, so a queued head is never grantable between calls; a writer there holds later readers back.
 func (e *lockEntry) grant() {
-	for len(e.queue) > 0 && !e.writer {
+	for len(e.queue) > 0 && e.tryLock(e.queue[0].shared) {
 		w := e.queue[0]
-		if !w.shared && e.readers > 0 {
-			return
-		}
-		if w.shared {
-			e.readers++
-		} else {
-			e.writer = true
-		}
 		e.queue = e.queue[1:]
 		close(w.ch)
 	}
+}
+
+// tryLock takes the lock in the mode asked if it is free there; callers hold mu.
+func (e *lockEntry) tryLock(shared bool) bool {
+	if e.writer || (!shared && e.readers > 0) {
+		return false
+	}
+	if shared {
+		e.readers++
+	} else {
+		e.writer = true
+	}
+	return true
 }
 
 func (l *nameLocker) release(name string, e *lockEntry, shared bool) {
@@ -233,6 +243,13 @@ func (s *storage) slockName(ctx context.Context, name string, fn func() error) e
 
 // qualify qualifies name by the storage's prefix and folds it, as every lock call names it.
 func (s *storage) qualify(name string) string {
+	if s.prefix == "" {
+		// path.Join("", name) cleans name too, but allocates even when it is already clean.
+		if name == "" {
+			return ""
+		}
+		return foldName(path.Clean(name))
+	}
 	return foldName(path.Join(s.prefix, name))
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	iofs "io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -172,6 +173,48 @@ func TestNameLocker(t *testing.T) {
 	}
 }
 
+func TestNameLockerFreeLockAllocs(t *testing.T) {
+	// A call that queues instead would wait for a grant that never comes, so it fails here rather than hangs.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	testCases := []struct {
+		caseName  string
+		held      *lockReq
+		shared    bool
+		maxAllocs float64
+	}{
+		// The entry and the unlock closure; a free lock queues no waiter.
+		{caseName: "exclusive", shared: false, maxAllocs: 2},
+		{caseName: "shared", shared: true, maxAllocs: 2},
+		// The unlock closure alone: the held reader's entry is reused.
+		{caseName: "shared joins a reader", held: &lockReq{name: "a", shared: true}, shared: true, maxAllocs: 1},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			l := newNameLocker()
+			unlockHeld := func() {}
+			if tc.held != nil {
+				unlock, err := tc.held.take(ctx, l)
+				require.NoError(t, err)
+				unlockHeld = unlock
+			}
+
+			r := lockReq{name: "a", shared: tc.shared}
+			allocs := testing.AllocsPerRun(100, func() {
+				unlock, err := r.take(ctx, l)
+				if err != nil {
+					t.Fatal(err)
+				}
+				unlock()
+			})
+			unlockHeld()
+			assert.LessOrEqual(t, allocs, tc.maxAllocs)
+			assert.Empty(t, l.m)
+		})
+	}
+}
+
 func TestNameLockerCancel(t *testing.T) {
 	ctx := context.Background()
 	testCases := []struct {
@@ -246,6 +289,31 @@ func TestFoldName(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
 			require.Equal(t, tc.want, foldName(tc.in))
+		})
+	}
+}
+
+func TestQualify(t *testing.T) {
+	names := []string{"", ".", "a.txt", "dir/a.txt", "dir//a.txt", "./a.txt", "dir/", "../a.txt", "/a.txt"}
+	testCases := []struct {
+		caseName string
+		prefix   string
+	}{
+		{caseName: "root", prefix: ""},
+		{caseName: "sub", prefix: "bucket"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			s := &storage{prefix: tc.prefix}
+			for _, name := range names {
+				require.Equal(t, foldName(path.Join(tc.prefix, name)), s.qualify(name), name)
+			}
+			// At the root, a name already clean and folded is returned as is.
+			if tc.prefix == "" {
+				var sink string
+				allocs := testing.AllocsPerRun(100, func() { sink = s.qualify("A.TXT") })
+				assert.Zero(t, allocs, sink)
+			}
 		})
 	}
 }
