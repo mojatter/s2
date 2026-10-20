@@ -355,6 +355,16 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		writeS2Error(w, r, err)
 		return
 	}
+	// The conditions are judged on the version Get saw, which Open then refuses to swap (#349).
+	switch evalPreconditions(r.Header, "", obj) {
+	case http.StatusNotModified:
+		setValidatorHeaders(w, obj)
+		w.WriteHeader(http.StatusNotModified)
+		return
+	case http.StatusPreconditionFailed:
+		writeError(w, r, "PreconditionFailed", msgPreconditionFailed, http.StatusPreconditionFailed)
+		return
+	}
 
 	// HEAD sends no body, so it does not open one: an Open refusing a replaced body (#349) must not fail it.
 	if r.Method == http.MethodHead {
@@ -380,13 +390,79 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	server.CopyBody(w, r, rc)
 }
 
+// evalPreconditions judges the conditional headers named prefix+If-* against obj, in RFC 7232's order; 0 means none failed.
+func evalPreconditions(h http.Header, prefix string, obj s2.Object) int {
+	etag := obj.ETag()
+	modified := obj.LastModified().Truncate(time.Second)
+	// Without a modification time the date conditions say nothing, as in net/http.
+	dated := !modified.IsZero()
+	// Both are lists, which a client may split over several lines.
+	if v := strings.Join(h.Values(prefix+"If-Match"), ","); v != "" {
+		if !etagListMatches(v, etag, false) {
+			return http.StatusPreconditionFailed
+		}
+	} else if t, ok := headerTime(h, prefix+"If-Unmodified-Since"); ok && dated && modified.After(t) {
+		return http.StatusPreconditionFailed
+	}
+	if v := strings.Join(h.Values(prefix+"If-None-Match"), ","); v != "" {
+		if etagListMatches(v, etag, true) {
+			return http.StatusNotModified
+		}
+	} else if t, ok := headerTime(h, prefix+"If-Modified-Since"); ok && dated && !modified.After(t) {
+		return http.StatusNotModified
+	}
+	return 0
+}
+
+// etagListMatches reports whether list, "*" or comma-separated ETags, names etag; weak ignores W/, and a bare ETag counts as quoted.
+func etagListMatches(list, etag string, weak bool) bool {
+	want := strings.Trim(strings.TrimPrefix(etag, "W/"), `"`)
+	if !weak && strings.HasPrefix(etag, "W/") {
+		want = "" // A weak stored tag has no strong match; only "*" can name it.
+	}
+	for c := range strings.SplitSeq(list, ",") {
+		c = strings.TrimSpace(c)
+		if c == "*" {
+			return true
+		}
+		if c == "" || want == "" {
+			continue
+		}
+		if strings.HasPrefix(c, "W/") {
+			if !weak {
+				continue
+			}
+			c = c[len("W/"):]
+		}
+		if strings.Trim(c, `"`) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// headerTime parses an HTTP date header; a missing or malformed one is ignored, as RFC 7232 asks.
+func headerTime(h http.Header, name string) (time.Time, bool) {
+	v := h.Get(name)
+	if v == "" {
+		return time.Time{}, false
+	}
+	t, err := http.ParseTime(v)
+	return t, err == nil
+}
+
+// setValidatorHeaders sets what a 304 carries too: obj's ETag and its Last-Modified in GMT.
+func setValidatorHeaders(w http.ResponseWriter, obj s2.Object) {
+	w.Header().Set("Last-Modified", obj.LastModified().UTC().Format(http.TimeFormat))
+	w.Header().Set("ETag", obj.ETag())
+}
+
 // setObjectHeaders describes obj, once its body has opened, so an error answered for a body replaced since Get carries none of them (#349).
 func setObjectHeaders(w http.ResponseWriter, obj s2.Object, key string) {
 	for k, v := range obj.Metadata() {
 		w.Header().Set("x-amz-meta-"+k, v)
 	}
-	w.Header().Set("Last-Modified", obj.LastModified().UTC().Format(http.TimeFormat))
-	w.Header().Set("ETag", obj.ETag())
+	setValidatorHeaders(w, obj)
 	w.Header().Set("Content-Type", server.ResolveContentType(obj, key))
 	w.Header().Set("Content-Length", strconv.FormatUint(obj.Length(), 10))
 }
@@ -581,6 +657,13 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// The destination bucket is checked first, so a failed source condition cannot hide its absence.
+	dstStrg, err := s.Buckets.Get(ctx, dstBucket)
+	if err != nil {
+		writeS2Error(w, r, err)
+		return
+	}
+
 	srcStrg, err := s.Buckets.Get(ctx, srcBucket)
 	if err != nil {
 		writeS2Error(w, r, err)
@@ -591,6 +674,11 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 	srcObj, err := srcStrg.Get(ctx, srcKey)
 	if err != nil {
 		writeS2Error(w, r, err)
+		return
+	}
+	// A copy answers 412 where a GET would answer 304, as S3 does.
+	if evalPreconditions(r.Header, "x-amz-copy-source-", srcObj) != 0 {
+		writeError(w, r, "PreconditionFailed", msgPreconditionFailed, http.StatusPreconditionFailed)
 		return
 	}
 
@@ -606,12 +694,6 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 	delete(md, reservedETagKey)
 	if strings.EqualFold(r.Header.Get("x-amz-metadata-directive"), "REPLACE") {
 		md, contentType = parseMetadataHeaders(r), requestContentType(r)
-	}
-
-	dstStrg, err := s.Buckets.Get(ctx, dstBucket)
-	if err != nil {
-		writeS2Error(w, r, err)
-		return
 	}
 
 	// NopCloser: the deferred Close above owns rc, not the backend's Put.

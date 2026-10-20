@@ -41,6 +41,9 @@ const (
 	msgIncompleteBody = "You did not provide the number of bytes specified by the Content-Length HTTP header"
 )
 
+// msgPreconditionFailed is S3's message for a 412.
+const msgPreconditionFailed = "At least one of the pre-conditions you specified did not hold."
+
 // decodeXMLBody decodes a capped XML request body, writing the S3 error
 // response itself on failure. It reports whether v was decoded.
 func decodeXMLBody(w http.ResponseWriter, r *http.Request, v any) bool {
