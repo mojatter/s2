@@ -25,6 +25,12 @@ The steps below take a root from any version since v0.14.0 to the current one in
 
 Each section lists whether the data at rest changes, what to do, and, where known, what a downgrade does. A version not listed here changes nothing on disk and needs no step; what its responses change is in its release notes.
 
+### v0.25.0
+
+- **Data at rest:** a bucket created by v0.25.0 gets its creation time in the body of `.buckets/<bucket>`, as `{"created_at": "<RFC 3339 time>"}` ([#242](https://github.com/mojatter/s2/issues/242)). Existing buckets are not rewritten, so their multipart generation stays as it is; nothing to migrate. Downgrading to v0.24.0 is safe: older versions read only that file's modification time, never its body, so ListBuckets there reports the `.keep` time again, and v0.25.0 the recorded one when it comes back.
+- ListBuckets reports that time as `CreationDate`, so a `PUT` or `DELETE` of `/{bucket}/.keep`, or an `aws s3 sync` of a tree with a top-level `.keep`, no longer moves it. A bucket created by an older version keeps the `.keep` time, which such a write still moves, until the bucket is deleted and created again. A body that does not parse as JSON falls back to the same `.keep` time and logs `Unreadable bucket state` at Warn.
+- On `osfs` and `memfs`, the `Last-Modified` header no longer carries the server's local time under the `GMT` label ([#451](https://github.com/mojatter/s2/pull/451)). Every release from v0.0.1 through v0.24.0 did, so where the s2-server process ran in a zone other than UTC (`TZ` or `/etc/localtime`; the Docker image has no zone data, so it ran in UTC unless some was mounted) the header was off by the zone's offset; the XML listings were already right. v0.25.0 also starts honouring `If-Modified-Since` and `If-Unmodified-Since` on GetObject and HeadObject, and `x-amz-copy-source-if-modified-since` and `x-amz-copy-source-if-unmodified-since` on CopyObject ([#397](https://github.com/mojatter/s2/issues/397)). A client that sends back a `Last-Modified` it saved from such a server compares against a time off by that offset, so a conditional request can answer `304` or `412 PreconditionFailed` wrongly until the client fetches once without the condition and keeps the new date; `If-None-Match` and `If-Match` compare the ETag, which was never off.
+
 ### v0.22.1
 
 - **Data at rest:** unchanged; downgrading to v0.22.0 is safe.
@@ -114,7 +120,7 @@ Each section lists whether the data at rest changes, what to do, and, where know
 
 ### v0.17.0
 
-- **Data at rest:** `$S2_SERVER_ROOT/.meta/` appears, holding one empty file per bucket. v0.18.2 renames it to `.buckets/`.
+- **Data at rest:** `$S2_SERVER_ROOT/.meta/` appears, holding one empty file per bucket. v0.18.2 renames it to `.buckets/`, and v0.25.0 writes the creation time into the file of each bucket it creates.
 - Multipart parts a pre-v0.16 server left under `<bucket>/__s2mp__/` become visible in listings. Remove them as in [step 1](#jumping-several-versions) above, or from the console by deleting the `__s2mp__` folder.
 - Multipart uploads in progress at upgrade time answer `NoSuchUpload`; start them again.
 
