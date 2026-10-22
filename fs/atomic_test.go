@@ -241,6 +241,92 @@ func (f failTargetFS) CreateFile(name string, mode iofs.FileMode) (wfs.WriterFil
 
 var errWrite = errors.New("write failed")
 
+var errRemove = errors.New("remove failed")
+
+// failRemoveFS fails every removal of name.
+type failRemoveFS struct {
+	writeRemoveFS
+	name string
+}
+
+func (f failRemoveFS) RemoveFile(name string) error {
+	if name == f.name {
+		return errRemove
+	}
+	return f.writeRemoveFS.RemoveFile(name)
+}
+
+var errStat = errors.New("stat failed")
+
+// failOpenFS fails the nth Open of name, as a transient I/O error would.
+type failOpenFS struct {
+	writeRemoveFS
+	name  string
+	nth   int
+	calls *int
+}
+
+func (f failOpenFS) Open(name string) (iofs.File, error) {
+	if name == f.name {
+		if *f.calls++; *f.calls == f.nth {
+			return nil, &iofs.PathError{Op: "open", Path: name, Err: errStat}
+		}
+	}
+	return f.writeRemoveFS.Open(name)
+}
+
+// plainFS hides the os.FileInfo of every file it opens, so os.SameFile cannot match them.
+type plainFS struct{ writeRemoveFS }
+
+func (f plainFS) Open(name string) (iofs.File, error) {
+	file, err := f.writeRemoveFS.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return plainFile{file}, nil
+}
+
+type plainFile struct{ iofs.File }
+
+func (f plainFile) Stat() (iofs.FileInfo, error) {
+	info, err := f.File.Stat()
+	if err != nil {
+		return nil, err
+	}
+	return plainInfo{info}, nil
+}
+
+func (f plainFile) ReadDir(n int) ([]iofs.DirEntry, error) {
+	return f.File.(iofs.ReadDirFile).ReadDir(n)
+}
+
+type plainInfo struct{ iofs.FileInfo }
+
+// foldFS stores every name lowercased and has no Rename, as a case-insensitive filesystem without rename would.
+type foldFS struct{ writeRemoveFS }
+
+func (f foldFS) Open(name string) (iofs.File, error) {
+	return f.writeRemoveFS.Open(strings.ToLower(name))
+}
+
+func (f foldFS) MkdirAll(dir string, mode iofs.FileMode) error {
+	return f.writeRemoveFS.MkdirAll(strings.ToLower(dir), mode)
+}
+
+func (f foldFS) CreateFile(name string, mode iofs.FileMode) (wfs.WriterFile, error) {
+	return f.writeRemoveFS.CreateFile(strings.ToLower(name), mode)
+}
+
+func (f foldFS) WriteFile(name string, p []byte, mode iofs.FileMode) (int, error) {
+	return f.writeRemoveFS.WriteFile(strings.ToLower(name), p, mode)
+}
+
+func (f foldFS) RemoveFile(name string) error {
+	return f.writeRemoveFS.RemoveFile(strings.ToLower(name))
+}
+
+func (f foldFS) RemoveAll(name string) error { return f.writeRemoveFS.RemoveAll(strings.ToLower(name)) }
+
 type failWriteFile struct{ wfs.WriterFile }
 
 func (f failWriteFile) Write(p []byte) (int, error) {

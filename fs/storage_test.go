@@ -3468,3 +3468,138 @@ func TestStorage_SelfWriteWithoutRename(t *testing.T) {
 		})
 	}
 }
+
+// TestStorage_MoveAliasWithoutRename checks a Move without Rename keeps the object when the filesystem stores src and dst as one file, and when a step fails (#456).
+func TestStorage_MoveAliasWithoutRename(t *testing.T) {
+	ctx := context.Background()
+	noRename := func(fsys writeRemoveFS) fs.FS { return noRenameFS{fsys} }
+	fold := func(fsys writeRemoveFS) fs.FS { return foldFS{fsys} }
+	plainFold := func(fsys writeRemoveFS) writeRemoveFS { return plainFS{foldFS{fsys}} }
+	plain := func(fsys writeRemoveFS) fs.FS { return plainFold(fsys) }
+	failOpen := func(name string, nth int, wrap func(writeRemoveFS) writeRemoveFS) func(writeRemoveFS) fs.FS {
+		return func(fsys writeRemoveFS) fs.FS { return failOpenFS{wrap(fsys), name, nth, new(int)} }
+	}
+	testCases := []struct {
+		caseName string
+		fsys     func(writeRemoveFS) fs.FS
+		// fold puts src through foldFS, as the rows over it read it.
+		fold bool
+		// plain means fsys hides os.FileInfo, so the move falls back to comparing stats.
+		plain    bool
+		src, dst string
+		// existing puts another body at dst first.
+		existing bool
+		// sameStat gives the existing dst src's length and both one modification time.
+		sameStat bool
+		// noMeta removes src's metadata file before the move.
+		noMeta  bool
+		wantErr error
+		// dstKept means dst holds the body after the error too.
+		dstKept bool
+	}{
+		{caseName: "case variant", fsys: fold, fold: true, src: "d/k", dst: "d/K"},
+		{caseName: "case variant of the directory", fsys: fold, fold: true, src: "d/k", dst: "D/k"},
+		{caseName: "other key through the fold", fsys: fold, fold: true, src: "d/k", dst: "d/x"},
+		{caseName: "case variant without a metadata file", fsys: fold, fold: true, src: "d/k", dst: "d/K", noMeta: true},
+		{caseName: "case variant without the OS file", fsys: plain, fold: true, plain: true, src: "d/k", dst: "d/K"},
+		{caseName: "case variant of the directory without the OS file", fsys: plain, fold: true, plain: true, src: "d/k", dst: "D/k"},
+		{caseName: "case variant on the host", fsys: noRename, src: "d/k", dst: "d/K"},
+		{caseName: "decomposed e on the host", fsys: noRename, src: "d/\u00e9", dst: "d/e\u0301"},
+		{caseName: "full case folding on the host", fsys: noRename, src: "d/\u00df", dst: "d/SS"},
+		{caseName: "other key on the host", fsys: noRename, src: "d/k", dst: "d/x"},
+		{caseName: "existing other key", fsys: noRename, src: "d/k", dst: "d/x", existing: true},
+		{caseName: "existing other key with the source's length and modification time", fsys: noRename, src: "d/k", dst: "d/x", existing: true, sameStat: true},
+		{caseName: "failed destination keeps the source", fsys: func(fsys writeRemoveFS) fs.FS { return failTargetFS{fsys} }, src: "d/k", dst: "d/x", wantErr: errWrite},
+		{caseName: "failed stat of the source after a copy over one file", fsys: failOpen("d/k", 3, plainFold), fold: true, plain: true, src: "d/k", dst: "d/K", wantErr: errStat},
+		{caseName: "failed stat of the source after a copy onto a matching other key", fsys: failOpen("d/k", 3, func(fsys writeRemoveFS) writeRemoveFS { return fsys }), src: "d/k", dst: "d/x", existing: true, sameStat: true, wantErr: errStat, dstKept: true},
+		{caseName: "failed stat of the destination before the copy", fsys: failOpen("d/K", 1, func(fsys writeRemoveFS) writeRemoveFS { return foldFS{fsys} }), fold: true, src: "d/k", dst: "d/K", wantErr: errStat},
+		{caseName: "case variant without Rename or RemoveFile", fsys: func(fsys writeRemoveFS) fs.FS { return noRemoveFS{foldFS{fsys}} }, fold: true, src: "d/k", dst: "d/K", wantErr: wfs.ErrNotImplemented},
+		{caseName: "failed removal of the source keeps both", fsys: func(fsys writeRemoveFS) fs.FS { return failRemoveFS{fsys, "d/k"} }, src: "d/k", dst: "d/x", wantErr: errRemove, dstKept: true},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			dir := t.TempDir()
+			base := osfs.DirFS(dir).(writeRemoveFS)
+			var put fs.FS = noRenameFS{base}
+			if tc.fold {
+				put = foldFS{base}
+			}
+			putStrg := NewStorageFS(s2.Config{}, put)
+			if tc.existing {
+				old := "old"
+				if tc.sameStat {
+					old = "world"
+				}
+				require.NoError(t, putStrg.Put(ctx, s2.NewObjectBytes(tc.dst, []byte(old))))
+			}
+			body := s2.NewObjectBytes(tc.src, []byte("hello"), s2.WithMetadata(s2.Metadata{"a": "1"}), s2.WithContentType("text/x-test"))
+			require.NoError(t, putStrg.Put(ctx, body))
+			if tc.sameStat {
+				past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+				for _, name := range []string{tc.src, tc.dst} {
+					require.NoError(t, os.Chtimes(filepath.Join(dir, name), past, past))
+				}
+			}
+			if tc.noMeta {
+				require.NoError(t, wfs.RemoveFile(put, metaPath(tc.src)))
+			}
+			srcObj, err := putStrg.Get(ctx, tc.src)
+			require.NoError(t, err)
+			fsys := tc.fsys(base)
+			strg := NewStorageFS(s2.Config{}, fsys)
+			_, err = fs.Stat(put, tc.dst)
+			alias := err == nil && !tc.existing
+			// One file keeps the spelling it was stored under.
+			stored := tc.dst
+			if alias {
+				stored = tc.src
+			}
+
+			err = s2.Move(ctx, strg, tc.src, tc.dst)
+			require.ErrorIs(t, err, tc.wantErr)
+			readBody := func(name string) s2.Object {
+				obj, err := strg.Get(ctx, name)
+				require.NoError(t, err)
+				rc, err := obj.Open()
+				require.NoError(t, err)
+				data, err := io.ReadAll(rc)
+				require.NoError(t, rc.Close())
+				require.NoError(t, err)
+				require.Equal(t, "hello", string(data))
+				return obj
+			}
+			holder, other := tc.dst, tc.src
+			if tc.wantErr != nil {
+				holder, other = tc.src, tc.dst
+			}
+			obj := readBody(holder)
+			if !tc.noMeta {
+				v, _ := obj.Metadata().Get("a")
+				require.Equal(t, "1", v)
+				require.Equal(t, "text/x-test", obj.ContentType())
+			}
+			ok, err := strg.Exists(ctx, other)
+			require.NoError(t, err)
+			require.Equal(t, alias || tc.dstKept, ok)
+			if tc.dstKept {
+				readBody(tc.dst)
+			}
+			if tc.wantErr == nil && alias && !tc.plain {
+				// One OS file is left untouched, as rename would leave it.
+				require.True(t, obj.LastModified().Equal(srcObj.LastModified()))
+			}
+			if tc.wantErr == nil {
+				res, err := strg.List(ctx, s2.ListOptions{Recursive: true})
+				require.NoError(t, err)
+				require.Equal(t, []string{stored}, objectNames(res.Objects))
+				if !tc.noMeta && path.Dir(stored) == "d" {
+					// The body and its metadata file both keep one spelling.
+					name := path.Base(stored)
+					require.Equal(t, []string{metaDir, name}, readDirNames(t, filepath.Join(dir, "d")))
+					require.Equal(t, []string{name}, readDirNames(t, filepath.Join(dir, "d", metaDir)))
+				}
+			}
+			requireNoTempFile(t, dir)
+		})
+	}
+}
