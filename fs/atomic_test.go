@@ -183,7 +183,8 @@ func TestAtomicWrite_FallbackWhenNoRename(t *testing.T) {
 	}{
 		{caseName: "new key", fsys: noRename, body: strings.NewReader("v"), wantBody: "v"},
 		{caseName: "overwrite", fsys: noRename, existing: "old", body: strings.NewReader("new"), wantBody: "new"},
-		{caseName: "new key without RemoveFile", fsys: func(fsys writeRemoveFS) iofs.FS { return noRemoveFS{fsys} }, body: strings.NewReader("v"), wantBody: "v"},
+		{caseName: "new key without Rename or RemoveFile", fsys: func(fsys writeRemoveFS) iofs.FS { return noRemoveFS{fsys} }, body: strings.NewReader("v"), wantErr: wfs.ErrNotImplemented},
+		{caseName: "overwrite without Rename or RemoveFile", fsys: func(fsys writeRemoveFS) iofs.FS { return noRemoveFS{fsys} }, existing: "old", body: strings.NewReader("new"), wantErr: wfs.ErrNotImplemented, wantBody: "old"},
 		{caseName: "failed body on a new key", fsys: noRename, body: io.MultiReader(strings.NewReader("part"), iotest.ErrReader(errBody)), wantErr: errBody},
 		{caseName: "failed body keeps the existing object", fsys: noRename, existing: "old", body: io.MultiReader(strings.NewReader("part"), iotest.ErrReader(errBody)), wantErr: errBody, wantBody: "old"},
 		{caseName: "failed copy over a new key", fsys: func(fsys writeRemoveFS) iofs.FS { return failTargetFS{fsys} }, body: strings.NewReader("new"), wantErr: errWrite},
@@ -224,7 +225,7 @@ func TestAtomicWrite_FallbackWhenNoRename(t *testing.T) {
 	}
 }
 
-// noRemoveFS has neither Rename nor RemoveFile, so Storage.Put writes in place.
+// noRemoveFS has neither Rename nor RemoveFile, so Storage refuses every write.
 type noRemoveFS struct{ wfs.WriteFileFS }
 
 // failTargetFS fails every write to a file outside .meta after its first byte, as a full disk would.

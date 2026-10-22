@@ -120,6 +120,10 @@ func (s *storage) migrateMetaFile(legacy, key string) error {
 	if _, err := parseMeta(data); err != nil {
 		return nil
 	}
+	// Before removing or creating anything this filesystem may be unable to undo.
+	if err := writable(s.fsys, dst); err != nil {
+		return err
+	}
 	cur, err := fs.Stat(s.fsys, dst)
 	if err != nil && !isMissingMeta(err) {
 		return fmt.Errorf("failed to stat %q: %w", dst, err)

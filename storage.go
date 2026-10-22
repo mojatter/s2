@@ -136,6 +136,9 @@ type Storage interface {
 //
 // Storage implementations are not required to satisfy Mover; the free
 // function Move falls back to Copy + Delete when they do not.
+//
+// Move(k, k) must keep k, and Move of a missing key returns ErrNotExist;
+// s2test.TestStorageCopyMove checks both.
 type Mover interface {
 	Move(ctx context.Context, src, dst string) error
 }
@@ -147,6 +150,11 @@ type Mover interface {
 func Move(ctx context.Context, s Storage, src, dst string) error {
 	if mover, ok := s.(Mover); ok {
 		return mover.Move(ctx, src, dst)
+	}
+	// Copy then Delete would delete a key moved onto itself (#457).
+	if src == dst {
+		_, err := s.Get(ctx, src)
+		return err
 	}
 	if err := s.Copy(ctx, src, dst); err != nil {
 		return err

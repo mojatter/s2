@@ -836,6 +836,17 @@ func TestStorageCopyMove(ctx context.Context, strg s2.Storage) error {
 		}
 	}
 
+	// A key moved onto itself keeps its body.
+	if err := s2.Move(ctx, strg, moved, moved); err != nil {
+		errorf("Move(%q, %q) failed: %v", moved, moved, err)
+	} else if got, err := strg.Get(ctx, moved); err != nil {
+		errorf("Get(%q) after Move onto itself failed: %v", moved, err)
+	} else if b, err := readBody(got); err != nil {
+		errorf("reading %q after Move onto itself failed: %v", moved, err)
+	} else if b != string(body) {
+		errorf("Move onto itself body = %q, want %q", b, string(body))
+	}
+
 	// Move must accept any destination Put accepts, including one under a new prefix.
 	nested := "s2test-copymove/nested/moved.txt"
 	if err := s2.Move(ctx, strg, moved, nested); err != nil {
@@ -867,6 +878,9 @@ func TestStorageCopyMove(ctx context.Context, strg s2.Storage) error {
 	}
 	if err := s2.Move(ctx, strg, missing, "s2test-copymove-missing-dst.txt"); !errors.Is(err, s2.ErrNotExist) {
 		errorf("Move(%q, ...) on missing source returned %v, want ErrNotExist", missing, err)
+	}
+	if err := s2.Move(ctx, strg, missing, missing); !errors.Is(err, s2.ErrNotExist) {
+		errorf("Move(%q, %q) on missing source returned %v, want ErrNotExist", missing, missing, err)
 	}
 
 	if len(errs) > 0 {
