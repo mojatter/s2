@@ -9,10 +9,12 @@ import (
 	"io"
 	"io/fs"
 	"net/url"
+	"os"
 	"path"
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/mojatter/s2"
 	"github.com/mojatter/wfs"
@@ -782,10 +784,73 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 		}
 		return writable(s.fsys, dst)
 	}
-	if err := s.Copy(ctx, src, dst); err != nil {
+	var ran bool
+	if err := s.lockNames(ctx, []string{src, dst}, func() error { return s.moveDirect(src, dst, &ran) }); err != nil {
+		// Like write, prune only after a move that may have made directories.
+		if ran {
+			s.pruneIfEmpty(ctx, dst)
+			s.pruneIfEmpty(ctx, src)
+		}
 		return err
 	}
-	return s.Delete(ctx, src)
+	s.pruneIfEmpty(ctx, src)
+	return nil
+}
+
+// moveDirect copies src to dst without Rename, then removes src unless both names turned out to be one file (#456). Callers hold both names' locks.
+func (s *storage) moveDirect(src, dst string, ran *bool) error {
+	srcObj, body, err := s.openSource(src)
+	if err != nil {
+		return err
+	}
+	*ran = true
+	// One file under both names exists before the copy and stats as src does.
+	before, berr := fs.Stat(s.fsys, dst)
+	if berr != nil && !s.noKey(path.Dir(dst), berr) {
+		// Guessing would remove the one file both names may share.
+		_ = body.Close()
+		return fmt.Errorf("failed to stat %q: %w", dst, berr)
+	}
+	if berr == nil {
+		// Both names opening one OS file need no copy, which would only rewrite it; rename(2) would leave it as is too.
+		if f, ok := body.(interface{ Stat() (fs.FileInfo, error) }); ok {
+			if si, err := f.Stat(); err == nil && os.SameFile(si, before) {
+				_ = body.Close()
+				// Refused as every write is where it could only write in place (#449).
+				return writable(s.fsys, dst)
+			}
+		}
+	}
+	maybeOne := berr == nil && sameStat(before, srcObj.length, srcObj.lastModified)
+	_, err = s.uploadDirect(dst, body, srcObj.m)
+	// Closed before src is removed, which some filesystems refuse while it is open.
+	_ = body.Close()
+	if err != nil {
+		return err
+	}
+	if maybeOne {
+		// The copy rewrote that one file, so src stats as dst does; distinct files differ unless src was written in the same tick.
+		si, serr := fs.Stat(s.fsys, src)
+		di, derr := fs.Stat(s.fsys, dst)
+		if serr != nil || derr != nil {
+			// src stays: removing it could remove the one file.
+			return fmt.Errorf("cannot tell whether %q and %q are one file; %q is written and %q stays: %w", src, dst, dst, src, errors.Join(serr, derr))
+		}
+		if sameStat(si, s2.MustUint64(di.Size()), di.ModTime()) {
+			return nil
+		}
+	}
+	// The body goes first, so a failed removal leaves src with its metadata file.
+	if err := wfs.RemoveFile(s.fsys, src); err != nil {
+		return fmt.Errorf("failed to delete %q: %w", src, err)
+	}
+	s.dropMeta(src)
+	return nil
+}
+
+// sameStat reports whether info has the given length and modification time.
+func sameStat(info fs.FileInfo, length uint64, modTime time.Time) bool {
+	return s2.MustUint64(info.Size()) == length && info.ModTime().Equal(modTime)
 }
 
 // rename moves src and its metadata file to dst. Callers hold both names' locks.
