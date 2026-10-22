@@ -39,6 +39,7 @@ func NewStorage(_ context.Context, cfg s2.Config) (s2.Storage, error) {
 type Option func(*storage)
 
 // NewStorageFS serves fs; an osfs one shares its lock with every storage on the same directory.
+// Writing needs wfs.WriteFileFS plus wfs.RenameFS or wfs.RemoveFileFS; otherwise a write fails with wfs.ErrNotImplemented.
 func NewStorageFS(cfg s2.Config, fs fs.FS, opts ...Option) s2.Storage {
 	s := &storage{
 		cfg:  cfg,
@@ -543,6 +544,10 @@ func (s *storage) write(ctx context.Context, reads []string, name string, open f
 
 // uploadDirect stores name through atomicWrite's fallback for a filesystem without rename. Callers hold name's lock.
 func (s *storage) uploadDirect(name string, src io.Reader, m meta) (string, error) {
+	// Before checkTree and prepareMeta, which may create directories this filesystem cannot remove.
+	if err := writable(s.fsys, name); err != nil {
+		return "", err
+	}
 	if err := s.checkTree(name); err != nil {
 		return "", err
 	}
@@ -705,6 +710,9 @@ func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Meta
 		if err != nil {
 			return err
 		}
+		if err := writable(s.fsys, name); err != nil {
+			return err
+		}
 		if err := s.prepareMeta(name); err != nil {
 			return err
 		}
@@ -766,6 +774,13 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 		}
 		s.pruneIfEmpty(ctx, src)
 		return nil
+	}
+	// Copy then Delete would delete a key moved onto itself (#449).
+	if src == dst {
+		if _, err := s.Get(ctx, src); err != nil {
+			return err
+		}
+		return writable(s.fsys, dst)
 	}
 	if err := s.Copy(ctx, src, dst); err != nil {
 		return err

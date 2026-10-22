@@ -18,7 +18,7 @@ const tmpPrefix = ".s2tmp-"
 
 // atomicWrite writes src into name using a temp-file + Sync + Rename pattern
 // when the filesystem implements wfs.RenameFS. Otherwise it falls back to
-// directWrite, which is not crash-safe.
+// directWrite, which is not crash-safe and needs wfs.RemoveFileFS.
 //
 // The temp file lives in the .meta of name's directory, so the rename stays in one filesystem.
 //
@@ -103,11 +103,21 @@ func (t *tempFile) discard() {
 	}
 }
 
-// directWrite copies src over name once read in full into a temp file, so a failed src leaves name as it was; without RemoveFileFS it writes in place.
+// writable refuses a write to name on a filesystem with neither Rename nor RemoveFile, which could only write in place (#449).
+func writable(fsys iofs.FS, name string) error {
+	if _, ok := fsys.(wfs.RenameFS); ok {
+		return nil
+	}
+	if _, ok := fsys.(wfs.RemoveFileFS); ok {
+		return nil
+	}
+	return &iofs.PathError{Op: "RemoveFile", Path: name, Err: wfs.ErrNotImplemented}
+}
+
+// directWrite copies src over name once read in full into a temp file, so a failed src leaves name as it was.
 func directWrite(fsys iofs.FS, name string, src io.Reader) error {
-	if _, ok := fsys.(wfs.RemoveFileFS); !ok {
-		// A temp file that cannot be removed would pile up, so write in place.
-		return copyTo(fsys, name, src)
+	if err := writable(fsys, name); err != nil {
+		return err
 	}
 	t, err := createTemp(fsys, name)
 	if err != nil {

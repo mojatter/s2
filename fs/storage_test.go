@@ -2,6 +2,7 @@ package fs
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/md5" // #nosec G501 -- the ETag is an MD5
 	"errors"
@@ -3308,10 +3309,11 @@ func TestFailedWriteClosesItsTemps(t *testing.T) {
 	require.Equal(t, created.Load(), closed.Load())
 }
 
-// TestStorageWithoutRenameConforms runs s2test's Put checks over a filesystem without rename.
+// TestStorageWithoutRenameConforms runs s2test's Put and Copy/Move checks over a filesystem without Rename.
 func TestStorageWithoutRenameConforms(t *testing.T) {
 	strg := NewStorageFS(s2.Config{}, noRenameFS{osfs.DirFS(t.TempDir()).(writeRemoveFS)})
 	require.NoError(t, s2test.TestStorageGetPut(context.Background(), strg))
+	require.NoError(t, s2test.TestStorageCopyMove(context.Background(), strg))
 }
 
 // TestFailedWriteKeepsDirsWithoutRename checks a write failing before it starts leaves an existing empty directory, as the rename path does.
@@ -3397,6 +3399,72 @@ func TestGetReadsOneVersion(t *testing.T) {
 
 			require.NoError(t, <-putErr)
 			assert.Equal(t, "bbbbbb", readConsistent(t, strg, "x"))
+		})
+	}
+}
+
+// TestStorage_SelfWriteWithoutRename checks a key copied, moved or put onto itself keeps its body on every filesystem class (#449).
+func TestStorage_SelfWriteWithoutRename(t *testing.T) {
+	ctx := context.Background()
+	testCases := []struct {
+		caseName string
+		fsys     func(writeRemoveFS) fs.FS
+		op       string
+		dst      string
+		wantErr  error
+	}{
+		{caseName: "copy with Rename", fsys: func(fsys writeRemoveFS) fs.FS { return fsys }, op: "copy"},
+		{caseName: "move with Rename", fsys: func(fsys writeRemoveFS) fs.FS { return fsys }, op: "move"},
+		{caseName: "put with Rename", fsys: func(fsys writeRemoveFS) fs.FS { return fsys }, op: "put"},
+		{caseName: "copy without Rename", fsys: func(fsys writeRemoveFS) fs.FS { return noRenameFS{fsys} }, op: "copy"},
+		{caseName: "move without Rename", fsys: func(fsys writeRemoveFS) fs.FS { return noRenameFS{fsys} }, op: "move"},
+		{caseName: "put without Rename", fsys: func(fsys writeRemoveFS) fs.FS { return noRenameFS{fsys} }, op: "put"},
+		{caseName: "copy without Rename or RemoveFile", fsys: func(fsys writeRemoveFS) fs.FS { return noRemoveFS{fsys} }, op: "copy", wantErr: wfs.ErrNotImplemented},
+		{caseName: "move without Rename or RemoveFile", fsys: func(fsys writeRemoveFS) fs.FS { return noRemoveFS{fsys} }, op: "move", wantErr: wfs.ErrNotImplemented},
+		{caseName: "copy to a case variant without Rename", fsys: func(fsys writeRemoveFS) fs.FS { return noRenameFS{fsys} }, op: "copy", dst: "d/K"},
+		{caseName: "put without Rename or RemoveFile", fsys: func(fsys writeRemoveFS) fs.FS { return noRemoveFS{fsys} }, op: "put", wantErr: wfs.ErrNotImplemented},
+		{caseName: "metadata without Rename or RemoveFile", fsys: func(fsys writeRemoveFS) fs.FS { return noRemoveFS{fsys} }, op: "metadata", wantErr: wfs.ErrNotImplemented},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			dir := t.TempDir()
+			base := osfs.DirFS(dir).(writeRemoveFS)
+			require.NoError(t, NewStorageFS(s2.Config{}, base).Put(ctx, s2.NewObjectBytes("d/k", []byte("hello"), s2.WithMetadata(s2.Metadata{"a": "1"}))))
+			strg := NewStorageFS(s2.Config{}, tc.fsys(base))
+
+			dst := cmp.Or(tc.dst, "d/k")
+			var err error
+			switch tc.op {
+			case "copy":
+				err = strg.Copy(ctx, "d/k", dst)
+			case "move":
+				err = s2.Move(ctx, strg, "d/k", dst)
+			case "put":
+				obj, gerr := strg.Get(ctx, "d/k")
+				require.NoError(t, gerr)
+				rc, oerr := obj.Open()
+				require.NoError(t, oerr)
+				err = strg.Put(ctx, s2.NewObjectReader("d/k", rc, obj.Length()))
+				_ = rc.Close()
+			case "metadata":
+				err = strg.PutMetadata(ctx, "d/k", s2.Metadata{"b": "2"})
+			}
+			require.ErrorIs(t, err, tc.wantErr)
+
+			obj, err := strg.Get(ctx, "d/k")
+			require.NoError(t, err)
+			rc, err := obj.Open()
+			require.NoError(t, err)
+			defer rc.Close()
+
+			data, err := io.ReadAll(rc)
+			require.NoError(t, err)
+			require.Equal(t, "hello", string(data))
+			if tc.wantErr != nil || tc.op != "put" {
+				v, _ := obj.Metadata().Get("a")
+				require.Equal(t, "1", v)
+			}
+			requireNoTempFile(t, dir)
 		})
 	}
 }

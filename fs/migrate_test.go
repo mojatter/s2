@@ -174,6 +174,42 @@ func TestMigrateMeta(t *testing.T) {
 	}
 }
 
+// TestMigrateMetaWithoutRemoveFile checks MigrateMeta refuses a filesystem with neither Rename nor RemoveFile before changing anything (#449).
+func TestMigrateMetaWithoutRemoveFile(t *testing.T) {
+	const oldMeta, newMeta = `{"etag":"\"old\"","metadata":{}}`, `{"etag":"\"new\"","metadata":{}}`
+	testCases := []struct {
+		caseName string
+		// seed is written in order, so a later file is newer.
+		seed []seedFile
+	}{
+		{caseName: "a move", seed: []seedFile{{"photos/a.txt", "body"}, {".meta/photos/a.txt", oldMeta}}},
+		{caseName: "an empty directory at the new location", seed: []seedFile{{"a/x", "body"}, {"a/.meta/x/", ""}, {".meta/a/x", oldMeta}}},
+		{caseName: "the new location newer", seed: []seedFile{{".meta/a/x", oldMeta}, {"a/x", "body"}, {"a/.meta/x", newMeta}}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			fsys := osfs.DirFS(t.TempDir()).(writeRemoveFS)
+			want := map[string]string{}
+			for i, f := range tc.seed {
+				if dir, ok := strings.CutSuffix(f.name, "/"); ok {
+					require.NoError(t, wfs.MkdirAll(fsys, dir, fs.ModePerm))
+				} else {
+					_, err := wfs.WriteFile(fsys, f.name, []byte(f.body), fs.ModePerm)
+					require.NoError(t, err)
+				}
+				want[f.name] = f.body
+				if i < len(tc.seed)-1 {
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+
+			_, err := MigrateMeta(context.Background(), NewStorageFS(s2.Config{}, noRemoveFS{fsys}))
+			require.ErrorIs(t, err, wfs.ErrNotImplemented)
+			assert.Equal(t, want, readAllFiles(t, fsys))
+		})
+	}
+}
+
 func TestMigrateMetaSkips(t *testing.T) {
 	ctx := context.Background()
 	testCases := []struct {
