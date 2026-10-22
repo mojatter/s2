@@ -344,3 +344,48 @@ func TestCount(t *testing.T) {
 		})
 	}
 }
+
+// moveStorage records the calls s2.Move's fallback makes; Get finds only "k".
+type moveStorage struct {
+	Storage
+	calls []string
+}
+
+func (s *moveStorage) Get(_ context.Context, name string) (Object, error) {
+	s.calls = append(s.calls, "Get "+name)
+	if name != "k" {
+		return nil, ErrNotExist
+	}
+	return NewObjectBytes(name, nil), nil
+}
+
+func (s *moveStorage) Copy(_ context.Context, src, dst string) error {
+	s.calls = append(s.calls, "Copy "+src+" "+dst)
+	return nil
+}
+
+func (s *moveStorage) Delete(_ context.Context, name string) error {
+	s.calls = append(s.calls, "Delete "+name)
+	return nil
+}
+
+func TestMove(t *testing.T) {
+	testCases := []struct {
+		caseName  string
+		src, dst  string
+		wantErr   error
+		wantCalls []string
+	}{
+		{caseName: "copy then delete", src: "k", dst: "k2", wantCalls: []string{"Copy k k2", "Delete k"}},
+		{caseName: "onto itself", src: "k", dst: "k", wantCalls: []string{"Get k"}},
+		{caseName: "missing onto itself", src: "x", dst: "x", wantErr: ErrNotExist, wantCalls: []string{"Get x"}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			s := &moveStorage{}
+			err := Move(context.Background(), s, tc.src, tc.dst)
+			assert.ErrorIs(t, err, tc.wantErr)
+			assert.Equal(t, tc.wantCalls, s.calls)
+		})
+	}
+}
