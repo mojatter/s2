@@ -128,7 +128,12 @@ func directWrite(fsys iofs.FS, name string, src io.Reader) error {
 	if err := t.write(src); err != nil {
 		return err
 	}
-	f, err := fsys.Open(t.tmp)
+	return copyTemp(fsys, t.tmp, name)
+}
+
+// copyTemp copies the temp file tmp over name, removing name if the copy truncated it.
+func copyTemp(fsys iofs.FS, tmp, name string) error {
+	f, err := fsys.Open(tmp)
 	if err != nil {
 		return fmt.Errorf("failed to open temp file: %w", err)
 	}

@@ -3468,3 +3468,172 @@ func TestStorage_SelfWriteWithoutRename(t *testing.T) {
 		})
 	}
 }
+
+// TestStorage_MoveAliasWithoutRename checks a Move without Rename keeps the object when the filesystem stores src and dst as one file, and when a step fails (#456).
+func TestStorage_MoveAliasWithoutRename(t *testing.T) {
+	ctx := context.Background()
+	noRename := func(fsys writeRemoveFS) fs.FS { return noRenameFS{fsys} }
+	fold := func(fsys writeRemoveFS) fs.FS { return foldFS{fsys} }
+	failName := func(name string, skip int) func(writeRemoveFS) fs.FS {
+		return func(fsys writeRemoveFS) fs.FS { return failNameFS{fsys, name, &skip} }
+	}
+	failFoldName := func(name string, skip int) func(writeRemoveFS) fs.FS {
+		return func(fsys writeRemoveFS) fs.FS { return failNameFS{foldFS{fsys}, name, &skip} }
+	}
+	failOpen := func(name string, fold bool) func(writeRemoveFS) fs.FS {
+		return func(fsys writeRemoveFS) fs.FS {
+			armed := false
+			if fold {
+				fsys = foldFS{fsys}
+			}
+			return failOpenFS{fsys, name, &armed}
+		}
+	}
+	testCases := []struct {
+		caseName string
+		fsys     func(writeRemoveFS) fs.FS
+		// fold puts src through foldFS, as the rows over it read it.
+		fold     bool
+		src, dst string
+		// stored is the name List reports after the move; empty means dst.
+		stored  string
+		wantErr error
+		// dstKept means dst holds the body after the error too.
+		dstKept bool
+		// kept means a temp file holds the body after the error.
+		kept bool
+		// noMeta removes src's metadata file before the move.
+		noMeta bool
+	}{
+		{caseName: "case variant", fsys: fold, fold: true, src: "d/k", dst: "d/K", stored: "d/k"},
+		{caseName: "case variant of the directory", fsys: fold, fold: true, src: "d/k", dst: "D/k", stored: "d/k"},
+		{caseName: "other key through the fold", fsys: fold, fold: true, src: "d/k", dst: "d/x"},
+		{caseName: "case variant on the host", fsys: noRename, src: "d/k", dst: "d/K"},
+		{caseName: "decomposed e on the host", fsys: noRename, src: "d/\u00e9", dst: "d/e\u0301"},
+		{caseName: "full case folding on the host", fsys: noRename, src: "d/\u00df", dst: "d/SS"},
+		{caseName: "other key on the host", fsys: noRename, src: "d/k", dst: "d/x"},
+		{caseName: "failed destination keeps the source", fsys: failName("d/x", 0), src: "d/k", dst: "d/x", wantErr: errWrite},
+		{caseName: "failed destination on a full disk keeps the source", fsys: func(fsys writeRemoveFS) fs.FS { return failTargetFS{fsys} }, src: "d/k", dst: "d/x", wantErr: errWrite},
+		{caseName: "failed alias destination restores the source", fsys: failFoldName("d/K", 0), fold: true, src: "d/k", dst: "d/K", wantErr: errWrite},
+		{caseName: "failed second write of an alias destination restores the source", fsys: failFoldName("d/K", 1), fold: true, src: "d/k", dst: "d/K", wantErr: errWrite},
+		{caseName: "failed alias restore keeps the temp file", fsys: func(fsys writeRemoveFS) fs.FS { return failTargetFS{foldFS{fsys}} }, fold: true, src: "d/k", dst: "d/K", wantErr: errWrite, kept: true},
+		{caseName: "failed removal of the source keeps both", fsys: func(fsys writeRemoveFS) fs.FS { return failRemoveFS{fsys, "d/k"} }, src: "d/k", dst: "d/x", wantErr: errRemove, dstKept: true},
+		{caseName: "failed removal of an alias source keeps it", fsys: func(fsys writeRemoveFS) fs.FS { return failRemoveFS{foldFS{fsys}, "d/k"} }, fold: true, src: "d/k", dst: "d/K", wantErr: errRemove, dstKept: true},
+		{caseName: "failed metadata file of the destination keeps the source", fsys: failName("d/.meta/x", 0), src: "d/k", dst: "d/x", wantErr: errWrite, dstKept: true},
+		{caseName: "failed metadata file of an alias destination keeps it", fsys: failFoldName("d/.meta/K", 0), fold: true, src: "d/k", dst: "d/K", wantErr: errWrite},
+		{caseName: "failed alias destination whose removal fails too restores the source", fsys: func(fsys writeRemoveFS) fs.FS {
+			skip := 0
+			return failRemoveFS{failNameFS{foldFS{fsys}, "d/K", &skip}, "d/K"}
+		}, fold: true, src: "d/k", dst: "d/K", wantErr: errWrite},
+		{caseName: "failed metadata file of an alias destination leaves its body alone", fsys: func(fsys writeRemoveFS) fs.FS {
+			zero, none := 0, 0
+			return failNameFS{failNameFS{foldFS{fsys}, "d/.meta/K", &zero}, "d/k", &none}
+		}, fold: true, src: "d/k", dst: "d/K", wantErr: errWrite},
+		{caseName: "failed stat of an alias destination keeps the temp file", fsys: failOpen("d/K", true), fold: true, src: "d/k", dst: "d/K", wantErr: errOpen, kept: true},
+		{caseName: "failed stat of the destination keeps it", fsys: failOpen("d/x", false), src: "d/k", dst: "d/x", wantErr: errOpen, kept: true, dstKept: true},
+		{caseName: "failed destination keeps a source without a metadata file", fsys: failName("d/x", 0), src: "d/k", dst: "d/x", wantErr: errWrite, noMeta: true},
+		{caseName: "case variant without a metadata file", fsys: fold, fold: true, src: "d/k", dst: "d/K", stored: "d/k", noMeta: true},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			dir := t.TempDir()
+			base := osfs.DirFS(dir).(writeRemoveFS)
+			var put fs.FS = noRenameFS{base}
+			if tc.fold {
+				put = foldFS{base}
+			}
+			body := s2.NewObjectBytes(tc.src, []byte("hello"), s2.WithMetadata(s2.Metadata{"a": "1"}), s2.WithContentType("text/x-test"))
+			require.NoError(t, NewStorageFS(s2.Config{}, put).Put(ctx, body))
+			var etag string
+			if tc.noMeta {
+				require.NoError(t, wfs.RemoveFile(put, metaPath(tc.src)))
+				obj, err := NewStorageFS(s2.Config{}, put).Get(ctx, tc.src)
+				require.NoError(t, err)
+				etag = obj.ETag()
+			}
+			fsys := tc.fsys(base)
+			strg := NewStorageFS(s2.Config{}, fsys)
+			_, err := fs.Stat(fsys, tc.dst)
+			alias := err == nil
+
+			err = s2.Move(ctx, strg, tc.src, tc.dst)
+			require.ErrorIs(t, err, tc.wantErr)
+			readBody := func(name string) s2.Object {
+				obj, err := strg.Get(ctx, name)
+				require.NoError(t, err)
+				rc, err := obj.Open()
+				require.NoError(t, err)
+				data, err := io.ReadAll(rc)
+				require.NoError(t, rc.Close())
+				require.NoError(t, err)
+				require.Equal(t, "hello", string(data))
+				return obj
+			}
+			if tc.kept {
+				require.ErrorContains(t, err, tmpPrefix)
+				require.ErrorContains(t, err, metaPath(tc.dst))
+				temps, err := filepath.Glob(filepath.Join(dir, "d", metaDir, tmpPrefix+"*"))
+				require.NoError(t, err)
+				require.Len(t, temps, 1)
+				data, err := os.ReadFile(temps[0])
+				require.NoError(t, err)
+				require.Equal(t, "hello", string(data))
+				_, err = strg.Get(ctx, tc.src)
+				require.ErrorIs(t, err, s2.ErrNotExist)
+				if tc.dstKept {
+					readBody(tc.dst)
+				} else {
+					_, err = strg.Get(ctx, tc.dst)
+					require.ErrorIs(t, err, s2.ErrNotExist)
+				}
+				return
+			}
+			holder, other := tc.dst, tc.src
+			if tc.wantErr != nil {
+				holder, other = tc.src, tc.dst
+			}
+			obj := readBody(holder)
+			if tc.noMeta {
+				if tc.wantErr != nil {
+					require.Equal(t, etag, obj.ETag())
+					_, err := fs.Stat(put, metaPath(tc.src))
+					require.ErrorIs(t, err, fs.ErrNotExist)
+				}
+			} else {
+				v, _ := obj.Metadata().Get("a")
+				require.Equal(t, "1", v)
+				require.Equal(t, "text/x-test", obj.ContentType())
+			}
+			ok, err := strg.Exists(ctx, other)
+			require.NoError(t, err)
+			require.Equal(t, alias || tc.dstKept, ok)
+			if tc.dstKept {
+				readBody(tc.dst)
+			}
+			if tc.wantErr == nil {
+				res, err := strg.List(ctx, s2.ListOptions{Recursive: true})
+				require.NoError(t, err)
+				require.Equal(t, []string{cmp.Or(tc.stored, tc.dst)}, objectNames(res.Objects))
+				if path.Dir(tc.dst) == "d" {
+					// The body and its metadata file both take the stored spelling.
+					base := path.Base(cmp.Or(tc.stored, tc.dst))
+					require.Equal(t, []string{metaDir, base}, dirNames(t, filepath.Join(dir, "d")))
+					require.Equal(t, []string{base}, dirNames(t, filepath.Join(dir, "d", metaDir)))
+				}
+			}
+			requireNoTempFile(t, dir)
+		})
+	}
+}
+
+// dirNames lists the names in dir as the filesystem stores them.
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}

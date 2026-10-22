@@ -542,33 +542,19 @@ func (s *storage) write(ctx context.Context, reads []string, name string, open f
 	return etag, nil
 }
 
-// uploadDirect stores name through atomicWrite's fallback for a filesystem without rename. Callers hold name's lock.
+// uploadDirect stores name through a temp file on a filesystem without rename. Callers hold name's lock.
 func (s *storage) uploadDirect(name string, src io.Reader, m meta) (string, error) {
-	// Before checkTree and prepareMeta, which may create directories this filesystem cannot remove.
-	if err := writable(s.fsys, name); err != nil {
+	t, etag, err := s.stage(name, src)
+	if err != nil {
 		return "", err
 	}
-	if err := s.checkTree(name); err != nil {
+	defer t.discard()
+
+	m.ETag = etag
+	if _, err := s.publish(name, t, m); err != nil {
 		return "", err
 	}
-	if err := s.prepareMeta(name); err != nil {
-		return "", err
-	}
-	h := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
-	if err := atomicWrite(s.fsys, name, io.TeeReader(src, h)); err != nil {
-		if errors.Is(err, errTruncated) {
-			// The body is gone, so a stale metadata file must not describe it.
-			s.dropMeta(name)
-		}
-		return "", err
-	}
-	m.ETag = quotedMD5(h)
-	if err := saveMeta(s.fsys, name, m); err != nil {
-		// A stale metadata file would describe the previous body; without one the ETag falls back to the synthetic form.
-		s.dropMeta(name)
-		return "", err
-	}
-	return m.ETag, nil
+	return etag, nil
 }
 
 // dropMeta removes name's metadata files, ignoring errors. Callers hold name's lock.
@@ -782,10 +768,131 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 		}
 		return writable(s.fsys, dst)
 	}
-	if err := s.Copy(ctx, src, dst); err != nil {
+	var ran bool
+	if err := s.lockNames(ctx, []string{src, dst}, func() error { return s.moveDirect(src, dst, &ran) }); err != nil {
+		// Like write, prune only after a move that may have made directories.
+		if ran {
+			s.pruneIfEmpty(ctx, dst)
+			s.pruneIfEmpty(ctx, src)
+		}
 		return err
 	}
-	return s.Delete(ctx, src)
+	s.pruneIfEmpty(ctx, src)
+	return nil
+}
+
+// moveDirect moves src to dst without Rename: dst is written, src removed, and dst written again when the filesystem stores both as one file, which the removal took (#456). Callers hold both names' locks.
+func (s *storage) moveDirect(src, dst string, ran *bool) error {
+	srcObj, body, err := s.openSource(src)
+	if err != nil {
+		return err
+	}
+	*ran = true
+	_, hadMeta, err := s.findMeta(src)
+	if err != nil {
+		_ = body.Close()
+		return err
+	}
+	t, etag, err := s.stage(dst, body)
+	// Closed before src is removed, which some filesystems refuse while it is open.
+	_ = body.Close()
+	if err != nil {
+		return err
+	}
+	m := srcObj.m
+	m.ETag = etag
+	// src stays until dst holds the body and its metadata file, as Copy then Delete did.
+	if truncated, err := s.publish(dst, t, m); err != nil {
+		return s.restore(src, dst, t, m, srcObj, hadMeta, truncated, err)
+	}
+	if err := wfs.RemoveFile(s.fsys, src); err != nil {
+		t.discard()
+		return fmt.Errorf("failed to delete %q: %w", src, err)
+	}
+	if _, err := fs.Stat(s.fsys, dst); err == nil {
+		t.discard()
+		s.dropMeta(src)
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		// dst may have gone with src, so the temp file may hold the only copy.
+		return s.kept(src, dst, t, m, fmt.Errorf("failed to stat %q: %w", dst, err))
+	}
+	// One file under both names: the removal took dst, and its metadata file, src's, goes too so publish recreates it under dst's spelling.
+	s.dropMeta(dst)
+	if truncated, err := s.publish(dst, t, m); err != nil {
+		return s.restore(src, dst, t, m, srcObj, hadMeta, truncated, err)
+	}
+	t.discard()
+	return nil
+}
+
+// publish copies t over name and saves m as its metadata file, reporting whether a failure truncated the body; on failure name is left without a metadata file. Callers hold name's lock.
+func (s *storage) publish(name string, t *tempFile, m meta) (bool, error) {
+	if err := copyTemp(s.fsys, t.tmp, name); err != nil {
+		truncated := errors.Is(err, errTruncated)
+		if truncated {
+			// The body is gone, so a stale metadata file must not describe it.
+			s.dropMeta(name)
+		}
+		return truncated, err
+	}
+	if err := saveMeta(s.fsys, name, m); err != nil {
+		// A stale metadata file would describe the previous body; without one the ETag falls back to the synthetic form.
+		s.dropMeta(name)
+		return false, err
+	}
+	return false, nil
+}
+
+// restore answers err from a failed write of dst, writing src back from t when that write changed it, as when both names are one file, and its metadata file when it had one. Callers hold both names' locks.
+func (s *storage) restore(src, dst string, t *tempFile, m meta, srcObj *object, hadMeta, truncated bool, err error) error {
+	// A truncation through the other name changes src's length or modification time, compared as Open does (#349); a body copied in full is left alone.
+	info, serr := fs.Stat(s.fsys, src)
+	if serr != nil || truncated && (s2.MustUint64(info.Size()) != srcObj.length || !info.ModTime().Equal(srcObj.lastModified)) {
+		if rerr := copyTemp(s.fsys, t.tmp, src); rerr != nil {
+			return s.kept(src, dst, t, m, err, rerr)
+		}
+	}
+	t.discard()
+	if _, hasMeta, _ := s.findMeta(src); hadMeta && !hasMeta {
+		if merr := saveMeta(s.fsys, src, m); merr != nil {
+			s.dropMeta(src)
+			return errors.Join(err, fmt.Errorf("%q is left without its metadata file: %w", src, merr))
+		}
+	}
+	return err
+}
+
+// kept answers errs when t may hold the only copy of the body: t stays, and dst's metadata file keeps the rest. Callers hold both names' locks.
+func (s *storage) kept(src, dst string, t *tempFile, m meta, errs ...error) error {
+	if merr := saveMeta(s.fsys, dst, m); merr != nil {
+		return fmt.Errorf("failed to move %q to %q; %q keeps its body: %w", src, dst, t.tmp, errors.Join(append(errs, merr)...))
+	}
+	return fmt.Errorf("failed to move %q to %q; %q keeps its body and %q its metadata: %w", src, dst, t.tmp, metaPath(dst), errors.Join(errs...))
+}
+
+// stage vets dst and reads body into a temp file beside it, returning the body's ETag. Callers hold dst's lock.
+func (s *storage) stage(dst string, body io.Reader) (*tempFile, string, error) {
+	// Before checkTree and prepareMeta, which may create directories this filesystem cannot remove.
+	if err := writable(s.fsys, dst); err != nil {
+		return nil, "", err
+	}
+	if err := s.checkTree(dst); err != nil {
+		return nil, "", err
+	}
+	if err := s.prepareMeta(dst); err != nil {
+		return nil, "", s.refused(dst, err)
+	}
+	t, err := createTemp(s.fsys, dst)
+	if err != nil {
+		return nil, "", s.refused(dst, err)
+	}
+	h := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
+	if err := t.write(io.TeeReader(body, h)); err != nil {
+		t.discard()
+		return nil, "", err
+	}
+	return t, quotedMD5(h), nil
 }
 
 // rename moves src and its metadata file to dst. Callers hold both names' locks.
