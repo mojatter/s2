@@ -131,7 +131,7 @@ func templateFuncs(cfg *Config) template.FuncMap {
 			if pt == "" {
 				return false
 			}
-			if pt == "text" && s2.MustInt64(size) > cfg.MaxPreviewSize {
+			if pt == "text" && s2.MustInt64(size) > cfg.EffectiveMaxPreviewSize() {
 				return false
 			}
 			return true

@@ -70,7 +70,7 @@ type Config struct {
 	// OOM when a large upload targets the in-memory backend; set an explicit
 	// value here to override.
 	MaxUploadSize int64 `json:"max_upload_size"`
-	// MaxPreviewSize is the maximum file size for text preview in bytes (0 = default 10MB).
+	// MaxPreviewSize is the maximum file size for text preview in bytes (0 or negative = default 10 MiB).
 	MaxPreviewSize int64 `json:"max_preview_size"`
 	// MultipartMaxAge is the upload lifetime in seconds (0 = default, negative = forever).
 	MultipartMaxAge int64 `json:"multipart_max_age"`
@@ -135,6 +135,14 @@ func (cfg *Config) EffectiveMaxUploadSize() int64 {
 		return DefaultMemfsMaxUploadSize
 	}
 	return DefaultMaxUploadSize
+}
+
+// EffectiveMaxPreviewSize returns MaxPreviewSize, or DefaultMaxPreviewSize when it is not positive.
+func (cfg *Config) EffectiveMaxPreviewSize() int64 {
+	if cfg.MaxPreviewSize > 0 {
+		return cfg.MaxPreviewSize
+	}
+	return DefaultMaxPreviewSize
 }
 
 // EffectiveMultipartMaxAge returns the upload lifetime, or 0 when uploads never expire.
@@ -251,9 +259,6 @@ func DefaultConfig() *Config {
 		Listen:        ":9000",
 		ConsoleListen: ":9001",
 		HealthPath:    "/healthz",
-		// MaxUploadSize intentionally left 0 — EffectiveMaxUploadSize resolves
-		// a backend-appropriate default at request time.
-		MaxPreviewSize: DefaultMaxPreviewSize,
 	}
 }
 

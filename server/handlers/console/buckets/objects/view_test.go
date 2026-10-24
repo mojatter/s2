@@ -398,6 +398,7 @@ func (s *ViewTestSuite) TestHandlePreview() {
 const typeBroken = s2.Type("broken-view-test")
 
 // brokenStorage fails Get of broken.txt as an unreachable backend would, and the Open of gone.txt and eio.txt.
+// The Length of short.txt is 1, below its stored bytes, and that of huge.txt is one over DefaultMaxPreviewSize.
 type brokenStorage struct {
 	s2.Storage
 }
@@ -423,8 +424,30 @@ func (b brokenStorage) Get(ctx context.Context, name string) (s2.Object, error) 
 		return brokenObject{Object: obj, err: fmt.Errorf("%w: gone.txt", s2.ErrNotExist)}, nil
 	case "eio.txt":
 		return brokenObject{Object: obj, err: syscall.EIO}, nil
+	case "short.txt":
+		return shortObject{obj}, nil
+	case "huge.txt":
+		return hugeObject{obj}, nil
 	}
 	return obj, nil
+}
+
+// shortObject reports a Length of 1 whatever it stores.
+type shortObject struct {
+	s2.Object
+}
+
+func (shortObject) Length() uint64 {
+	return 1
+}
+
+// hugeObject reports a Length one over DefaultMaxPreviewSize whatever it stores.
+type hugeObject struct {
+	s2.Object
+}
+
+func (hugeObject) Length() uint64 {
+	return server.DefaultMaxPreviewSize + 1
 }
 
 // brokenObject fails its Open with err.
@@ -437,8 +460,9 @@ func (o brokenObject) Open() (io.ReadCloser, error) {
 	return nil, o.err
 }
 
-// TestErrorStatus checks the status follows the error, not the handler (#418).
-func (s *ViewTestSuite) TestErrorStatus() {
+// brokenServer returns a server whose buckets are brokenStorage, with bucket eb holding names.
+func (s *ViewTestSuite) brokenServer(names ...string) *server.Server {
+	s.T().Helper()
 	root := s.T().TempDir()
 	base, err := s2.NewStorage(context.Background(), s2.Config{Type: s2.TypeOSFS, Root: root})
 	s.Require().NoError(err)
@@ -454,9 +478,15 @@ func (s *ViewTestSuite) TestErrorStatus() {
 	s.Require().NoError(srv.Buckets.Create(context.Background(), "eb"))
 	strg, err := srv.Buckets.Get(context.Background(), "eb")
 	s.Require().NoError(err)
-	for _, name := range []string{"gone.txt", "eio.txt"} {
-		s.Require().NoError(strg.Put(context.Background(), s2.NewObjectBytes(name, []byte("x"))))
+	for _, name := range names {
+		s.Require().NoError(strg.Put(context.Background(), s2.NewObjectBytes(name, []byte("0123456789"))))
 	}
+	return srv
+}
+
+// TestErrorStatus checks the status follows the error, not the handler (#418).
+func (s *ViewTestSuite) TestErrorStatus() {
+	srv := s.brokenServer("gone.txt", "eio.txt")
 
 	handlers := []struct {
 		caseName string
@@ -495,5 +525,39 @@ func (s *ViewTestSuite) TestErrorStatus() {
 				s.Equal(tc.wantStatus, w.Code)
 			})
 		}
+	}
+}
+
+// TestHandlePreviewSizeLimit checks a text preview never reads past MaxPreviewSize (#463).
+func (s *ViewTestSuite) TestHandlePreviewSizeLimit() {
+	srv := s.brokenServer("fits.txt", "large.txt", "short.txt", "eio.txt", "huge.txt")
+	testCases := []struct {
+		caseName     string
+		object       string
+		maxSize      int64
+		wantContains string
+		wantNoText   bool
+	}{
+		{caseName: "within the limit", object: "fits.txt", maxSize: 10, wantContains: "<pre>0123456789</pre>"},
+		{caseName: "Length over the limit", object: "large.txt", maxSize: 9, wantContains: "File too large to preview.", wantNoText: true},
+		{caseName: "stored bytes over the limit", object: "short.txt", maxSize: 9, wantContains: "File too large to preview.", wantNoText: true},
+		{caseName: "Open skipped over the limit", object: "eio.txt", maxSize: 9, wantContains: "File too large to preview.", wantNoText: true},
+		{caseName: "zero falls back to the default", object: "fits.txt", maxSize: 0, wantContains: "<pre>0123456789</pre>"},
+		{caseName: "zero caps at the default", object: "huge.txt", maxSize: 0, wantContains: "File too large to preview.", wantNoText: true},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			srv.Config.MaxPreviewSize = tc.maxSize
+			req := httptest.NewRequest(http.MethodGet, "/buckets/eb/preview/"+tc.object, nil)
+			req.SetPathValue("name", "eb")
+			req.SetPathValue("object", tc.object)
+			w := httptest.NewRecorder()
+			handlePreview(srv, w, req)
+			s.Equal(http.StatusOK, w.Code)
+			s.Contains(w.Body.String(), tc.wantContains)
+			if tc.wantNoText {
+				s.NotContains(w.Body.String(), "<pre>")
+			}
+		})
 	}
 }

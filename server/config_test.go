@@ -34,7 +34,8 @@ func TestDefaultConfig(t *testing.T) {
 		// MaxUploadSize is intentionally 0 in DefaultConfig; EffectiveMaxUploadSize resolves a backend-specific default.
 		{caseName: "max upload size", field: "MaxUploadSize", got: DefaultConfig().MaxUploadSize, want: int64(0)},
 		{caseName: "effective max upload size (osfs)", field: "EffectiveMaxUploadSize", got: DefaultConfig().EffectiveMaxUploadSize(), want: int64(5 << 30)},
-		{caseName: "max preview size", field: "MaxPreviewSize", got: DefaultConfig().MaxPreviewSize, want: int64(10 << 20)},
+		{caseName: "max preview size", field: "MaxPreviewSize", got: DefaultConfig().MaxPreviewSize, want: int64(0)},
+		{caseName: "effective max preview size", field: "EffectiveMaxPreviewSize", got: DefaultConfig().EffectiveMaxPreviewSize(), want: int64(10 << 20)},
 		{caseName: "multipart max age", field: "MultipartMaxAge", got: DefaultConfig().MultipartMaxAge, want: int64(0)},
 		{caseName: "effective multipart max age", field: "EffectiveMultipartMaxAge", got: DefaultConfig().EffectiveMultipartMaxAge(), want: DefaultMultipartMaxAge},
 	}
@@ -107,6 +108,25 @@ func TestEffectiveMultipartMaxAge(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.MultipartMaxAge = tc.maxAge
 			assert.Equal(t, tc.want, cfg.EffectiveMultipartMaxAge())
+		})
+	}
+}
+
+func TestEffectiveMaxPreviewSize(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		size     int64
+		want     int64
+	}{
+		{caseName: "zero falls back to the default", size: 0, want: DefaultMaxPreviewSize},
+		{caseName: "negative falls back to the default", size: -1, want: DefaultMaxPreviewSize},
+		{caseName: "bytes are honoured", size: 123, want: 123},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.MaxPreviewSize = tc.size
+			assert.Equal(t, tc.want, cfg.EffectiveMaxPreviewSize())
 		})
 	}
 }
