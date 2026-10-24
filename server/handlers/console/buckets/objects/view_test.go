@@ -519,7 +519,7 @@ func (s *ViewTestSuite) TestErrorStatus() {
 
 // TestHandlePreviewSizeLimit checks a text preview never reads past MaxPreviewSize (#463).
 func (s *ViewTestSuite) TestHandlePreviewSizeLimit() {
-	srv := s.brokenServer("fits.txt", "large.txt", "short.txt")
+	srv := s.brokenServer("fits.txt", "large.txt", "short.txt", "eio.txt")
 	testCases := []struct {
 		caseName     string
 		object       string
@@ -530,6 +530,7 @@ func (s *ViewTestSuite) TestHandlePreviewSizeLimit() {
 		{caseName: "within the limit", object: "fits.txt", maxSize: 10, wantContains: "<pre>0123456789</pre>"},
 		{caseName: "Length over the limit", object: "large.txt", maxSize: 9, wantContains: "File too large to preview.", wantNoText: true},
 		{caseName: "stored bytes over the limit", object: "short.txt", maxSize: 9, wantContains: "File too large to preview.", wantNoText: true},
+		{caseName: "Open skipped over the limit", object: "eio.txt", maxSize: 9, wantContains: "File too large to preview.", wantNoText: true},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
