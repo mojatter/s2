@@ -34,7 +34,8 @@ func TestDefaultConfig(t *testing.T) {
 		// MaxUploadSize is intentionally 0 in DefaultConfig; EffectiveMaxUploadSize resolves a backend-specific default.
 		{caseName: "max upload size", field: "MaxUploadSize", got: DefaultConfig().MaxUploadSize, want: int64(0)},
 		{caseName: "effective max upload size (osfs)", field: "EffectiveMaxUploadSize", got: DefaultConfig().EffectiveMaxUploadSize(), want: int64(5 << 30)},
-		{caseName: "max preview size", field: "MaxPreviewSize", got: DefaultConfig().MaxPreviewSize, want: int64(10 << 20)},
+		{caseName: "max preview size", field: "MaxPreviewSize", got: DefaultConfig().MaxPreviewSize, want: int64(0)},
+		{caseName: "effective max preview size", field: "EffectiveMaxPreviewSize", got: DefaultConfig().EffectiveMaxPreviewSize(), want: int64(10 << 20)},
 		{caseName: "multipart max age", field: "MultipartMaxAge", got: DefaultConfig().MultipartMaxAge, want: int64(0)},
 		{caseName: "effective multipart max age", field: "EffectiveMultipartMaxAge", got: DefaultConfig().EffectiveMultipartMaxAge(), want: DefaultMultipartMaxAge},
 	}

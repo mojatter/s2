@@ -259,9 +259,6 @@ func DefaultConfig() *Config {
 		Listen:        ":9000",
 		ConsoleListen: ":9001",
 		HealthPath:    "/healthz",
-		// MaxUploadSize intentionally left 0 — EffectiveMaxUploadSize resolves
-		// a backend-appropriate default at request time.
-		MaxPreviewSize: DefaultMaxPreviewSize,
 	}
 }
 

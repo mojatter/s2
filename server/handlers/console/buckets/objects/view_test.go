@@ -398,7 +398,7 @@ func (s *ViewTestSuite) TestHandlePreview() {
 const typeBroken = s2.Type("broken-view-test")
 
 // brokenStorage fails Get of broken.txt as an unreachable backend would, and the Open of gone.txt and eio.txt.
-// The Length of short.txt is 1, below its stored bytes.
+// The Length of short.txt is 1, below its stored bytes, and that of huge.txt is one over DefaultMaxPreviewSize.
 type brokenStorage struct {
 	s2.Storage
 }
@@ -426,6 +426,8 @@ func (b brokenStorage) Get(ctx context.Context, name string) (s2.Object, error) 
 		return brokenObject{Object: obj, err: syscall.EIO}, nil
 	case "short.txt":
 		return shortObject{obj}, nil
+	case "huge.txt":
+		return hugeObject{obj}, nil
 	}
 	return obj, nil
 }
@@ -437,6 +439,15 @@ type shortObject struct {
 
 func (shortObject) Length() uint64 {
 	return 1
+}
+
+// hugeObject reports a Length one over DefaultMaxPreviewSize whatever it stores.
+type hugeObject struct {
+	s2.Object
+}
+
+func (hugeObject) Length() uint64 {
+	return server.DefaultMaxPreviewSize + 1
 }
 
 // brokenObject fails its Open with err.
@@ -519,7 +530,7 @@ func (s *ViewTestSuite) TestErrorStatus() {
 
 // TestHandlePreviewSizeLimit checks a text preview never reads past MaxPreviewSize (#463).
 func (s *ViewTestSuite) TestHandlePreviewSizeLimit() {
-	srv := s.brokenServer("fits.txt", "large.txt", "short.txt", "eio.txt")
+	srv := s.brokenServer("fits.txt", "large.txt", "short.txt", "eio.txt", "huge.txt")
 	testCases := []struct {
 		caseName     string
 		object       string
@@ -532,6 +543,7 @@ func (s *ViewTestSuite) TestHandlePreviewSizeLimit() {
 		{caseName: "stored bytes over the limit", object: "short.txt", maxSize: 9, wantContains: "File too large to preview.", wantNoText: true},
 		{caseName: "Open skipped over the limit", object: "eio.txt", maxSize: 9, wantContains: "File too large to preview.", wantNoText: true},
 		{caseName: "zero falls back to the default", object: "fits.txt", maxSize: 0, wantContains: "<pre>0123456789</pre>"},
+		{caseName: "zero caps at the default", object: "huge.txt", maxSize: 0, wantContains: "File too large to preview.", wantNoText: true},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
