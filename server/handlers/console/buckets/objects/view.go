@@ -100,7 +100,7 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	previewType := server.PreviewType(ext)
 
 	var textContent string
-	maxSize := s.Config.MaxPreviewSize
+	maxSize := s.Config.EffectiveMaxPreviewSize()
 	tooLarge := previewType == "text" && s2.MustInt64(obj.Length()) > maxSize
 	if previewType == "text" && !tooLarge {
 		rc, err := obj.Open()

@@ -111,6 +111,25 @@ func TestEffectiveMultipartMaxAge(t *testing.T) {
 	}
 }
 
+func TestEffectiveMaxPreviewSize(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		size     int64
+		want     int64
+	}{
+		{caseName: "zero falls back to the default", size: 0, want: DefaultMaxPreviewSize},
+		{caseName: "negative falls back to the default", size: -1, want: DefaultMaxPreviewSize},
+		{caseName: "bytes are honoured", size: 123, want: 123},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.MaxPreviewSize = tc.size
+			assert.Equal(t, tc.want, cfg.EffectiveMaxPreviewSize())
+		})
+	}
+}
+
 func TestLoadEnvMultipartMaxAge(t *testing.T) {
 	testCases := []struct {
 		caseName string

@@ -531,6 +531,7 @@ func (s *ViewTestSuite) TestHandlePreviewSizeLimit() {
 		{caseName: "Length over the limit", object: "large.txt", maxSize: 9, wantContains: "File too large to preview.", wantNoText: true},
 		{caseName: "stored bytes over the limit", object: "short.txt", maxSize: 9, wantContains: "File too large to preview.", wantNoText: true},
 		{caseName: "Open skipped over the limit", object: "eio.txt", maxSize: 9, wantContains: "File too large to preview.", wantNoText: true},
+		{caseName: "zero falls back to the default", object: "fits.txt", maxSize: 0, wantContains: "<pre>0123456789</pre>"},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
