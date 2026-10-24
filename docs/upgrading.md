@@ -25,6 +25,11 @@ The steps below take a root from any version since v0.14.0 to the current one in
 
 Each section lists whether the data at rest changes, what to do, and, where known, what a downgrade does. A version not listed here changes nothing on disk and needs no step; what its responses change is in its release notes.
 
+### v0.26.0
+
+- **Data at rest:** unchanged; downgrading to v0.25.0 is safe.
+- A `max_preview_size` of `0` or below, from the config file or `S2_SERVER_MAX_PREVIEW_SIZE`, now means the documented default of 10 MiB ([#465](https://github.com/mojatter/s2/pull/465)). Earlier versions took it as the limit itself, so the console offered no preview of any non-empty text file. A server configured that way previews text files up to 10 MiB after the upgrade; there is no setting that turns text previews off.
+
 ### v0.25.0
 
 - **Data at rest:** a bucket created by v0.25.0 gets its creation time in the body of `.buckets/<bucket>`, as `{"created_at": "<RFC 3339 time>"}` ([#242](https://github.com/mojatter/s2/issues/242)). Existing buckets are not rewritten, so their multipart generation stays as it is; nothing to migrate. Downgrading to v0.24.0 is safe: older versions read only that file's modification time, never its body, so ListBuckets there reports the `.keep` time again, and v0.25.0 the recorded one when it comes back.
