@@ -21,11 +21,11 @@
     <audio controls autoplay><source src="{{$view}}"></audio>
     {{else if eq .PreviewType "pdf"}}
     <iframe src="{{$view}}"></iframe>
-    {{else if eq .PreviewType "text"}}
+    {{else if and (eq .PreviewType "text") (not .TooLarge)}}
     <pre>{{.TextContent}}</pre>
     {{else}}
     <div class="preview-unsupported">
-      <p>Preview not available for this file type.</p>
+      <p>{{if .TooLarge}}File too large to preview.{{else}}Preview not available for this file type.{{end}}</p>
       <a href="{{$view}}" target="_blank" class="btn btn--sm btn--primary">Open in New Tab</a>
     </div>
     {{end}}

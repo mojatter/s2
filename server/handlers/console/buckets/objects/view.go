@@ -9,6 +9,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/server"
 	"github.com/mojatter/s2/server/middleware"
 )
@@ -99,7 +100,9 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	previewType := server.PreviewType(ext)
 
 	var textContent string
-	if previewType == "text" {
+	maxSize := s.Config.MaxPreviewSize
+	tooLarge := previewType == "text" && s2.MustInt64(obj.Length()) > maxSize
+	if previewType == "text" && !tooLarge {
 		rc, err := obj.Open()
 		if err != nil {
 			server.WriteConsoleStorageError(w, r, err)
@@ -107,12 +110,17 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		}
 		defer func() { _ = rc.Close() }()
 
-		b, err := io.ReadAll(rc)
+		// The limit also holds when the stored bytes outgrow Length.
+		b, err := io.ReadAll(io.LimitReader(rc, maxSize+1))
 		if err != nil {
 			server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
 			return
 		}
-		textContent = string(b)
+		if int64(len(b)) > maxSize {
+			tooLarge = true
+		} else {
+			textContent = string(b)
+		}
 	}
 
 	data := struct {
@@ -125,6 +133,7 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		Metadata     map[string]string
 		PreviewType  string
 		TextContent  string
+		TooLarge     bool
 	}{
 		Bucket:       bucketName,
 		Key:          objectName,
@@ -134,6 +143,7 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		LastModified: obj.LastModified().Format("2006-01-02 15:04:05"),
 		PreviewType:  previewType,
 		TextContent:  textContent,
+		TooLarge:     tooLarge,
 	}
 	if md := obj.Metadata(); len(md) > 0 {
 		data.Metadata = md
