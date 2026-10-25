@@ -135,9 +135,12 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 		}
 
 		// A common prefix is a directory marker in a non-recursive listing.
-		// StartOffset is inclusive, so objects skip the match itself.
+		// StartOffset is inclusive, so objects skip the match itself, and a
+		// prefix not past it is dropped, as S3 drops one not past start-after.
 		if attrs.Prefix != "" {
-			out.CommonPrefixes = append(out.CommonPrefixes, s2.RelName(s.prefix, attrs.Prefix))
+			if q.StartOffset == "" || attrs.Prefix > q.StartOffset {
+				out.CommonPrefixes = append(out.CommonPrefixes, s2.RelName(s.prefix, attrs.Prefix))
+			}
 		} else if name := s2.RelName(s.prefix, attrs.Name); q.StartOffset == "" || name != opts.StartAfter {
 			md, contentType := objectMetadata(attrs)
 			out.Objects = append(out.Objects, &object{

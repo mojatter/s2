@@ -412,8 +412,8 @@ func (s *ObjectsTestSuite) walkPages(strg s2.Storage, p listObjectsParams) (keys
 			keys = append(keys, o.Name())
 		}
 		for _, pf := range pfx {
-			// The fs backend re-sends directories past the cursor on every
-			// page; dedupe across pages so the set can be asserted.
+			// pagedStorage may re-send directories on every page; dedupe
+			// across pages so the set can be asserted.
 			if r := renderPrefix(pf, p.delimiter); !seen[r] {
 				seen[r] = true
 				prefixes = append(prefixes, r)
@@ -494,8 +494,8 @@ func (s *ObjectsTestSuite) TestListObjectsPagesWithBackendTokens() {
 		})
 	}
 
-	// The fs backend repeats its directories on every fetch, so one page
-	// must not report the same prefix twice.
+	// A backend repeating its directories on every fetch must not make one
+	// page report the same prefix twice.
 	s.Run("a prefix repeated across fetches is listed once", func() {
 		strg := &pagedStorage{entries: []string{"a", "b", "c", "d", "e"}, cap: 2, everyPageDirs: []string{"d1"}}
 
@@ -621,10 +621,17 @@ func (s *ObjectsTestSuite) TestListObjectsWalksRealFS() {
 			wantPrefixes: nil,
 		},
 		{
-			// Real S3 still reports the folder a start-after key sits in.
+			// Real S3 drops a folder that does not sort after start-after, even with keys past it inside.
 			caseName:     "start-after inside a directory",
 			objects:      []string{"dir/a.txt", "dir/b.txt", "e.txt"},
-			query:        "delimiter=/&start-after=dir/&max-keys=10",
+			query:        "delimiter=/&start-after=dir/a.txt&max-keys=10",
+			wantKeys:     []string{"e.txt"},
+			wantPrefixes: nil,
+		},
+		{
+			caseName:     "start-after before a directory",
+			objects:      []string{"dir/a.txt", "e.txt"},
+			query:        "delimiter=/&start-after=dir&max-keys=10",
 			wantKeys:     []string{"e.txt"},
 			wantPrefixes: []string{"dir/"},
 		},
@@ -637,8 +644,7 @@ func (s *ObjectsTestSuite) TestListObjectsWalksRealFS() {
 			wantPrefixes: []string{"dir/-"},
 		},
 		{
-			// A page landing exactly on max-keys makes the fs backend claim
-			// more follows; the extra empty page must still terminate.
+			// A page landing exactly on max-keys ends the listing.
 			caseName: "page boundary on the last object",
 			objects:  []string{"a.txt", "b.txt"},
 			query:    "max-keys=2",
@@ -2951,7 +2957,7 @@ func (s *ObjectsTestSuite) TestListTakesAnyS3Prefix() {
 	s.putObject("cur", "a/1.txt", "a")
 	s.putObject("cur", "z/1.txt", "z")
 	s.Run("a canonical cursor rules out a directory", func() {
-		body := s.roundTripBody(s.server, http.MethodGet, "/cur?list-type=2&delimiter=%2F&start-after=z%2F")
+		body := s.roundTripBody(s.server, http.MethodGet, "/cur?list-type=2&delimiter=%2F&start-after=z")
 		s.Contains(body, "<Prefix>z/</Prefix>", body)
 		s.NotContains(body, "<Prefix>a/</Prefix>", body)
 	})

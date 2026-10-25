@@ -496,14 +496,32 @@ func (s *StorageTestSuite) TestListStartAfter() {
 			want:       []string{"cc/c2.txt"},
 		},
 		{
-			caseName:     "keeps the prefix holding the key",
+			caseName:     "drops the prefix holding the key",
 			startAfter:   "cc/c1.txt",
+			want:         []string{},
+			wantPrefixes: []string{},
+		},
+		{
+			caseName:     "keeps a prefix sorting after the key",
+			startAfter:   "cc",
 			want:         []string{},
 			wantPrefixes: []string{"cc/"},
 		},
 		{
 			caseName:     "drops a prefix sorting before the key",
 			startAfter:   "d",
+			want:         []string{},
+			wantPrefixes: []string{},
+		},
+		{
+			caseName:     "drops the prefix it names",
+			startAfter:   "cc/",
+			want:         []string{},
+			wantPrefixes: []string{},
+		},
+		{
+			caseName:     "a token naming a prefix drops it",
+			after:        "cc/",
 			want:         []string{},
 			wantPrefixes: []string{},
 		},
@@ -581,10 +599,7 @@ func (s *StorageTestSuite) TestListNextAfter() {
 			strg := &storage{lk: newNameLocker(), fsys: s.testMemFS()}
 			ctx := context.Background()
 
-			// Limit: 1 forces a new page per object, so a flat listing's
-			// final page (which only has the "cc/" CommonPrefix left, no
-			// more Objects) is expected to come back empty before
-			// NextAfter finally goes empty too.
+			// Limit: 1 forces a new page per entry; the "cc/" CommonPrefix takes a flat listing's last.
 			var got []string
 			after := ""
 			pages := 0
@@ -596,6 +611,66 @@ func (s *StorageTestSuite) TestListNextAfter() {
 				}
 				pages++
 				s.Require().Less(pages, 10, "pagination did not terminate")
+				if res.NextAfter == "" {
+					break
+				}
+				after = res.NextAfter
+			}
+			s.Equal(tc.want, got)
+		})
+	}
+}
+
+// TestListFlatPages pins each flat page: directories count toward Limit in key order, and the last page has no NextAfter.
+func (s *StorageTestSuite) TestListFlatPages() {
+	testCases := []struct {
+		caseName string
+		files    []string
+		prefix   string
+		limit    int
+		want     [][]string
+	}{
+		{
+			caseName: "directories count toward the limit",
+			files:    []string{"a.txt", "d1/x", "d2/x", "d3/x", "z.txt"},
+			limit:    2,
+			want:     [][]string{{"a.txt", "d1/"}, {"d2/", "d3/"}, {"z.txt"}},
+		},
+		{
+			caseName: "a directory sorts as its prefix",
+			files:    []string{"d-x", "d.txt", "d/y"},
+			limit:    1,
+			want:     [][]string{{"d-x"}, {"d.txt"}, {"d/"}},
+		},
+		{
+			caseName: "a page ending on the last entry",
+			files:    []string{"d3/x"},
+			prefix:   "d3",
+			limit:    1,
+			want:     [][]string{{"d3/x"}},
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			fsys := memfs.New()
+			for _, name := range tc.files {
+				_, err := fsys.WriteFile(name, []byte("x"), fs.ModePerm)
+				s.Require().NoError(err)
+			}
+			strg := &storage{lk: newNameLocker(), fsys: fsys}
+
+			var got [][]string
+			after := ""
+			for {
+				res, err := strg.List(context.Background(), s2.ListOptions{Prefix: tc.prefix, Limit: tc.limit, After: after})
+				s.Require().NoError(err)
+				page := slices.Clone(res.CommonPrefixes)
+				for _, obj := range res.Objects {
+					page = append(page, obj.Name())
+				}
+				slices.Sort(page)
+				got = append(got, page)
+				s.Require().LessOrEqual(len(got), len(tc.want), "pagination did not terminate")
 				if res.NextAfter == "" {
 					break
 				}

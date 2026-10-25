@@ -223,9 +223,10 @@ func (m *mockAzblobClient) doList(ctr, prefix, delimiter string, maxResults int3
 	}
 	sort.Strings(keys)
 
-	prefixSet := make(map[string]bool)
+	// Blob prefixes count toward maxresults, as in the real service.
 	var result listBlobsResult
-
+	var n int32
+	last := ""
 	for _, objPath := range keys {
 		b := m.blobs[objPath]
 		if b.container != ctr {
@@ -238,22 +239,24 @@ func (m *mockAzblobClient) doList(ctr, prefix, delimiter string, maxResults int3
 			continue
 		}
 
-		remainder := b.key[len(prefix):]
-
+		entry := b.key
 		if delimiter != "" {
-			if idx := strings.Index(remainder, delimiter); idx >= 0 {
-				cp := prefix + remainder[:idx+len(delimiter)]
-				if !prefixSet[cp] {
-					prefixSet[cp] = true
-					result.prefixes = append(result.prefixes, cp)
-				}
-				continue
+			if idx := strings.Index(b.key[len(prefix):], delimiter); idx >= 0 {
+				entry = b.key[:len(prefix)+idx+len(delimiter)]
 			}
 		}
-
-		if int32(len(result.items)) >= maxResults {
-			result.nextMarker = mockMarkerPrefix + b.key
+		if entry == last {
+			continue
+		}
+		if n >= maxResults {
+			result.nextMarker = mockMarkerPrefix + entry
 			break
+		}
+		n++
+		last = entry
+		if entry != b.key {
+			result.prefixes = append(result.prefixes, entry)
+			continue
 		}
 
 		result.items = append(result.items, blobItem{
@@ -479,8 +482,15 @@ func (s *StorageTestSuite) TestListStartAfter() {
 			want:       []string{"b.txt", "cc/c1.txt", "cc/c2.txt"},
 		},
 		{
-			caseName:     "keeps the prefix holding the key",
+			caseName:     "drops the prefix holding the key",
 			startAfter:   "cc/c1.txt",
+			flat:         true,
+			want:         []string{},
+			wantPrefixes: []string{},
+		},
+		{
+			caseName:     "keeps a prefix sorting after the key",
+			startAfter:   "cc",
 			flat:         true,
 			want:         []string{},
 			wantPrefixes: []string{"cc/"},

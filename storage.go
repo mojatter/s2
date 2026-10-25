@@ -27,12 +27,12 @@ type ListOptions struct {
 	// carry one across storages. After wins over StartAfter.
 	After string
 	// StartAfter is a key name picked by the caller, existing or not; the
-	// listing resumes at the first entry sorting after it. Ignored when
-	// After is set.
+	// listing resumes at the first entry, object or common prefix, sorting
+	// after it, as S3's start-after does. Ignored when After is set.
 	StartAfter string
-	// Limit caps the number of returned entries. Backends may count
-	// CommonPrefixes toward it, as S3's max-keys does. Zero means the
-	// backend's default page size; follow NextAfter for the rest.
+	// Limit caps the number of returned entries, CommonPrefixes included, as
+	// S3's max-keys does. Zero means the backend's default page size; follow
+	// NextAfter for the rest.
 	Limit int
 	// Recursive, when true, walks subdirectories and returns no
 	// CommonPrefixes; when false, the listing stops at the first "/" past
@@ -47,10 +47,11 @@ type ListResult struct {
 	// may report nil; use Storage.Get for full metadata and a writable map.
 	Objects []Object
 	// CommonPrefixes are the directory-like grouping prefixes (only populated
-	// when ListOptions.Recursive is false). Each ends in "/", as S3 returns it.
+	// when ListOptions.Recursive is false). Each ends in "/", as S3 returns it,
+	// and is listed once across the pages of a listing.
 	CommonPrefixes []string
-	// NextAfter is an opaque continuation token. When empty, the listing is
-	// exhausted.
+	// NextAfter is an opaque continuation token, set only when an entry
+	// followed the page as it was read. When empty, the listing is exhausted.
 	NextAfter string
 }
 

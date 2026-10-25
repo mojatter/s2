@@ -572,12 +572,14 @@ func (s *StorageTestSuite) TestS2TestList() {
 // token, StartAfter a caller-chosen key mapped onto StartOffset.
 func (s *StorageTestSuite) TestListCursors() {
 	testCases := []struct {
-		caseName   string
-		prefix     string
-		startAfter string
-		limit      int
-		want       []string
-		wantNext   bool
+		caseName     string
+		prefix       string
+		startAfter   string
+		limit        int
+		flat         bool
+		want         []string
+		wantPrefixes []string
+		wantNext     bool
 	}{
 		{
 			caseName:   "start after skips the key itself",
@@ -596,6 +598,19 @@ func (s *StorageTestSuite) TestListCursors() {
 			want:     []string{"a.txt", "b.txt"},
 			wantNext: true,
 		},
+		{
+			caseName:   "drops the prefix holding the key",
+			startAfter: "cc/c1.txt",
+			flat:       true,
+			want:       []string{},
+		},
+		{
+			caseName:     "keeps a prefix sorting after the key",
+			startAfter:   "cc",
+			flat:         true,
+			want:         []string{},
+			wantPrefixes: []string{"cc/"},
+		},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
@@ -606,10 +621,11 @@ func (s *StorageTestSuite) TestListCursors() {
 			res, err := strg.List(ctx, s2.ListOptions{
 				StartAfter: tc.startAfter,
 				Limit:      tc.limit,
-				Recursive:  true,
+				Recursive:  !tc.flat,
 			})
 			s.Require().NoError(err)
 			s.Equal(tc.want, objectNames(res.Objects))
+			s.ElementsMatch(tc.wantPrefixes, res.CommonPrefixes)
 			if !tc.wantNext {
 				s.Empty(res.NextAfter)
 				return

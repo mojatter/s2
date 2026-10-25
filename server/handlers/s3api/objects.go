@@ -225,8 +225,8 @@ func listObjects(ctx context.Context, strg s2.Storage, p listObjectsParams) (obj
 			pageObjs = filterObjectsByBasename(pageObjs, listDir, baseFilter)
 			pagePrefixes = filterPrefixesByBasename(pagePrefixes, listDir, baseFilter)
 		}
-		// A backend may repeat a common prefix across fetches: the fs one
-		// returns every directory past the cursor on each call.
+		// The contract forbids a common prefix repeated across fetches; this
+		// guards against a backend that breaks it.
 		kept := pagePrefixes[:0]
 		for _, prefix := range pagePrefixes {
 			if _, dup := seen[prefix]; dup {
@@ -243,7 +243,8 @@ func listObjects(ctx context.Context, strg s2.Storage, p listObjectsParams) (obj
 		after = res.NextAfter
 
 		// Nothing past the basename's range can match. Only an object-less
-		// page may be judged by its prefixes, which fs returns unbounded.
+		// page may be judged by its prefixes, which a backend breaking Limit
+		// could return past its last object.
 		if baseFilter != "" {
 			rangeEnd := listDir + baseFilter
 			switch {

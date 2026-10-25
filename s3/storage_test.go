@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -130,65 +131,44 @@ func (m *mockS3Client) ListObjectsV2(ctx context.Context, params *s3.ListObjects
 		limit = 1000
 	}
 
-	var contents []s3types.Object
-	var commonPrefixes []s3types.CommonPrefix
-	prefixSet := make(map[string]bool)
-	var keys []string
-	for k := range m.objects {
-		keys = append(keys, k)
+	var objs []*mockObject
+	for _, obj := range m.objects {
+		if obj.bucket == bucket && strings.HasPrefix(obj.key, prefix) {
+			objs = append(objs, obj)
+		}
 	}
+	slices.SortFunc(objs, func(a, b *mockObject) int { return strings.Compare(a.key, b.key) })
 
-	for _, objPath := range keys {
-		obj := m.objects[objPath]
-		if obj.bucket != bucket {
-			continue
-		}
-		if !strings.HasPrefix(obj.key, prefix) {
-			continue
-		}
-		if after != "" && obj.key <= after {
-			continue
-		}
-		remainder := obj.key[len(prefix):]
+	// Common prefixes count toward MaxKeys, and one not past the cursor is dropped, as in the real service.
+	out := &s3.ListObjectsV2Output{IsTruncated: aws.Bool(false)}
+	n, last := 0, ""
+	for _, obj := range objs {
+		entry := obj.key
 		if delimiter != "" {
-			if idx := strings.Index(remainder, delimiter); idx >= 0 {
-				cp := prefix + remainder[:idx+len(delimiter)]
-				if !prefixSet[cp] {
-					prefixSet[cp] = true
-					commonPrefixes = append(commonPrefixes, s3types.CommonPrefix{Prefix: aws.String(cp)})
-				}
-				continue
+			if idx := strings.Index(obj.key[len(prefix):], delimiter); idx >= 0 {
+				entry = obj.key[:len(prefix)+idx+len(delimiter)]
 			}
 		}
-		contents = append(contents, s3types.Object{
-			Key:          aws.String(obj.key),
-			Size:         aws.Int64(int64(len(obj.body))),
-			LastModified: aws.Time(obj.lastModified),
-			ETag:         aws.String(mockETag(obj.body)),
-		})
-	}
-
-	// Simple sort by key
-	for i := 0; i < len(contents)-1; i++ {
-		for j := i + 1; j < len(contents); j++ {
-			if *contents[i].Key > *contents[j].Key {
-				contents[i], contents[j] = contents[j], contents[i]
-			}
+		if entry == last || entry <= after {
+			continue
 		}
-	}
-
-	truncated := len(contents) > limit
-	if truncated {
-		contents = contents[:limit]
-	}
-
-	out := &s3.ListObjectsV2Output{
-		Contents:       contents,
-		CommonPrefixes: commonPrefixes,
-		IsTruncated:    aws.Bool(truncated),
-	}
-	if truncated {
-		out.NextContinuationToken = aws.String(mockContinuationPrefix + aws.ToString(contents[len(contents)-1].Key))
+		if n == limit {
+			out.IsTruncated = aws.Bool(true)
+			out.NextContinuationToken = aws.String(mockContinuationPrefix + last)
+			break
+		}
+		if entry != obj.key {
+			out.CommonPrefixes = append(out.CommonPrefixes, s3types.CommonPrefix{Prefix: aws.String(entry)})
+		} else {
+			out.Contents = append(out.Contents, s3types.Object{
+				Key:          aws.String(obj.key),
+				Size:         aws.Int64(int64(len(obj.body))),
+				LastModified: aws.Time(obj.lastModified),
+				ETag:         aws.String(mockETag(obj.body)),
+			})
+		}
+		n++
+		last = entry
 	}
 	return out, nil
 }
