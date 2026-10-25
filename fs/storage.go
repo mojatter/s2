@@ -12,7 +12,6 @@ import (
 	"os"
 	"path"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -207,10 +206,31 @@ func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult,
 	return s.listFlat(opts.Prefix, after, limit)
 }
 
-// flatEntry is a flat listing's entry under its key: a directory d as "d/".
-type flatEntry struct {
+// keyedEntry is a directory entry under its key: a directory d as "d/".
+type keyedEntry struct {
 	key   string
 	entry fs.DirEntry
+}
+
+// keyEntries keys dir's entries, minus the metadata directory, and sorts them by key.
+func keyEntries(dir string, entries []fs.DirEntry) []keyedEntry {
+	// ReadDir sorts by name, but "d-x" and "d.txt" sort before the prefix "d/".
+	keyed := make([]keyedEntry, 0, len(entries))
+	for _, entry := range entries {
+		if isMetaDir(entry.Name()) {
+			continue
+		}
+		key := entry.Name()
+		if dir != "." {
+			key = path.Join(dir, key)
+		}
+		if entry.IsDir() {
+			key += "/"
+		}
+		keyed = append(keyed, keyedEntry{key: key, entry: entry})
+	}
+	slices.SortFunc(keyed, func(a, b keyedEntry) int { return strings.Compare(a.key, b.key) })
+	return keyed
 }
 
 // belowObject reports whether dir is an object or lies under one, which is why
@@ -263,23 +283,7 @@ func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, erro
 		}
 		return s2.ListResult{}, fmt.Errorf("failed to read dir: %w", err)
 	}
-	// ReadDir sorts by name, but "d-x" and "d.txt" sort before the prefix "d/".
-	keyed := make([]flatEntry, 0, len(entries))
-	for _, entry := range entries {
-		if isMetaDir(entry.Name()) {
-			continue
-		}
-		key := entry.Name()
-		if dir != "." {
-			key = path.Join(dir, key)
-		}
-		if entry.IsDir() {
-			key += "/"
-		}
-		keyed = append(keyed, flatEntry{key: key, entry: entry})
-	}
-	slices.SortFunc(keyed, func(a, b flatEntry) int { return strings.Compare(a.key, b.key) })
-
+	keyed := keyEntries(dir, entries)
 	res := s2.ListResult{
 		Objects:        make([]s2.Object, 0, min(len(keyed), limit)),
 		CommonPrefixes: make([]string, 0),
@@ -311,65 +315,63 @@ func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, erro
 }
 
 func (s *storage) listRecursive(prefix, after string, limit int) (s2.ListResult, error) {
-	// fs.WalkDir's visit order is pre-order by directory, not lexicographic
-	// by full path (e.g. "backup/2024.log" is visited before sibling file
-	// "backup-old.txt", even though "backup-old.txt" sorts first as a full
-	// path). Collect everything first and sort below, rather than capping
-	// at limit mid-walk, which could return objects out of order and,
-	// combined with an after cursor, permanently skip unvisited ones.
+	// The walk visits keys in order, so it stops at the first object past the page.
 	var objs []s2.Object
-	err := fs.WalkDir(s.fsys, ".", func(name string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// A directory deleted since its parent was read, or a pruned root, holds nothing to list.
-			if errors.Is(err, fs.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
-		// Ahead of the cursor: a cursor that sorts inside ".meta" -- the
-		// directory name itself, or ".meta!" -- would otherwise let the walk
-		// descend and report the sidecars as objects. A regular file by that
-		// name is not an object either, and listFlat skips it too; SkipDir on
-		// one would skip the rest of the directory holding it.
-		// Not the walk root: this storage may itself be scoped to that
-		// directory, and memfs reports that root's name as ".meta" where
-		// osfs reports ".".
-		if name != "." && isMetaDir(d.Name()) {
-			if d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if after != "" && name <= after {
-			return nil
-		}
-		if prefix != "" && !strings.HasPrefix(name, prefix) {
-			return nil
-		}
-		info, err := d.Info()
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil // deleted since its directory was read
-		}
-		if err != nil {
-			return fmt.Errorf("failed to get info: %w", err)
-		}
-		if info.IsDir() {
-			return nil
-		}
-		objs = append(objs, newObjectFileInfo(s.fsys, name, info))
-		return nil
-	})
-	if err != nil {
+	if err := s.walkKeys(".", prefix, after, limit+1, &objs); err != nil {
 		return s2.ListResult{}, err
 	}
-	sort.Slice(objs, func(i, j int) bool { return objs[i].Name() < objs[j].Name() })
-
 	res := s2.ListResult{Objects: objs}
 	if len(objs) > limit {
 		res.Objects = objs[:limit]
 		res.NextAfter = res.Objects[limit-1].Name()
 	}
 	return res, nil
+}
+
+// walkKeys appends the objects under dir past after and matching prefix to objs, in key order, until it holds n.
+func (s *storage) walkKeys(dir, prefix, after string, n int, objs *[]s2.Object) error {
+	entries, err := fs.ReadDir(s.fsys, dir)
+	if err != nil {
+		// A directory deleted since its parent was read, or a missing root, holds nothing to list.
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range keyEntries(dir, entries) {
+		if len(*objs) == n {
+			return nil
+		}
+		// A symlink is no directory here, so it is listed as an object, as Count counts it.
+		if e.entry.IsDir() {
+			// Every key below a directory starts with its key, so skip one the prefix or the cursor rules out.
+			if !strings.HasPrefix(e.key, prefix) && !strings.HasPrefix(prefix, e.key) {
+				continue
+			}
+			if e.key <= after && !strings.HasPrefix(after, e.key) {
+				continue
+			}
+			if err := s.walkKeys(strings.TrimSuffix(e.key, "/"), prefix, after, n, objs); err != nil {
+				return err
+			}
+			continue
+		}
+		if e.key <= after || !strings.HasPrefix(e.key, prefix) {
+			continue
+		}
+		info, err := e.entry.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // deleted since its directory was read
+		}
+		if err != nil {
+			return fmt.Errorf("failed to get info: %w", err)
+		}
+		if info.IsDir() {
+			continue
+		}
+		*objs = append(*objs, newObjectFileInfo(s.fsys, e.key, info))
+	}
+	return nil
 }
 
 var _ s2.Counter = (*storage)(nil)
@@ -392,7 +394,7 @@ func (s *storage) Count(ctx context.Context, opts s2.CountOptions) (s2.CountResu
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		// Not the walk root, which memfs names ".meta" in a Sub of one; see listRecursive.
+		// Not the walk root, which memfs names ".meta" in a Sub of one.
 		if name != "." && isMetaDir(d.Name()) {
 			if d.IsDir() {
 				return fs.SkipDir
@@ -400,7 +402,7 @@ func (s *storage) Count(ctx context.Context, opts s2.CountOptions) (s2.CountResu
 			return nil
 		}
 		if d.IsDir() {
-			// Enter a directory that matches the prefix or leads to it; a symlink is no directory here, as in listRecursive.
+			// Enter a directory that matches the prefix or leads to it; a symlink is no directory here, as in walkKeys.
 			if name != "." && !strings.HasPrefix(name, prefix) && !strings.HasPrefix(prefix, name+"/") {
 				return fs.SkipDir
 			}

@@ -719,18 +719,36 @@ func (s *StorageTestSuite) TestListRecursivePaginationOrder() {
 	s.Equal([]string{"backup-old.txt", "backup/2024-01-01.log"}, got)
 }
 
-// TestListRecursiveAfter_WalkDirError verifies that an error passed to the
-// WalkDir callback (e.g. a failed ReadDir on a subdirectory) is propagated
-// instead of being silently ignored. This covers the err != nil guard added
-// at the top of the WalkDir callback in ListRecursiveAfter.
-func (s *StorageTestSuite) TestListRecursiveAfter_WalkDirError() {
-	base := s.testMemFS()
-	strg := &storage{lk: newNameLocker(), fsys: &errReadDirFS{FS: base, errorPath: "cc"}}
-	ctx := context.Background()
-
-	_, err := strg.List(ctx, s2.ListOptions{Limit: 10, Recursive: true})
-	s.Error(err)
-	s.ErrorContains(err, "injected ReadDir error")
+// TestListRecursiveReadDir verifies that a failed ReadDir is propagated, and that a directory the walk prunes is never read.
+func (s *StorageTestSuite) TestListRecursiveReadDir() {
+	testCases := []struct {
+		caseName string
+		opts     s2.ListOptions
+		want     []string
+		wantErr  string
+	}{
+		{caseName: "propagates the error", opts: s2.ListOptions{Limit: 10}, wantErr: "injected ReadDir error"},
+		{caseName: "skips a directory the prefix rules out", opts: s2.ListOptions{Prefix: "a", Limit: 10}, want: []string{"a.txt"}},
+		{caseName: "skips a directory before the cursor", opts: s2.ListOptions{StartAfter: "d", Limit: 10}},
+		{caseName: "stops before a directory past the page", opts: s2.ListOptions{Limit: 1}, want: []string{"a.txt"}},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			strg := &storage{lk: newNameLocker(), fsys: &errReadDirFS{FS: s.testMemFS(), errorPath: "cc"}}
+			tc.opts.Recursive = true
+			res, err := strg.List(context.Background(), tc.opts)
+			if tc.wantErr != "" {
+				s.ErrorContains(err, tc.wantErr)
+				return
+			}
+			s.Require().NoError(err)
+			var got []string
+			for _, obj := range res.Objects {
+				got = append(got, obj.Name())
+			}
+			s.Equal(tc.want, got)
+		})
+	}
 }
 
 func (s *StorageTestSuite) TestGet() {
@@ -1848,6 +1866,32 @@ func BenchmarkList(b *testing.B)          { benchList(b, s2.TypeOSFS, false) }
 func BenchmarkListETag(b *testing.B)      { benchList(b, s2.TypeOSFS, true) }
 func BenchmarkListMemFS(b *testing.B)     { benchList(b, s2.TypeMemFS, false) }
 func BenchmarkListETagMemFS(b *testing.B) { benchList(b, s2.TypeMemFS, true) }
+
+func benchListRecursive(b *testing.B, typ s2.Type, prefix string) {
+	ctx := context.Background()
+	strg := newBenchStorage(b, typ)
+	for i := range 100 {
+		for j := range 100 {
+			if err := strg.Put(ctx, s2.NewObjectBytes(fmt.Sprintf("d%02d/obj-%02d.txt", i, j), []byte("a"))); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := strg.List(ctx, s2.ListOptions{Prefix: prefix, Limit: 100, Recursive: true}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkListRecursive lists a 100-object page of a 10000-object tree, whole and under one directory's prefix.
+func BenchmarkListRecursive(b *testing.B)            { benchListRecursive(b, s2.TypeOSFS, "") }
+func BenchmarkListRecursivePrefix(b *testing.B)      { benchListRecursive(b, s2.TypeOSFS, "d50/") }
+func BenchmarkListRecursiveMemFS(b *testing.B)       { benchListRecursive(b, s2.TypeMemFS, "") }
+func BenchmarkListRecursivePrefixMemFS(b *testing.B) { benchListRecursive(b, s2.TypeMemFS, "d50/") }
 
 // BenchmarkPutObject covers the osfs backend with a 1 KiB payload and
 // rotating-key writes. s2's atomicWrite always fsyncs before rename;
