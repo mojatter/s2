@@ -195,23 +195,29 @@ func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult,
 	if limit <= 0 {
 		limit = defaultListLimit
 	}
-	// Both cursors are plain key names here, so they collapse into one
-	// comparison; After wins.
-	after := opts.After
-	if after == "" {
-		after = opts.StartAfter
+	// After wins; a token may name a common prefix, which it excludes and a StartAfter keeps.
+	cursor, fromToken := opts.StartAfter, false
+	if opts.After != "" {
+		cursor, fromToken = opts.After, true
 	}
 	if opts.Recursive {
-		return s.listRecursive(opts.Prefix, after, limit)
+		return s.listRecursive(opts.Prefix, cursor, limit)
 	}
-	return s.listFlat(opts.Prefix, after, limit)
+	return s.listFlat(opts.Prefix, cursor, fromToken, limit)
 }
 
-// pastSubtree reports whether after sorts beyond every key under dir. A
-// directory holding keys past after is still a common prefix.
-func pastSubtree(dir, after string) bool {
-	sub := dir + "/"
-	return after >= sub && !strings.HasPrefix(after, sub)
+// flatEntry is a flat listing's entry under its key: a directory d as "d/".
+type flatEntry struct {
+	key   string
+	entry fs.DirEntry
+}
+
+// pastCursor reports whether a flat entry sorts after cursor. A directory holding a StartAfter key is still a common prefix; a token names an entry of this level.
+func pastCursor(e flatEntry, cursor string, fromToken bool) bool {
+	if !fromToken && e.entry.IsDir() && strings.HasPrefix(cursor, e.key) {
+		return true
+	}
+	return e.key > cursor
 }
 
 // belowObject reports whether dir is an object or lies under one, which is why
@@ -248,7 +254,7 @@ func (s *storage) checkTree(name string) error {
 	return nil
 }
 
-func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, error) {
+func (s *storage) listFlat(prefix, cursor string, fromToken bool, limit int) (s2.ListResult, error) {
 	// Normalize prefix into a directory path acceptable to fs.ReadDir.
 	// S3 callers commonly pass a trailing slash (e.g. "dir/"), which fs.ValidPath rejects.
 	dir := strings.TrimSuffix(prefix, "/")
@@ -264,41 +270,49 @@ func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, erro
 		}
 		return s2.ListResult{}, fmt.Errorf("failed to read dir: %w", err)
 	}
-	res := s2.ListResult{
-		Objects:        make([]s2.Object, 0, len(entries)),
-		CommonPrefixes: make([]string, 0),
-	}
+	// ReadDir sorts by name, but "d-x" and "d.txt" sort before the prefix "d/".
+	keyed := make([]flatEntry, 0, len(entries))
 	for _, entry := range entries {
-		name := entry.Name()
-		if dir != "." {
-			name = path.Join(dir, entry.Name())
-		}
 		if isMetaDir(entry.Name()) {
 			continue
 		}
-		info, err := entry.Info()
-		if errors.Is(err, fs.ErrNotExist) {
-			continue // deleted since ReadDir
+		key := entry.Name()
+		if dir != "." {
+			key = path.Join(dir, key)
 		}
-		if err != nil {
-			return s2.ListResult{}, fmt.Errorf("failed to get info: %w", err)
+		if entry.IsDir() {
+			key += "/"
 		}
-		if info.IsDir() {
-			if pastSubtree(name, after) {
-				continue
-			}
-			res.CommonPrefixes = append(res.CommonPrefixes, name+"/")
+		keyed = append(keyed, flatEntry{key: key, entry: entry})
+	}
+	slices.SortFunc(keyed, func(a, b flatEntry) int { return strings.Compare(a.key, b.key) })
+
+	res := s2.ListResult{
+		Objects:        make([]s2.Object, 0, min(len(keyed), limit)),
+		CommonPrefixes: make([]string, 0),
+	}
+	last := ""
+	for _, e := range keyed {
+		if !pastCursor(e, cursor, fromToken) {
 			continue
 		}
-		if after != "" && name <= after {
-			continue
-		}
-		res.Objects = append(res.Objects, newObjectFileInfo(s.fsys, name, info))
-		limit--
-		if limit <= 0 {
-			res.NextAfter = name
+		if len(res.Objects)+len(res.CommonPrefixes) == limit {
+			res.NextAfter = last
 			break
 		}
+		if e.entry.IsDir() {
+			res.CommonPrefixes = append(res.CommonPrefixes, e.key)
+		} else {
+			info, err := e.entry.Info()
+			if errors.Is(err, fs.ErrNotExist) {
+				continue // deleted since ReadDir
+			}
+			if err != nil {
+				return s2.ListResult{}, fmt.Errorf("failed to get info: %w", err)
+			}
+			res.Objects = append(res.Objects, newObjectFileInfo(s.fsys, e.key, info))
+		}
+		last = e.key
 	}
 	return res, nil
 }

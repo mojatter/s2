@@ -85,41 +85,65 @@ func TestStorageListWithPrefixes(ctx context.Context, strg s2.Storage, prefix st
 		checkPrefixes(fmt.Sprintf("List(prefix=%q) prefixes", prefix), res.CommonPrefixes, expectedPrefixes)
 	}
 
-	if len(expected) > 1 {
-		limit := len(expected) / 2
-		res1, err := strg.List(ctx, s2.ListOptions{Prefix: prefix, Limit: limit})
+	// NextAfter fed back as After, one entry per page: CommonPrefixes count
+	// toward Limit, none repeats, and a NextAfter always has an entry after it.
+	var walked []s2.Object
+	var walkedPrefixes []string
+	seen := make(map[string]bool)
+	for after, pages := "", 1; ; pages++ {
+		where := fmt.Sprintf("List(prefix=%q, limit=1) page %d", prefix, pages)
+		res, err := strg.List(ctx, s2.ListOptions{Prefix: prefix, After: after, Limit: 1})
 		if err != nil {
-			errorf("List(prefix=%q, limit=%d) failed: %v", prefix, limit, err)
-		} else if n := len(res1.Objects); n == 0 || n > limit {
-			// Limit caps entries, so CommonPrefixes may take part of the page.
-			errorf("List(prefix=%q, limit=%d) returned %d objects", prefix, limit, n)
-		} else {
-			// NextAfter fed back as After.
-			if res1.NextAfter == "" {
-				errorf("List(prefix=%q, limit=%d) returned no NextAfter", prefix, limit)
-			} else {
-				res2, err := strg.List(ctx, s2.ListOptions{Prefix: prefix, After: res1.NextAfter})
-				if err != nil {
-					errorf("List(prefix=%q, after=<token>) failed: %v", prefix, err)
-				} else {
-					var combined []s2.Object
-					combined = append(combined, res1.Objects...)
-					combined = append(combined, res2.Objects...)
-					checkMatch(fmt.Sprintf("List Pagination (prefix %q, limit %d, after token)", prefix, limit), combined, expected)
-				}
+			errorf("%s failed: %v", where, err)
+			break
+		}
+		n := len(res.Objects) + len(res.CommonPrefixes)
+		if n > 1 {
+			errorf("%s returned %d entries", where, n)
+		}
+		if n == 0 {
+			if pages > 1 {
+				errorf("%s: NextAfter %q was followed by no entry", where, after)
+			} else if res.NextAfter != "" {
+				errorf("%s returned an empty page with NextAfter %q", where, res.NextAfter)
 			}
+			break
+		}
+		walked = append(walked, res.Objects...)
+		if len(walked) > len(expected) {
+			errorf("%s: more objects than the %d expected", where, len(expected))
+			break
+		}
+		repeated := false
+		for _, p := range res.CommonPrefixes {
+			if seen[p] {
+				errorf("%s repeated prefix %q", where, p)
+				repeated = true
+			}
+			seen[p] = true
+			walkedPrefixes = append(walkedPrefixes, p)
+		}
+		if repeated || res.NextAfter == "" {
+			break
+		}
+		if res.NextAfter == after {
+			errorf("%s returned a NextAfter that does not advance: %q", where, res.NextAfter)
+			break
+		}
+		after = res.NextAfter
+	}
+	checkMatch(fmt.Sprintf("List(prefix=%q, limit=1) through NextAfter", prefix), walked, expected)
+	checkPrefixes(fmt.Sprintf("List(prefix=%q, limit=1) prefixes through NextAfter", prefix), walkedPrefixes, expectedPrefixes)
 
-			// The caller-chosen resume key.
-			last := res1.Objects[len(res1.Objects)-1].Name()
-			res2, err := strg.List(ctx, s2.ListOptions{Prefix: prefix, StartAfter: last})
-			if err != nil {
-				errorf("List(prefix=%q, start-after=%q) failed: %v", prefix, last, err)
-			} else {
-				var combined []s2.Object
-				combined = append(combined, res1.Objects...)
-				combined = append(combined, res2.Objects...)
-				checkMatch(fmt.Sprintf("List StartAfter (prefix %q, limit %d, start-after %q)", prefix, limit, last), combined, expected)
-			}
+	// The caller-chosen resume key.
+	if len(expected) > 1 {
+		mid := len(expected) / 2
+		last := expected[mid-1]
+		res, err := strg.List(ctx, s2.ListOptions{Prefix: prefix, StartAfter: last})
+		if err != nil {
+			errorf("List(prefix=%q, start-after=%q) failed: %v", prefix, last, err)
+		} else {
+			checkMatch(fmt.Sprintf("List(prefix=%q, start-after=%q)", prefix, last), res.Objects, expected[mid:])
 		}
 	}
 
@@ -223,6 +247,17 @@ func TestStorageListRecursive(ctx context.Context, strg s2.Storage, expected ...
 		}
 	}
 
+	// 4. A page ending on the last object has nothing after it.
+	if len(expected) > 0 {
+		limit := len(expected)
+		res, err := strg.List(ctx, s2.ListOptions{Limit: limit, Recursive: true})
+		if err != nil {
+			errorf("List(limit=%d, recursive) failed: %v", limit, err)
+		} else if res.NextAfter != "" {
+			errorf("List(limit=%d, recursive) returned all %d objects and NextAfter %q", limit, len(res.Objects), res.NextAfter)
+		}
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("TestStorageListRecursive found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
 	}
@@ -313,6 +348,37 @@ func TestStorageListPaging(ctx context.Context, strg s2.Storage) error {
 	if err := TestStorageListWithPrefixes(ctx, strg, dir, []string{dir + "/sub/"},
 		dir+"/a.txt", dir+"/b.txt", dir+"/c.txt", dir+"/d.txt"); err != nil {
 		return err
+	}
+
+	// StartAfter is a key: a common prefix holding a later key stays.
+	var errs []string
+	testCases := []struct {
+		startAfter   string
+		want         []string
+		wantPrefixes []string
+	}{
+		{startAfter: dir + "/c.txt", want: []string{dir + "/d.txt"}, wantPrefixes: []string{dir + "/sub/"}},
+		{startAfter: dir + "/sub/", wantPrefixes: []string{dir + "/sub/"}},
+		{startAfter: dir + "/sub/a", wantPrefixes: []string{dir + "/sub/"}},
+		{startAfter: dir + "/sub0"},
+	}
+	for _, tc := range testCases {
+		where := fmt.Sprintf("List(prefix=%q, start-after=%q)", dir, tc.startAfter)
+		res, err := strg.List(ctx, s2.ListOptions{Prefix: dir, StartAfter: tc.startAfter})
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s failed: %v", where, err))
+			continue
+		}
+		got := make([]string, 0, len(res.Objects))
+		for _, obj := range res.Objects {
+			got = append(got, obj.Name())
+		}
+		if !slices.Equal(got, tc.want) || !slices.Equal(res.CommonPrefixes, tc.wantPrefixes) {
+			errs = append(errs, fmt.Sprintf("%s = %v %v, expected %v %v", where, got, res.CommonPrefixes, tc.want, tc.wantPrefixes))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("TestStorageListPaging found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
 	}
 
 	// A Sub storage isolates the recursive listing from other objects.

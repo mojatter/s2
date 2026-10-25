@@ -412,8 +412,8 @@ func (s *ObjectsTestSuite) walkPages(strg s2.Storage, p listObjectsParams) (keys
 			keys = append(keys, o.Name())
 		}
 		for _, pf := range pfx {
-			// The fs backend re-sends directories past the cursor on every
-			// page; dedupe across pages so the set can be asserted.
+			// pagedStorage may re-send directories on every page; dedupe
+			// across pages so the set can be asserted.
 			if r := renderPrefix(pf, p.delimiter); !seen[r] {
 				seen[r] = true
 				prefixes = append(prefixes, r)
@@ -494,8 +494,8 @@ func (s *ObjectsTestSuite) TestListObjectsPagesWithBackendTokens() {
 		})
 	}
 
-	// The fs backend repeats its directories on every fetch, so one page
-	// must not report the same prefix twice.
+	// A backend repeating its directories on every fetch must not make one
+	// page report the same prefix twice.
 	s.Run("a prefix repeated across fetches is listed once", func() {
 		strg := &pagedStorage{entries: []string{"a", "b", "c", "d", "e"}, cap: 2, everyPageDirs: []string{"d1"}}
 
@@ -637,8 +637,7 @@ func (s *ObjectsTestSuite) TestListObjectsWalksRealFS() {
 			wantPrefixes: []string{"dir/-"},
 		},
 		{
-			// A page landing exactly on max-keys makes the fs backend claim
-			// more follows; the extra empty page must still terminate.
+			// A page landing exactly on max-keys ends the listing.
 			caseName: "page boundary on the last object",
 			objects:  []string{"a.txt", "b.txt"},
 			query:    "max-keys=2",

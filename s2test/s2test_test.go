@@ -275,3 +275,58 @@ func TestStorageGetPutRejectsAFailedPut(t *testing.T) {
 		})
 	}
 }
+
+// cyclingStorage ignores After and hands out a fresh token on every page, so a walk by NextAfter never ends on its own.
+// With emptyTail, a page resumed by a token is empty instead.
+type cyclingStorage struct {
+	s2.Storage
+	emptyTail bool
+	calls     int
+}
+
+func (s *cyclingStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	s.calls++
+	next := "token" + strconv.Itoa(s.calls)
+	if s.emptyTail && opts.After != "" {
+		return s2.ListResult{NextAfter: next}, nil
+	}
+	opts.After = ""
+	res, err := s.Storage.List(ctx, opts)
+	res.NextAfter = next
+	return res, err
+}
+
+func TestStorageListStopsOnCyclingTokens(t *testing.T) {
+	testCases := []struct {
+		caseName  string
+		names     []string
+		expected  []string
+		emptyTail bool
+		wantErr   string
+	}{
+		{caseName: "an object repeats", names: []string{"a.txt"}, expected: []string{"a.txt"}, wantErr: "more objects than the 1 expected"},
+		{caseName: "a prefix repeats", names: []string{"d/x"}, wantErr: `repeated prefix "d/"`},
+		{caseName: "an empty page follows a token", names: []string{"a.txt"}, expected: []string{"a.txt"}, emptyTail: true, wantErr: `NextAfter "token2" was followed by no entry`},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			ctx := t.Context()
+			strg := &cyclingStorage{Storage: newMemFS(t), emptyTail: tc.emptyTail}
+			for _, name := range tc.names {
+				if err := strg.Put(ctx, s2.NewObjectBytes(name, []byte("x"))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := TestStorageList(ctx, strg, "", tc.expected...)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("want an error containing %q, got: %v", tc.wantErr, err)
+			}
+			if err != nil && strings.Contains(err.Error(), "does not advance") {
+				t.Errorf("an advancing token reported as stuck: %v", err)
+			}
+			if strg.calls > 3 {
+				t.Errorf("List called %d times; the walk must stop at the repeat", strg.calls)
+			}
+		})
+	}
+}
