@@ -482,8 +482,15 @@ func (s *StorageTestSuite) TestListStartAfter() {
 			want:       []string{"b.txt", "cc/c1.txt", "cc/c2.txt"},
 		},
 		{
-			caseName:     "keeps the prefix holding the key",
+			caseName:     "drops the prefix holding the key",
 			startAfter:   "cc/c1.txt",
+			flat:         true,
+			want:         []string{},
+			wantPrefixes: []string{},
+		},
+		{
+			caseName:     "keeps a prefix sorting after the key",
+			startAfter:   "cc",
 			flat:         true,
 			want:         []string{},
 			wantPrefixes: []string{"cc/"},

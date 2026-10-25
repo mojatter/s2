@@ -195,29 +195,22 @@ func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult,
 	if limit <= 0 {
 		limit = defaultListLimit
 	}
-	// After wins; a token may name a common prefix, which it excludes and a StartAfter keeps.
-	cursor, fromToken := opts.StartAfter, false
-	if opts.After != "" {
-		cursor, fromToken = opts.After, true
+	// Both cursors are plain key names here, so they collapse into one
+	// comparison; After wins.
+	after := opts.After
+	if after == "" {
+		after = opts.StartAfter
 	}
 	if opts.Recursive {
-		return s.listRecursive(opts.Prefix, cursor, limit)
+		return s.listRecursive(opts.Prefix, after, limit)
 	}
-	return s.listFlat(opts.Prefix, cursor, fromToken, limit)
+	return s.listFlat(opts.Prefix, after, limit)
 }
 
 // flatEntry is a flat listing's entry under its key: a directory d as "d/".
 type flatEntry struct {
 	key   string
 	entry fs.DirEntry
-}
-
-// pastCursor reports whether a flat entry sorts after cursor. A directory holding a StartAfter key is still a common prefix; a token names an entry of this level.
-func pastCursor(e flatEntry, cursor string, fromToken bool) bool {
-	if !fromToken && e.entry.IsDir() && strings.HasPrefix(cursor, e.key) {
-		return true
-	}
-	return e.key > cursor
 }
 
 // belowObject reports whether dir is an object or lies under one, which is why
@@ -254,7 +247,7 @@ func (s *storage) checkTree(name string) error {
 	return nil
 }
 
-func (s *storage) listFlat(prefix, cursor string, fromToken bool, limit int) (s2.ListResult, error) {
+func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, error) {
 	// Normalize prefix into a directory path acceptable to fs.ReadDir.
 	// S3 callers commonly pass a trailing slash (e.g. "dir/"), which fs.ValidPath rejects.
 	dir := strings.TrimSuffix(prefix, "/")
@@ -293,7 +286,7 @@ func (s *storage) listFlat(prefix, cursor string, fromToken bool, limit int) (s2
 	}
 	last := ""
 	for _, e := range keyed {
-		if !pastCursor(e, cursor, fromToken) {
+		if e.key <= after {
 			continue
 		}
 		if len(res.Objects)+len(res.CommonPrefixes) == limit {

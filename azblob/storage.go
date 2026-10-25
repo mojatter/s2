@@ -142,8 +142,6 @@ func (s *azblobStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListR
 
 	prefix := s.listPrefix(opts.Prefix, opts.Recursive)
 	marker := opts.After
-	// TODO: the s3api handler resumes with a key, not a marker, so paging a
-	// bucket rescans from the start on every request.
 	startAfter := ""
 	if opts.After == "" && opts.StartAfter != "" {
 		startAfter = joinKeepSlash(s.prefix, opts.StartAfter)
@@ -187,8 +185,8 @@ func (s *azblobStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListR
 		}
 
 		for _, p := range res.prefixes {
-			// A prefix holding keys past startAfter still belongs here.
-			if startAfter >= p && !strings.HasPrefix(startAfter, p) {
+			// A prefix is an entry of its own: S3 drops one not past start-after.
+			if p <= startAfter {
 				continue
 			}
 			out.CommonPrefixes = append(out.CommonPrefixes, s2.RelName(s.prefix, p))

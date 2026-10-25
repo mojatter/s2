@@ -27,8 +27,8 @@ type ListOptions struct {
 	// carry one across storages. After wins over StartAfter.
 	After string
 	// StartAfter is a key name picked by the caller, existing or not; the
-	// listing resumes at the first key sorting after it, and a common prefix
-	// holding a key past it is still listed. Ignored when After is set.
+	// listing resumes at the first entry, object or common prefix, sorting
+	// after it, as S3's start-after does. Ignored when After is set.
 	StartAfter string
 	// Limit caps the number of returned entries, CommonPrefixes included, as
 	// S3's max-keys does. Zero means the backend's default page size; follow

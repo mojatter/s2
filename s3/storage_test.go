@@ -117,7 +117,6 @@ func (m *mockS3Client) ListObjectsV2(ctx context.Context, params *s3.ListObjects
 	bucket := aws.ToString(params.Bucket)
 	prefix := aws.ToString(params.Prefix)
 	after := aws.ToString(params.StartAfter)
-	afterPrefix := ""
 	if tok := aws.ToString(params.ContinuationToken); tok != "" {
 		key, ok := strings.CutPrefix(tok, mockContinuationPrefix)
 		if !ok {
@@ -125,10 +124,6 @@ func (m *mockS3Client) ListObjectsV2(ctx context.Context, params *s3.ListObjects
 		}
 		// A continuation token overrides start-after, as in the real service.
 		after = key
-		if params.Delimiter != nil && strings.HasSuffix(key, aws.ToString(params.Delimiter)) {
-			// A page ending on a common prefix resumes past every key under it.
-			afterPrefix = key
-		}
 	}
 	delimiter := aws.ToString(params.Delimiter)
 	limit := int(aws.ToInt32(params.MaxKeys))
@@ -138,14 +133,13 @@ func (m *mockS3Client) ListObjectsV2(ctx context.Context, params *s3.ListObjects
 
 	var objs []*mockObject
 	for _, obj := range m.objects {
-		if obj.bucket == bucket && strings.HasPrefix(obj.key, prefix) && (after == "" || obj.key > after) &&
-			(afterPrefix == "" || !strings.HasPrefix(obj.key, afterPrefix)) {
+		if obj.bucket == bucket && strings.HasPrefix(obj.key, prefix) {
 			objs = append(objs, obj)
 		}
 	}
 	slices.SortFunc(objs, func(a, b *mockObject) int { return strings.Compare(a.key, b.key) })
 
-	// Common prefixes count toward MaxKeys, as in the real service.
+	// Common prefixes count toward MaxKeys, and one not past the cursor is dropped, as in the real service.
 	out := &s3.ListObjectsV2Output{IsTruncated: aws.Bool(false)}
 	n, last := 0, ""
 	for _, obj := range objs {
@@ -155,7 +149,7 @@ func (m *mockS3Client) ListObjectsV2(ctx context.Context, params *s3.ListObjects
 				entry = obj.key[:len(prefix)+idx+len(delimiter)]
 			}
 		}
-		if entry == last {
+		if entry == last || entry <= after {
 			continue
 		}
 		if n == limit {

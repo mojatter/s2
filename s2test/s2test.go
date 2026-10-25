@@ -350,7 +350,7 @@ func TestStorageListPaging(ctx context.Context, strg s2.Storage) error {
 		return err
 	}
 
-	// StartAfter is a key: a common prefix holding a later key stays.
+	// StartAfter is a key: a common prefix is listed only when it sorts after it, as on S3.
 	var errs []string
 	testCases := []struct {
 		startAfter   string
@@ -358,8 +358,10 @@ func TestStorageListPaging(ctx context.Context, strg s2.Storage) error {
 		wantPrefixes []string
 	}{
 		{startAfter: dir + "/c.txt", want: []string{dir + "/d.txt"}, wantPrefixes: []string{dir + "/sub/"}},
-		{startAfter: dir + "/sub/", wantPrefixes: []string{dir + "/sub/"}},
-		{startAfter: dir + "/sub/a", wantPrefixes: []string{dir + "/sub/"}},
+		{startAfter: dir + "/sub", wantPrefixes: []string{dir + "/sub/"}},
+		{startAfter: dir + "/sub/"},
+		{startAfter: dir + "/sub/a"},
+		{startAfter: dir + "/sub/e.txt"},
 		{startAfter: dir + "/sub0"},
 	}
 	for _, tc := range testCases {
