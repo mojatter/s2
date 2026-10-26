@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -326,6 +327,49 @@ func TestStorageListStopsOnCyclingTokens(t *testing.T) {
 			}
 			if strg.calls > 3 {
 				t.Errorf("List called %d times; the walk must stop at the repeat", strg.calls)
+			}
+		})
+	}
+}
+
+// partialConditionStorage holds IfNoneMatch but answers ErrUnsupported to IfMatch, writing anyway when writes is set.
+type partialConditionStorage struct {
+	s2.Storage
+	writes bool
+}
+
+func (s *partialConditionStorage) Upload(ctx context.Context, obj s2.Object, opts s2.UploadOptions) (s2.UploadResult, error) {
+	if opts.IfMatch == "" {
+		return s2.Upload(ctx, s.Storage, obj, opts)
+	}
+	if s.writes {
+		if err := s.Put(ctx, obj); err != nil {
+			return s2.UploadResult{}, err
+		}
+	}
+	return s2.UploadResult{}, fmt.Errorf("partial: IfMatch: %w", errors.ErrUnsupported)
+}
+
+func TestStorageUploadConditionsPartialSupport(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		writes   bool
+		wantErr  string
+	}{
+		{caseName: "refuses IfMatch only"},
+		{caseName: "refuses IfMatch but writes", writes: true, wantErr: "holds"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			err := TestStorageUploadConditions(t.Context(), &partialConditionStorage{Storage: newMemFS(t), writes: tc.writes})
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("want no error, got: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("want an error containing %q, got: %v", tc.wantErr, err)
 			}
 		})
 	}

@@ -629,14 +629,16 @@ func TestStorageUploadConditions(ctx context.Context, strg s2.Storage) error {
 	for _, tc := range testCases {
 		body := "after " + tc.caseName
 		_, err := s2.Upload(ctx, strg, s2.NewObjectBytes(name, []byte(body)), tc.opts)
-		if tc.want == nil && err != nil {
+		switch {
+		case errors.Is(err, errors.ErrUnsupported):
+			// A backend may hold one condition and refuse another, as long as it writes nothing.
+		case tc.want == nil && err != nil:
 			errs = append(errs, fmt.Sprintf("%s: Upload failed: %v", tc.caseName, err))
 			continue
-		}
-		if tc.want != nil && !errors.Is(err, tc.want) {
+		case tc.want != nil && !errors.Is(err, tc.want):
 			errs = append(errs, fmt.Sprintf("%s: Upload error is %v, expected %v", tc.caseName, err, tc.want))
 		}
-		if tc.want != nil {
+		if tc.want != nil || err != nil {
 			body = "first"
 		}
 		if got, err := getBody(ctx, strg, name); err != nil {
@@ -649,7 +651,7 @@ func TestStorageUploadConditions(ctx context.Context, strg s2.Storage) error {
 	if err := strg.Delete(ctx, name); err != nil {
 		return fmt.Errorf("Delete(%q) failed: %w", name, err)
 	}
-	if _, err := s2.Upload(ctx, strg, s2.NewObjectBytes(name, []byte("absent")), s2.UploadOptions{IfMatch: etag}); !errors.Is(err, s2.ErrNotExist) {
+	if _, err := s2.Upload(ctx, strg, s2.NewObjectBytes(name, []byte("absent")), s2.UploadOptions{IfMatch: etag}); !errors.Is(err, s2.ErrNotExist) && !errors.Is(err, errors.ErrUnsupported) {
 		errs = append(errs, fmt.Sprintf("IfMatch over no object: Upload error is %v, expected %v", err, s2.ErrNotExist))
 	}
 	if ok, err := strg.Exists(ctx, name); err != nil {
