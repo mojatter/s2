@@ -542,6 +542,11 @@ func (s *StorageTestSuite) TestS2TestOpenSinceGet() {
 	s.Require().NoError(s2test.TestStorageOpenSinceGet(context.Background(), strg))
 }
 
+func (s *StorageTestSuite) TestS2TestUploadConditions() {
+	_, strg := s.testMockStorage()
+	s.Require().NoError(s2test.TestStorageUploadConditions(context.Background(), strg))
+}
+
 func (s *StorageTestSuite) TestS2TestGetNotExist() {
 	_, strg := s.testMockStorage()
 	s.Require().NoError(s2test.TestStorageGetNotExist(context.Background(), strg))

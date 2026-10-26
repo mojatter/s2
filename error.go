@@ -41,3 +41,6 @@ var ErrInvalidName = errors.New("s2: invalid name")
 
 // ErrModified is returned by Object.Open and OpenRange once the key holds another version than the one Get or List returned; Get the key again to read it.
 var ErrModified = errors.New("s2: object modified since Get")
+
+// ErrPreconditionFailed is returned by Upload when a condition in UploadOptions does not hold; the key is left as it was.
+var ErrPreconditionFailed = errors.New("s2: precondition failed")

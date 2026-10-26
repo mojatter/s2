@@ -104,6 +104,7 @@ func TestUpload(t *testing.T) {
 	testCases := []struct {
 		caseName string
 		strg     Storage
+		opts     UploadOptions
 		wantETag string
 		wantErr  string
 		check    func(t *testing.T, strg Storage)
@@ -161,10 +162,19 @@ func TestUpload(t *testing.T) {
 				assert.ErrorIs(t, err, ErrNotExist)
 			},
 		},
+		{
+			caseName: "refuses a condition the fallback cannot hold",
+			strg:     &putGetStorage{etag: `"from-get"`},
+			opts:     UploadOptions{IfNoneMatch: "*"},
+			wantErr:  errors.ErrUnsupported.Error(),
+			check: func(t *testing.T, strg Storage) {
+				assert.False(t, strg.(*putGetStorage).putCalled)
+			},
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
-			res, err := Upload(t.Context(), tc.strg, NewObjectBytes("a.txt", []byte("a")), UploadOptions{})
+			res, err := Upload(t.Context(), tc.strg, NewObjectBytes("a.txt", []byte("a")), tc.opts)
 			if tc.wantErr != "" {
 				assert.ErrorContains(t, err, tc.wantErr)
 				assert.Empty(t, res.ETag)
@@ -175,6 +185,37 @@ func TestUpload(t *testing.T) {
 			if tc.check != nil {
 				tc.check(t, tc.strg)
 			}
+		})
+	}
+}
+
+func TestUploadOptionsCheck(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		opts     UploadOptions
+		etag     string
+		exists   bool
+		want     error
+	}{
+		{caseName: "no condition over an object", etag: `"a"`, exists: true},
+		{caseName: "no condition over no object"},
+		{caseName: "IfNoneMatch over no object", opts: UploadOptions{IfNoneMatch: "*"}},
+		{caseName: "IfNoneMatch over an object", opts: UploadOptions{IfNoneMatch: "*"}, etag: `"a"`, exists: true, want: ErrPreconditionFailed},
+		{caseName: "IfNoneMatch naming an ETag", opts: UploadOptions{IfNoneMatch: `"a"`}, want: errors.ErrUnsupported},
+		{caseName: "IfMatch the ETag", opts: UploadOptions{IfMatch: `"a"`}, etag: `"a"`, exists: true},
+		{caseName: "IfMatch another ETag", opts: UploadOptions{IfMatch: `"b"`}, etag: `"a"`, exists: true, want: ErrPreconditionFailed},
+		{caseName: "IfMatch over no object", opts: UploadOptions{IfMatch: `"a"`}, want: ErrNotExist},
+		{caseName: "IfMatch any over an object", opts: UploadOptions{IfMatch: "*"}, etag: `"a"`, exists: true},
+		{caseName: "IfMatch any over no object", opts: UploadOptions{IfMatch: "*"}, want: ErrNotExist},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			err := tc.opts.Check("a.txt", tc.etag, tc.exists)
+			if tc.want == nil {
+				assert.NoError(t, err)
+				return
+			}
+			assert.ErrorIs(t, err, tc.want)
 		})
 	}
 }

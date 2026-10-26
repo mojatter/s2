@@ -261,9 +261,13 @@ func (s *azblobStorage) Put(ctx context.Context, obj s2.Object) error {
 
 // Upload implements s2.Uploader. upload reports the Content-MD5 it sent, which
 // is the ETag a later Get derives.
-func (s *azblobStorage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOptions) (s2.UploadResult, error) {
+func (s *azblobStorage) Upload(ctx context.Context, obj s2.Object, opts s2.UploadOptions) (s2.UploadResult, error) {
 	if err := s2.ValidateName(obj.Name()); err != nil {
 		return s2.UploadResult{}, err
+	}
+	// Conditional writes are not wired to the provider yet (#450).
+	if opts.Conditional() {
+		return s2.UploadResult{}, fmt.Errorf("azblob: conditional upload: %w", errors.ErrUnsupported)
 	}
 	rc, err := obj.Open()
 	if err != nil {
