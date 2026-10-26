@@ -284,6 +284,13 @@ func uploadErrorToS3Error(err error) (string, string, int) {
 	if errors.Is(err, s2.ErrUnknownETag) {
 		return "InternalError", msgInternalError, http.StatusInternalServerError
 	}
+	if errors.Is(err, s2.ErrPreconditionFailed) {
+		return "PreconditionFailed", msgPreconditionFailed, http.StatusPreconditionFailed
+	}
+	// A condition the backend cannot hold, or an If-None-Match other than "*", as S3 answers it.
+	if errors.Is(err, errors.ErrUnsupported) {
+		return "NotImplemented", "A header you provided implies functionality that is not implemented", http.StatusNotImplemented
+	}
 	return s2ErrorToS3Error(err)
 }
 

@@ -38,6 +38,14 @@ func (s *s3apiSuite) putObject(bucket, key, content string) {
 	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes(key, []byte(content))))
 }
 
+func (s *s3apiSuite) storage(bucket string) s2.Storage {
+	s.T().Helper()
+
+	strg, err := s.server.Buckets.Get(context.Background(), bucket)
+	s.Require().NoError(err)
+	return strg
+}
+
 func (s *s3apiSuite) createBucket(name string) {
 	s.T().Helper()
 	s.Require().NoError(s.server.Buckets.Create(context.Background(), name))
