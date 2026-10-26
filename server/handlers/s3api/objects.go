@@ -582,7 +582,7 @@ func handlePutObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	// An absent Content-Type stays unstored; readers resolve it (#210).
 	obj := s2.NewObjectReader(key, io.NopCloser(body), s2.MustUint64(contentLength),
 		s2.WithContentType(requestContentType(r)), s2.WithMetadata(parseMetadataHeaders(r)))
-	res, err := s2.Upload(ctx, strg, obj, s2.UploadOptions{})
+	res, err := s2.Upload(ctx, strg, obj, uploadConditions(r))
 	if tooLarge := (*http.MaxBytesError)(nil); errors.As(err, &tooLarge) {
 		writeEntityTooLarge(w, r, maxSize)
 		return
@@ -607,6 +607,15 @@ const copySourceHeader = "X-Amz-Copy-Source"
 
 // reservedETagKey marks an object a pre-v0.18 s2-server wrote on s3/gcs roots, so clients cannot set it until v1.0 (#247).
 const reservedETagKey = "s2-etag"
+
+// uploadConditions reads a write's If-Match and If-None-Match, quoting a bare ETag as Object.ETag reports it.
+func uploadConditions(r *http.Request) s2.UploadOptions {
+	ifMatch := strings.TrimSpace(r.Header.Get("If-Match"))
+	if ifMatch != "" && ifMatch != "*" && !strings.HasPrefix(ifMatch, `"`) && !strings.HasPrefix(ifMatch, "W/") {
+		ifMatch = `"` + ifMatch + `"`
+	}
+	return s2.UploadOptions{IfMatch: ifMatch, IfNoneMatch: strings.TrimSpace(r.Header.Get("If-None-Match"))}
+}
 
 func parseMetadataHeaders(r *http.Request) s2.Metadata {
 	md := make(s2.Metadata)
@@ -700,7 +709,7 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 	// NopCloser: the deferred Close above owns rc, not the backend's Put.
 	dstObj := s2.NewObjectReader(dstKey, io.NopCloser(rc), srcObj.Length(),
 		s2.WithMetadata(md), s2.WithContentType(contentType))
-	res, err := s2.Upload(ctx, dstStrg, dstObj, s2.UploadOptions{})
+	res, err := s2.Upload(ctx, dstStrg, dstObj, uploadConditions(r))
 	if err != nil {
 		writeUploadError(w, r, err)
 		return

@@ -424,6 +424,29 @@ func TestWritesHoldTheLock(t *testing.T) {
 			freeOn:   "A/B/Y",
 		},
 		{
+			caseName: "conditional put checks under the name's lock",
+			reads:    true,
+			op: func(ctx context.Context, strg s2.Storage) error {
+				_, err := s2.Upload(ctx, strg, s2.NewObjectBytes("a/b/x", []byte("v")), s2.UploadOptions{IfMatch: "*"})
+				return err
+			},
+			want:   []lockReq{s("."), x("A/B/X"), s("."), x("A/B/X")},
+			waitOn: []string{"A/B/X"},
+			freeOn: "A/B/Y",
+		},
+		{
+			caseName: "conditional put without rename",
+			noRename: true,
+			reads:    true,
+			op: func(ctx context.Context, strg s2.Storage) error {
+				_, err := s2.Upload(ctx, strg, s2.NewObjectBytes("a/b/x", []byte("v")), s2.UploadOptions{IfMatch: "*"})
+				return err
+			},
+			want:   []lockReq{s("."), x("A/B/X")},
+			waitOn: []string{"A/B/X"},
+			freeOn: "A/B/Y",
+		},
+		{
 			caseName: "put metadata",
 			op: func(ctx context.Context, strg s2.Storage) error {
 				return strg.PutMetadata(ctx, "a/b/x", s2.Metadata{"k": "v"})

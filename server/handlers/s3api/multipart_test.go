@@ -315,14 +315,6 @@ func (s *MultipartTestSuite) getObject(bucket, key string) *httptest.ResponseRec
 	return w
 }
 
-func (s *MultipartTestSuite) storage(bucket string) s2.Storage {
-	s.T().Helper()
-
-	strg, err := s.server.Buckets.Get(context.Background(), bucket)
-	s.Require().NoError(err)
-	return strg
-}
-
 // bodyETag is the quoted MD5 of the concatenated parts, the ETag of the completed object.
 func bodyETag(parts ...string) string {
 	sum := md5.Sum([]byte(strings.Join(parts, ""))) // #nosec G401
@@ -719,6 +711,65 @@ func (s *MultipartTestSuite) TestCompleteMultipartUploadChecksPartETags() {
 	}
 }
 
+func (s *MultipartTestSuite) TestCompleteMultipartUploadConditions() {
+	s.createBucket("mp-cond")
+	other := `"0123456789abcdef0123456789abcdef"`
+	testCases := []struct {
+		caseName string
+		absent   bool
+		header   string
+		value    string // "etag" stands for the key's ETag
+		wantCode string
+	}{
+		{caseName: "if-none-match over no object", absent: true, header: "If-None-Match", value: "*"},
+		{caseName: "if-none-match over an object", header: "If-None-Match", value: "*", wantCode: "PreconditionFailed"},
+		{caseName: "if-match hit", header: "If-Match", value: "etag"},
+		{caseName: "if-match miss", header: "If-Match", value: other, wantCode: "PreconditionFailed"},
+		{caseName: "if-match over no object", absent: true, header: "If-Match", value: other, wantCode: "NoSuchKey"},
+	}
+	wantStatus := map[string]int{"": http.StatusOK, "PreconditionFailed": http.StatusPreconditionFailed, "NoSuchKey": http.StatusNotFound}
+	for i, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			key := fmt.Sprintf("k%d.bin", i)
+			etag := ""
+			if !tc.absent {
+				s.putObject("mp-cond", key, "old")
+				obj, err := s.storage("mp-cond").Get(ctx, key)
+				s.Require().NoError(err)
+				etag = obj.ETag()
+			}
+			uploadID := s.initiateUpload("mp-cond", key, nil)
+			part := s.uploadPart("mp-cond", key, uploadID, 1, "new")
+
+			req := httptest.NewRequest("POST", "/mp-cond/"+key+"?uploadId="+uploadID, strings.NewReader(completeBody(part)))
+			req.SetPathValue("bucket", "mp-cond")
+			req.SetPathValue("key", key)
+			req.Header.Set(tc.header, strings.Replace(tc.value, "etag", etag, 1))
+			w := httptest.NewRecorder()
+			handleCompleteMultipartUpload(s.server, w, req)
+
+			s.Equal(wantStatus[tc.wantCode], w.Code, w.Body.String())
+			if tc.wantCode == "" {
+				s.Equal("new", s.getObject("mp-cond", key).Body.String())
+				return
+			}
+			var errResp ErrorResponse
+			s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+			s.Equal(tc.wantCode, errResp.Code)
+			if tc.absent {
+				_, err := s.storage("mp-cond").Get(ctx, key)
+				s.ErrorIs(err, s2.ErrNotExist, "a refused complete creates nothing")
+			} else {
+				s.Equal("old", s.getObject("mp-cond", key).Body.String())
+			}
+			// A refused complete keeps the upload, so a retry without the condition lands.
+			s.completeUpload("mp-cond", key, uploadID, part)
+			s.Equal("new", s.getObject("mp-cond", key).Body.String())
+		})
+	}
+}
+
 // abortDuring aborts the upload the first time the request body is read.
 type abortDuring struct {
 	abort func()
@@ -897,7 +948,7 @@ func TestPartsReader_MissingPart(t *testing.T) {
 
 	_, err := io.ReadAll(pr)
 	require.ErrorIs(t, err, server.ErrNoSuchUpload)
-	code, _, status := uploadErrorToS3Error(fmt.Errorf("failed to write temp file: %w", err))
+	code, _, status := uploadErrorToS3Error(fmt.Errorf("failed to write temp file: %w", err), false)
 	assert.Equal(t, "NoSuchUpload", code)
 	assert.Equal(t, http.StatusNotFound, status)
 }

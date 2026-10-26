@@ -2,6 +2,7 @@ package s2
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -170,13 +171,46 @@ func Move(ctx context.Context, s Storage, src, dst string) error {
 //
 // Storage implementations are not required to satisfy Uploader; the free
 // function Upload falls back to Put followed by Get when they do not.
+//
+// Upload must hold opts' conditions until the write lands, as [UploadOptions.Check]
+// judges them, or fail a conditional call with an error wrapping [errors.ErrUnsupported].
 type Uploader interface {
 	Upload(ctx context.Context, obj Object, opts UploadOptions) (UploadResult, error)
 }
 
-// UploadOptions controls an Upload call. It carries no settings today and
-// exists so that one can be added without breaking implementations.
-type UploadOptions struct{}
+// UploadOptions controls an Upload call.
+type UploadOptions struct {
+	// IfMatch, when set, writes only while the key holds an object with this ETag, in the quoted form Object.ETag reports.
+	IfMatch string
+	// IfNoneMatch, when "*", writes only while the key holds no object; any other value is unsupported.
+	IfNoneMatch string
+}
+
+// Conditional reports whether opts carries a condition.
+func (o UploadOptions) Conditional() bool {
+	return o.IfMatch != "" || o.IfNoneMatch != ""
+}
+
+// Check judges opts against the object at name, whose ETag is etag when exists.
+// It wraps ErrNotExist when IfMatch finds no object, ErrPreconditionFailed when a condition fails,
+// and errors.ErrUnsupported for an IfNoneMatch other than "*".
+func (o UploadOptions) Check(name, etag string, exists bool) error {
+	if o.IfNoneMatch != "" && o.IfNoneMatch != "*" {
+		return fmt.Errorf("s2: IfNoneMatch %q: %w", o.IfNoneMatch, errors.ErrUnsupported)
+	}
+	if o.IfMatch != "" {
+		if !exists {
+			return fmt.Errorf("%w: %s", ErrNotExist, name)
+		}
+		if o.IfMatch != "*" && o.IfMatch != etag {
+			return fmt.Errorf("%w: %s", ErrPreconditionFailed, name)
+		}
+	}
+	if o.IfNoneMatch != "" && exists {
+		return fmt.Errorf("%w: %s", ErrPreconditionFailed, name)
+	}
+	return nil
+}
 
 // UploadResult reports what the backend stored. A field the backend does not
 // know is left at its zero value.
@@ -202,6 +236,7 @@ type UploadResult struct {
 // The fallback is not atomic: a concurrent write to the same name can land
 // between the Put and the read-back, and the ETag then describes that write
 // rather than obj. Only a backend implementing Uploader is free of this.
+// For the same reason the fallback fails a conditional call with errors.ErrUnsupported.
 func Upload(ctx context.Context, s Storage, obj Object, opts UploadOptions) (UploadResult, error) {
 	if u, ok := s.(Uploader); ok {
 		res, err := u.Upload(ctx, obj, opts)
@@ -214,6 +249,9 @@ func Upload(ctx context.Context, s Storage, obj Object, opts UploadOptions) (Upl
 			return UploadResult{}, fmt.Errorf("%w: %w", ErrUnknownETag, err)
 		}
 		return res, nil
+	}
+	if opts.Conditional() {
+		return UploadResult{}, fmt.Errorf("s2: conditional upload without Uploader: %w", errors.ErrUnsupported)
 	}
 	if err := s.Put(ctx, obj); err != nil {
 		return UploadResult{}, err

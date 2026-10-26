@@ -244,6 +244,78 @@ func (s *StorageTestSuite) TestS2TestOpenSinceGet() {
 	}
 }
 
+func (s *StorageTestSuite) TestS2TestUploadConditions() {
+	testCases := []struct {
+		caseName string
+		strg     s2.Storage
+	}{
+		{caseName: "memfs", strg: NewStorageMem(s2.Config{})},
+		{caseName: "osfs", strg: NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(s.T().TempDir()))},
+		{caseName: "without rename", strg: NewStorageFS(s2.Config{}, noRenameFS{memfs.New()})},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.Require().NoError(s2test.TestStorageUploadConditions(context.Background(), tc.strg))
+		})
+	}
+}
+
+// raceReader writes over the key on its first Read, while the body streams outside the lock.
+type raceReader struct {
+	r    io.Reader
+	race func()
+}
+
+func (r *raceReader) Read(p []byte) (int, error) {
+	if r.race != nil {
+		r.race()
+		r.race = nil
+	}
+	return r.r.Read(p)
+}
+
+func (s *StorageTestSuite) TestUploadConditionsRace() {
+	const name = "k.txt"
+	testCases := []struct {
+		caseName string
+		seed     bool
+		opts     func(etag string) s2.UploadOptions
+	}{
+		{caseName: "IfNoneMatch loses to a write landing first", opts: func(string) s2.UploadOptions { return s2.UploadOptions{IfNoneMatch: "*"} }},
+		{caseName: "IfMatch loses to a write landing first", seed: true, opts: func(etag string) s2.UploadOptions { return s2.UploadOptions{IfMatch: etag} }},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			strg := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(s.T().TempDir()))
+			var etag string
+			if tc.seed {
+				res, err := s2.Upload(ctx, strg, s2.NewObjectBytes(name, []byte("seed")), s2.UploadOptions{})
+				s.Require().NoError(err)
+				etag = res.ETag
+			}
+			body := &raceReader{r: strings.NewReader("mine"), race: func() {
+				s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes(name, []byte("raced"))))
+			}}
+			_, err := s2.Upload(ctx, strg, s2.NewObjectReader(name, io.NopCloser(body), 4), tc.opts(etag))
+			s.Require().ErrorIs(err, s2.ErrPreconditionFailed)
+
+			got, err := strg.Get(ctx, name)
+			s.Require().NoError(err)
+			rc, err := got.Open()
+			s.Require().NoError(err)
+			defer rc.Close()
+
+			b, err := io.ReadAll(rc)
+			s.Require().NoError(err)
+			s.Equal("raced", string(b))
+			res, err := strg.List(ctx, s2.ListOptions{Recursive: true})
+			s.Require().NoError(err)
+			s.Len(res.Objects, 1, "the abandoned write left files behind")
+		})
+	}
+}
+
 func (s *StorageTestSuite) TestS2TestExists() {
 	strg := NewStorageMem(s2.Config{})
 	s.Require().NoError(s2test.TestStorageExists(context.Background(), strg))

@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 	"github.com/stretchr/testify/suite"
 
 	_ "github.com/mojatter/s2/fs"
@@ -162,6 +163,42 @@ func (s *IntegrationSuite) TestPutAndGetObject() {
 	s.Require().NoError(err)
 	s.Equal(body, buf.String())
 	s.NotEmpty(*out.ETag)
+}
+
+// The SDK's IfNoneMatch and IfMatch reach PutObject as S3 sends them.
+func (s *IntegrationSuite) TestConditionalPutObject() {
+	ctx := context.Background()
+	bucket := "cond-bucket"
+	s.createTestBucket(bucket)
+	put := func(body string, ifMatch, ifNoneMatch *string) (*s3.PutObjectOutput, error) {
+		return s.client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:      aws.String(bucket),
+			Key:         aws.String("k.txt"),
+			Body:        strings.NewReader(body),
+			IfMatch:     ifMatch,
+			IfNoneMatch: ifNoneMatch,
+		})
+	}
+
+	first, err := put("first", nil, aws.String("*"))
+	s.Require().NoError(err)
+	_, err = put("second", nil, aws.String("*"))
+	var apiErr smithy.APIError
+	s.Require().ErrorAs(err, &apiErr)
+	s.Equal("PreconditionFailed", apiErr.ErrorCode())
+	_, err = put("third", first.ETag, nil)
+	s.Require().NoError(err)
+	_, err = put("fourth", first.ETag, nil)
+	s.Require().ErrorAs(err, &apiErr)
+	s.Equal("PreconditionFailed", apiErr.ErrorCode())
+
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String("k.txt")})
+	s.Require().NoError(err)
+	defer out.Body.Close()
+
+	got, err := io.ReadAll(out.Body)
+	s.Require().NoError(err)
+	s.Equal("third", string(got))
 }
 
 func (s *IntegrationSuite) TestHeadObject() {

@@ -591,6 +591,95 @@ func checkOpenSinceLookup(ctx context.Context, strg s2.Storage, name, caseName s
 	return nil
 }
 
+// TestStorageUploadConditions validates that Upload writes only while UploadOptions' conditions hold and leaves the key as it was otherwise.
+// A backend may answer errors.ErrUnsupported to any condition, as the Uploader contract allows, as long as it writes nothing.
+func TestStorageUploadConditions(ctx context.Context, strg s2.Storage) error {
+	const name = "s2test-upload-conditions.txt"
+	defer func() { _ = strg.Delete(ctx, name) }()
+
+	if err := strg.Put(ctx, s2.NewObjectBytes(name, []byte("first"))); err != nil {
+		return fmt.Errorf("Put(%q) failed: %w", name, err)
+	}
+	cur, err := strg.Get(ctx, name)
+	if err != nil {
+		return fmt.Errorf("Get(%q) failed: %w", name, err)
+	}
+	etag := cur.ETag()
+
+	var errs []string
+	testCases := []struct {
+		caseName string
+		opts     s2.UploadOptions
+		want     error
+	}{
+		{caseName: "IfNoneMatch over an object", opts: s2.UploadOptions{IfNoneMatch: "*"}, want: s2.ErrPreconditionFailed},
+		{caseName: "IfMatch another ETag", opts: s2.UploadOptions{IfMatch: `"s2test-stale"`}, want: s2.ErrPreconditionFailed},
+		{caseName: "IfMatch the ETag", opts: s2.UploadOptions{IfMatch: etag}},
+	}
+	for _, tc := range testCases {
+		body := "after " + tc.caseName
+		_, err := s2.Upload(ctx, strg, s2.NewObjectBytes(name, []byte(body)), tc.opts)
+		switch {
+		case errors.Is(err, errors.ErrUnsupported):
+			// A backend may hold one condition and refuse another, as long as it writes nothing.
+		case tc.want == nil && err != nil:
+			errs = append(errs, fmt.Sprintf("%s: Upload failed: %v", tc.caseName, err))
+			continue
+		case tc.want != nil && !errors.Is(err, tc.want):
+			errs = append(errs, fmt.Sprintf("%s: Upload error is %v, expected %v", tc.caseName, err, tc.want))
+		}
+		if tc.want != nil || err != nil {
+			body = "first"
+		}
+		if got, err := getBody(ctx, strg, name); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: reading %q failed: %v", tc.caseName, name, err))
+		} else if got != body {
+			errs = append(errs, fmt.Sprintf("%s: %q holds %q, expected %q", tc.caseName, name, got, body))
+		}
+	}
+
+	if err := strg.Delete(ctx, name); err != nil {
+		return fmt.Errorf("Delete(%q) failed: %w", name, err)
+	}
+	if _, err := s2.Upload(ctx, strg, s2.NewObjectBytes(name, []byte("absent")), s2.UploadOptions{IfMatch: etag}); !errors.Is(err, s2.ErrNotExist) && !errors.Is(err, errors.ErrUnsupported) {
+		errs = append(errs, fmt.Sprintf("IfMatch over no object: Upload error is %v, expected %v", err, s2.ErrNotExist))
+	}
+	if ok, err := strg.Exists(ctx, name); err != nil {
+		errs = append(errs, fmt.Sprintf("IfMatch over no object: Exists(%q) failed: %v", name, err))
+	} else if ok {
+		errs = append(errs, fmt.Sprintf("IfMatch over no object: %q exists after a failed Upload", name))
+	}
+	switch _, err := s2.Upload(ctx, strg, s2.NewObjectBytes(name, []byte("created")), s2.UploadOptions{IfNoneMatch: "*"}); {
+	case errors.Is(err, errors.ErrUnsupported):
+		if ok, err := strg.Exists(ctx, name); err != nil {
+			errs = append(errs, fmt.Sprintf("IfNoneMatch over no object: Exists(%q) failed: %v", name, err))
+		} else if ok {
+			errs = append(errs, fmt.Sprintf("IfNoneMatch over no object: %q exists after an unsupported Upload", name))
+		}
+	case err != nil:
+		errs = append(errs, fmt.Sprintf("IfNoneMatch over no object: Upload failed: %v", err))
+	default:
+		if got, err := getBody(ctx, strg, name); err != nil {
+			errs = append(errs, fmt.Sprintf("IfNoneMatch over no object: reading %q failed: %v", name, err))
+		} else if got != "created" {
+			errs = append(errs, fmt.Sprintf("IfNoneMatch over no object: %q holds %q, expected %q", name, got, "created"))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("TestStorageUploadConditions found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
+	}
+	return nil
+}
+
+// getBody returns the body of the object at name.
+func getBody(ctx context.Context, strg s2.Storage, name string) (string, error) {
+	obj, err := strg.Get(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	return readBody(obj)
+}
+
 // TestStorageGetPut validates that Put writes an object and Get reads it back with its metadata, Content-Type and ETag, and that a failed Put leaves no new key and keeps an existing one.
 func TestStorageGetPut(ctx context.Context, strg s2.Storage, opts ...Option) error {
 	o := newOptions(opts)

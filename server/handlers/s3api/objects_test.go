@@ -3425,7 +3425,6 @@ func (s *ObjectsTestSuite) TestConditionalRequests() {
 		{caseName: "copy if-unmodified-since past", method: "COPY", headers: map[string]string{"x-amz-copy-source-if-unmodified-since": past}, wantStatus: http.StatusPreconditionFailed},
 		{caseName: "copy if-none-match hit is 412", method: "COPY", headers: map[string]string{"x-amz-copy-source-if-none-match": etag}, wantStatus: http.StatusPreconditionFailed},
 		{caseName: "copy if-modified-since its own time is 412", method: "COPY", headers: map[string]string{"x-amz-copy-source-if-modified-since": lm}, wantStatus: http.StatusPreconditionFailed},
-		{caseName: "copy ignores a get condition", method: "COPY", headers: map[string]string{"If-Match": other}, wantStatus: http.StatusOK},
 		{caseName: "copy to a missing bucket is 404 before its condition", method: "COPY", headers: map[string]string{"x-amz-copy-source-if-match": other}, dstBucket: "nope", wantStatus: http.StatusNotFound},
 	}
 	for i, tc := range testCases {
@@ -3482,6 +3481,93 @@ func (s *ObjectsTestSuite) TestConditionalRequests() {
 				// A refused copy writes nothing.
 				s.Equal(tc.wantStatus == http.StatusOK, getW.Code == http.StatusOK)
 			}
+		})
+	}
+}
+
+// PutObject and CopyObject judge If-Match and If-None-Match against the destination key.
+func (s *ObjectsTestSuite) TestConditionalWrites() {
+	other := `"0123456789abcdef0123456789abcdef"`
+	testCases := []struct {
+		caseName string
+		copy     bool   // a CopyObject of src.txt rather than a PutObject
+		absent   bool   // the key holds no object
+		ifMatch  string // "etag" stands for the key's ETag
+		ifNone   string
+		bare     bool // ifMatch is sent without quotes
+		wantCode string
+	}{
+		{caseName: "put if-none-match over no object", absent: true, ifNone: "*"},
+		{caseName: "put if-none-match over an object", ifNone: "*", wantCode: "PreconditionFailed"},
+		{caseName: "put if-none-match naming an etag", ifNone: other, wantCode: "NotImplemented"},
+		{caseName: "put if-match hit", ifMatch: "etag"},
+		{caseName: "put if-match bare etag", ifMatch: "etag", bare: true},
+		{caseName: "put if-match miss", ifMatch: other, wantCode: "PreconditionFailed"},
+		{caseName: "put if-match weak is no strong match", ifMatch: "W/etag", wantCode: "PreconditionFailed"},
+		{caseName: "put if-match over no object", absent: true, ifMatch: other, wantCode: "NoSuchKey"},
+		{caseName: "copy if-none-match over no object", copy: true, absent: true, ifNone: "*"},
+		{caseName: "copy if-none-match over an object", copy: true, ifNone: "*", wantCode: "PreconditionFailed"},
+		{caseName: "copy if-match hit", copy: true, ifMatch: "etag"},
+		{caseName: "copy if-match over no object", copy: true, absent: true, ifMatch: other, wantCode: "NoSuchKey"},
+	}
+	wantStatus := map[string]int{"": http.StatusOK, "PreconditionFailed": http.StatusPreconditionFailed, "NotImplemented": http.StatusNotImplemented, "NoSuchKey": http.StatusNotFound}
+	s.putObject("cw", "src.txt", "copied")
+	for i, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			key := fmt.Sprintf("k%d.txt", i)
+			etag := ""
+			if !tc.absent {
+				s.putObject("cw", key, "old")
+				obj, err := s.storage("cw").Get(context.Background(), key)
+				s.Require().NoError(err)
+				etag = obj.ETag()
+			}
+			ifMatch := strings.Replace(tc.ifMatch, "etag", etag, 1)
+			if strings.HasPrefix(tc.ifMatch, "W/") {
+				ifMatch = "W/" + etag
+			}
+			if tc.bare {
+				ifMatch = strings.Trim(ifMatch, `"`)
+			}
+
+			body, want := "new", "new"
+			req := httptest.NewRequest("PUT", "/cw/"+key, strings.NewReader(body))
+			if tc.copy {
+				req = httptest.NewRequest("PUT", "/cw/"+key, nil)
+				req.Header.Set("x-amz-copy-source", "/cw/src.txt")
+				want = "copied"
+			}
+			req.SetPathValue("bucket", "cw")
+			req.SetPathValue("key", key)
+			if ifMatch != "" {
+				req.Header.Set("If-Match", ifMatch)
+			}
+			if tc.ifNone != "" {
+				req.Header.Set("If-None-Match", tc.ifNone)
+			}
+			w := httptest.NewRecorder()
+			handlePutObject(s.server, w, req)
+
+			s.Equal(wantStatus[tc.wantCode], w.Code, w.Body.String())
+			if tc.wantCode != "" {
+				var errResp ErrorResponse
+				s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+				s.Equal(tc.wantCode, errResp.Code)
+				want = "old"
+			}
+			obj, err := s.storage("cw").Get(context.Background(), key)
+			if tc.absent && tc.wantCode != "" {
+				s.ErrorIs(err, s2.ErrNotExist, "a refused write creates nothing")
+				return
+			}
+			s.Require().NoError(err)
+			rc, err := obj.Open()
+			s.Require().NoError(err)
+			defer rc.Close()
+
+			got, err := io.ReadAll(rc)
+			s.Require().NoError(err)
+			s.Equal(want, string(got))
 		})
 	}
 }

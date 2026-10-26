@@ -88,16 +88,19 @@ func writeS2Error(w http.ResponseWriter, r *http.Request, err error) {
 
 // writeUploadError is writeS2Error for a failure from s2.Upload.
 func writeUploadError(w http.ResponseWriter, r *http.Request, err error) {
-	code, msg, status := uploadErrorToS3Error(err)
+	code, msg, status := uploadErrorToS3Error(err, uploadConditions(r).Conditional())
 	logS3Error(r, code, status, err)
 	writeError(w, r, code, msg, status)
 }
 
-// logS3Error logs a 5xx at Error and anything else at Debug, since a client error is expected traffic.
+// logS3Error logs a 501 at Warn, any other 5xx at Error, and anything else at Debug, since a client error is expected traffic.
 func logS3Error(r *http.Request, code string, status int, err error, attrs ...any) {
 	level := slog.LevelDebug
-	// A client that hung up is not a server fault.
-	if status >= http.StatusInternalServerError && !errors.Is(err, context.Canceled) {
+	// A 501 refuses what the client asked for, and a client that hung up is not a server fault.
+	switch {
+	case status == http.StatusNotImplemented:
+		level = slog.LevelWarn
+	case status >= http.StatusInternalServerError && !errors.Is(err, context.Canceled):
 		level = slog.LevelError
 	}
 	args := append([]any{"request_id", server.RequestIDFromContext(r.Context()), "method", r.Method, "path", r.URL.Path, "code", code, "status", status, "error", err}, attrs...)
@@ -277,12 +280,20 @@ func chunkedReadError(err error) error {
 // object was stored and only the read-back failed, so it must not answer
 // NoSuchKey: that would tell the client its write did not land. A retry of the
 // same request converges, since the write is idempotent.
-func uploadErrorToS3Error(err error) (string, string, int) {
+// An ErrUnsupported answers 501 only for a request that carried a condition.
+func uploadErrorToS3Error(err error, conditional bool) (string, string, int) {
 	if errors.Is(err, errIncompleteBody) {
 		return "IncompleteBody", msgIncompleteBody, http.StatusBadRequest
 	}
 	if errors.Is(err, s2.ErrUnknownETag) {
 		return "InternalError", msgInternalError, http.StatusInternalServerError
+	}
+	if errors.Is(err, s2.ErrPreconditionFailed) {
+		return "PreconditionFailed", msgPreconditionFailed, http.StatusPreconditionFailed
+	}
+	// A condition the backend cannot hold, or an If-None-Match other than "*", as S3 answers it.
+	if conditional && errors.Is(err, errors.ErrUnsupported) {
+		return "NotImplemented", "A header you provided implies functionality that is not implemented", http.StatusNotImplemented
 	}
 	return s2ErrorToS3Error(err)
 }

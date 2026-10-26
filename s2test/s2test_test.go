@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -326,6 +327,55 @@ func TestStorageListStopsOnCyclingTokens(t *testing.T) {
 			}
 			if strg.calls > 3 {
 				t.Errorf("List called %d times; the walk must stop at the repeat", strg.calls)
+			}
+		})
+	}
+}
+
+// partialConditionStorage holds one condition but answers ErrUnsupported to refuses, writing anyway when writes is set.
+type partialConditionStorage struct {
+	s2.Storage
+	refuses string // "IfMatch" or "IfNoneMatch"
+	writes  bool
+}
+
+func (s *partialConditionStorage) Upload(ctx context.Context, obj s2.Object, opts s2.UploadOptions) (s2.UploadResult, error) {
+	refused := s.refuses == "IfMatch" && opts.IfMatch != "" || s.refuses == "IfNoneMatch" && opts.IfNoneMatch != ""
+	if !refused {
+		return s2.Upload(ctx, s.Storage, obj, opts)
+	}
+	if s.writes {
+		if err := s.Put(ctx, obj); err != nil {
+			return s2.UploadResult{}, err
+		}
+	}
+	return s2.UploadResult{}, fmt.Errorf("partial: %s: %w", s.refuses, errors.ErrUnsupported)
+}
+
+func TestStorageUploadConditionsPartialSupport(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		refuses  string
+		writes   bool
+		wantErr  string
+	}{
+		{caseName: "refuses IfMatch only", refuses: "IfMatch"},
+		{caseName: "refuses IfMatch but writes", refuses: "IfMatch", writes: true, wantErr: "holds"},
+		{caseName: "refuses IfNoneMatch only", refuses: "IfNoneMatch"},
+		{caseName: "refuses IfNoneMatch but writes over an object", refuses: "IfNoneMatch", writes: true, wantErr: "holds"},
+		{caseName: "refuses IfNoneMatch but writes over no object", refuses: "IfNoneMatch", writes: true, wantErr: "exists after an unsupported Upload"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			err := TestStorageUploadConditions(t.Context(), &partialConditionStorage{Storage: newMemFS(t), refuses: tc.refuses, writes: tc.writes})
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Errorf("want no error, got: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("want an error containing %q, got: %v", tc.wantErr, err)
 			}
 		})
 	}

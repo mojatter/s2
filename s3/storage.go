@@ -368,9 +368,13 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 }
 
 // Upload implements s2.Uploader with the ETag PutObject already answers.
-func (s *storage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOptions) (s2.UploadResult, error) {
+func (s *storage) Upload(ctx context.Context, obj s2.Object, opts s2.UploadOptions) (s2.UploadResult, error) {
 	if err := s2.ValidateName(obj.Name()); err != nil {
 		return s2.UploadResult{}, err
+	}
+	// Conditional writes are not wired to the provider yet (#450).
+	if opts.Conditional() {
+		return s2.UploadResult{}, fmt.Errorf("s3: conditional upload: %w", errors.ErrUnsupported)
 	}
 	rc, err := obj.Open()
 	if err != nil {

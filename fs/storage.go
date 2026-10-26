@@ -489,7 +489,7 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 }
 
 // Upload implements s2.Uploader. The ETag is the body MD5 this call computes.
-func (s *storage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOptions) (s2.UploadResult, error) {
+func (s *storage) Upload(ctx context.Context, obj s2.Object, opts s2.UploadOptions) (s2.UploadResult, error) {
 	name := obj.Name()
 	if err := validateName(name); err != nil {
 		return s2.UploadResult{}, err
@@ -500,19 +500,42 @@ func (s *storage) Upload(ctx context.Context, obj s2.Object, _ s2.UploadOptions)
 	}
 	defer func() { _ = rc.Close() }()
 
+	var check func() error
+	if opts.Conditional() {
+		check = func() error { return s.checkUpload(name, opts) }
+	}
 	m := meta{ContentType: obj.ContentType(), Metadata: obj.Metadata()}
-	etag, err := s.write(ctx, nil, name, func() (io.Reader, meta, error) { return rc, m, nil })
+	etag, err := s.write(ctx, nil, name, check, func() (io.Reader, meta, error) { return rc, m, nil })
 	return s2.UploadResult{ETag: etag}, err
 }
 
+// checkUpload judges opts against the object now at name. Callers hold name's lock.
+func (s *storage) checkUpload(name string, opts s2.UploadOptions) error {
+	obj, err := s.get(name)
+	if errors.Is(err, s2.ErrNotExist) {
+		return opts.Check(name, "", false)
+	}
+	if err != nil {
+		return err
+	}
+	return opts.Check(name, obj.ETag(), true)
+}
+
 // write stores what open yields under name; open runs inside the first section, which also holds reads shared.
-func (s *storage) write(ctx context.Context, reads []string, name string, open func() (io.Reader, meta, error)) (string, error) {
+// check, when non-nil, runs in the first section and again in the one that publishes the write.
+func (s *storage) write(ctx context.Context, reads []string, name string, check func() error, open func() (io.Reader, meta, error)) (string, error) {
+	if check == nil {
+		check = func() error { return nil }
+	}
 	if _, ok := s.fsys.(wfs.RenameFS); !ok {
 		var (
 			etag string
 			ran  bool
 		)
 		err := s.lockReading(ctx, reads, []string{name}, func() error {
+			if err := check(); err != nil {
+				return err
+			}
 			src, m, err := open()
 			if err != nil {
 				return err
@@ -533,6 +556,9 @@ func (s *storage) write(ctx context.Context, reads []string, name string, open f
 		p   *pending
 	)
 	err := s.lockReading(ctx, reads, []string{name}, func() (err error) {
+		if err = check(); err != nil {
+			return err
+		}
 		if src, m, err = open(); err != nil {
 			return err
 		}
@@ -544,7 +570,12 @@ func (s *storage) write(ctx context.Context, reads []string, name string, open f
 		etag, err = p.stream(src, m)
 	}
 	if err == nil {
-		err = s.lockNames(ctx, []string{name}, func() error { return s.commit(p) })
+		err = s.lockNames(ctx, []string{name}, func() error {
+			if err := check(); err != nil {
+				return err
+			}
+			return s.commit(p)
+		})
 	}
 	if err != nil {
 		s.abandon(ctx, p)
@@ -747,7 +778,7 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 		}
 	}()
 
-	_, err := s.write(ctx, []string{src}, dst, func() (io.Reader, meta, error) {
+	_, err := s.write(ctx, []string{src}, dst, nil, func() (io.Reader, meta, error) {
 		srcObj, body, err := s.openSource(src)
 		if err != nil {
 			return nil, meta{}, err

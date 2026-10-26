@@ -264,6 +264,12 @@ A pre-v0.18.0 s2-server kept both values as `s2-etag` and `s2-content-type` meta
 
 On `s3` and `gcs` that lift happens only for an object carrying `s2-etag`, which makes the name reserved on those roots. s2-server drops an incoming `x-amz-meta-s2-etag` header so a client cannot trigger it, but a library caller that writes the key itself gets its object read as a pre-v0.18.0 write, with `s2-content-type` promoted to `ContentType()`. All of this is scheduled for removal in v1.0.0 ([#247](https://github.com/mojatter/s2/issues/247)).
 
+### Conditional writes
+
+`s2.UploadOptions` carries `IfMatch`, an ETag in the quoted form `Object.ETag` reports, and `IfNoneMatch`, which takes only `"*"`. `Upload` then writes only while the key still holds that ETag, or no object; a failed condition wraps `s2.ErrPreconditionFailed` and `IfMatch` on a missing key wraps `s2.ErrNotExist`, leaving the key as it was. `osfs` and `memfs` check the condition under the name's lock in both write sections (in the single one, on a filesystem without `Rename`), so a write that lands while the body streams fails the conditional one. `s3`, `gcs` and `azblob` answer `errors.ErrUnsupported` to a conditional call for now ([#450](https://github.com/mojatter/s2/issues/450)), and so does the `Put`-and-`Get` fallback, which cannot hold a condition until the write lands.
+
+s2-server passes `If-Match` and `If-None-Match` on PutObject, CopyObject and CompleteMultipartUpload, as S3 does, answering `412 PreconditionFailed` when the condition fails, `404 NoSuchKey` for `If-Match` on a missing key, and `501 NotImplemented` when the backend cannot hold the condition or `If-None-Match` is anything but `*`. A refused CompleteMultipartUpload keeps the upload, so the client can retry it.
+
 ### Metadata names on azblob
 
 Azure accepts only metadata names that are valid C# identifiers — letters, digits and `_`, not starting with a digit. A name containing `-` or `.` is rejected with `400 InvalidMetadata`, so `x-amz-meta-my-key` fails on an `azblob` root where it succeeds elsewhere ([#246](https://github.com/mojatter/s2/issues/246)). s2 passes names through unchanged rather than encoding them.

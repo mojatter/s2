@@ -194,7 +194,7 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 		}
 	}
 
-	// Complete carries no headers; they were recorded at initiate time.
+	// Complete carries no metadata headers; they were recorded at initiate time.
 	gen, ok := bucketGeneration(s, w, r, bucketName)
 	if !ok {
 		return
@@ -233,7 +233,7 @@ func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *h
 
 	// The object's ETag is whatever the backend stored, not S3's md5-of-md5s-N form.
 	pr := &partsReader{parts: partObjs}
-	res, err := s2.Upload(ctx, strg, s2.NewObjectReader(key, pr, totalLen, s2.WithMetadata(md), s2.WithContentType(contentType)), s2.UploadOptions{})
+	res, err := s2.Upload(ctx, strg, s2.NewObjectReader(key, pr, totalLen, s2.WithMetadata(md), s2.WithContentType(contentType)), uploadConditions(r))
 	if err != nil {
 		_ = pr.Close()
 		writeUploadError(w, r, err)
