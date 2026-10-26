@@ -598,6 +598,14 @@ func TestStorageUploadConditions(ctx context.Context, strg s2.Storage) error {
 	defer func() { _ = strg.Delete(ctx, name) }()
 
 	if _, err := s2.Upload(ctx, strg, s2.NewObjectBytes(name, []byte("first")), s2.UploadOptions{IfNoneMatch: "*"}); errors.Is(err, errors.ErrUnsupported) {
+		// Unsupported must mean unwritten.
+		ok, err := strg.Exists(ctx, name)
+		if err != nil {
+			return fmt.Errorf("Exists(%q) failed: %w", name, err)
+		}
+		if ok {
+			return fmt.Errorf("Upload(%q) answered %w but wrote the key", name, errors.ErrUnsupported)
+		}
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("Upload(%q) with IfNoneMatch over no object failed: %w", name, err)
