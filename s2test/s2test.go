@@ -592,23 +592,13 @@ func checkOpenSinceLookup(ctx context.Context, strg s2.Storage, name, caseName s
 }
 
 // TestStorageUploadConditions validates that Upload writes only while UploadOptions' conditions hold and leaves the key as it was otherwise.
-// A backend answering errors.ErrUnsupported to a conditional Upload passes, as the Uploader contract allows.
+// A backend may answer errors.ErrUnsupported to any condition, as the Uploader contract allows, as long as it writes nothing.
 func TestStorageUploadConditions(ctx context.Context, strg s2.Storage) error {
 	const name = "s2test-upload-conditions.txt"
 	defer func() { _ = strg.Delete(ctx, name) }()
 
-	if _, err := s2.Upload(ctx, strg, s2.NewObjectBytes(name, []byte("first")), s2.UploadOptions{IfNoneMatch: "*"}); errors.Is(err, errors.ErrUnsupported) {
-		// Unsupported must mean unwritten.
-		ok, err := strg.Exists(ctx, name)
-		if err != nil {
-			return fmt.Errorf("Exists(%q) failed: %w", name, err)
-		}
-		if ok {
-			return fmt.Errorf("Upload(%q) answered %w but wrote the key", name, errors.ErrUnsupported)
-		}
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("Upload(%q) with IfNoneMatch over no object failed: %w", name, err)
+	if err := strg.Put(ctx, s2.NewObjectBytes(name, []byte("first"))); err != nil {
+		return fmt.Errorf("Put(%q) failed: %w", name, err)
 	}
 	cur, err := strg.Get(ctx, name)
 	if err != nil {
@@ -658,6 +648,22 @@ func TestStorageUploadConditions(ctx context.Context, strg s2.Storage) error {
 		errs = append(errs, fmt.Sprintf("IfMatch over no object: Exists(%q) failed: %v", name, err))
 	} else if ok {
 		errs = append(errs, fmt.Sprintf("IfMatch over no object: %q exists after a failed Upload", name))
+	}
+	switch _, err := s2.Upload(ctx, strg, s2.NewObjectBytes(name, []byte("created")), s2.UploadOptions{IfNoneMatch: "*"}); {
+	case errors.Is(err, errors.ErrUnsupported):
+		if ok, err := strg.Exists(ctx, name); err != nil {
+			errs = append(errs, fmt.Sprintf("IfNoneMatch over no object: Exists(%q) failed: %v", name, err))
+		} else if ok {
+			errs = append(errs, fmt.Sprintf("IfNoneMatch over no object: %q exists after an unsupported Upload", name))
+		}
+	case err != nil:
+		errs = append(errs, fmt.Sprintf("IfNoneMatch over no object: Upload failed: %v", err))
+	default:
+		if got, err := getBody(ctx, strg, name); err != nil {
+			errs = append(errs, fmt.Sprintf("IfNoneMatch over no object: reading %q failed: %v", name, err))
+		} else if got != "created" {
+			errs = append(errs, fmt.Sprintf("IfNoneMatch over no object: %q holds %q, expected %q", name, got, "created"))
+		}
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("TestStorageUploadConditions found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
