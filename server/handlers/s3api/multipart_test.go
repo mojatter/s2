@@ -948,7 +948,7 @@ func TestPartsReader_MissingPart(t *testing.T) {
 
 	_, err := io.ReadAll(pr)
 	require.ErrorIs(t, err, server.ErrNoSuchUpload)
-	code, _, status := uploadErrorToS3Error(fmt.Errorf("failed to write temp file: %w", err))
+	code, _, status := uploadErrorToS3Error(fmt.Errorf("failed to write temp file: %w", err), false)
 	assert.Equal(t, "NoSuchUpload", code)
 	assert.Equal(t, http.StatusNotFound, status)
 }

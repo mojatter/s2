@@ -2,6 +2,7 @@ package s3api
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -164,6 +165,7 @@ func (s *UtilsTestSuite) TestUploadErrorToS3Error() {
 	testCases := []struct {
 		caseName    string
 		err         error
+		conditional bool
 		wantCode    string
 		wantMessage string
 		wantStatus  int
@@ -172,10 +174,13 @@ func (s *UtilsTestSuite) TestUploadErrorToS3Error() {
 		// A storage read cut short, as in CopyObject or CompleteMultipartUpload, is the server's and stays retryable.
 		{caseName: "storage read cut short", err: fmt.Errorf("failed to write temp file: %w", io.ErrUnexpectedEOF), wantCode: "InternalError", wantMessage: msgInternalError, wantStatus: http.StatusInternalServerError},
 		{caseName: "etag unknown", err: fmt.Errorf("%w: key", s2.ErrUnknownETag), wantCode: "InternalError", wantMessage: msgInternalError, wantStatus: http.StatusInternalServerError},
+		{caseName: "precondition failed", err: fmt.Errorf("%w: key", s2.ErrPreconditionFailed), conditional: true, wantCode: "PreconditionFailed", wantMessage: msgPreconditionFailed, wantStatus: http.StatusPreconditionFailed},
+		{caseName: "unsupported condition", err: fmt.Errorf("s3: conditional upload: %w", errors.ErrUnsupported), conditional: true, wantCode: "NotImplemented", wantMessage: "A header you provided implies functionality that is not implemented", wantStatus: http.StatusNotImplemented},
+		{caseName: "unsupported without a condition", err: fmt.Errorf("write: %w", errors.ErrUnsupported), wantCode: "InternalError", wantMessage: msgInternalError, wantStatus: http.StatusInternalServerError},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			code, message, status := uploadErrorToS3Error(tc.err)
+			code, message, status := uploadErrorToS3Error(tc.err, tc.conditional)
 			s.Equal(tc.wantCode, code)
 			s.Equal(tc.wantMessage, message)
 			s.Equal(tc.wantStatus, status)
@@ -301,17 +306,21 @@ func (s *UtilsTestSuite) TestWriteS2Error() {
 func (s *UtilsTestSuite) TestLogS3Error() {
 	testCases := []struct {
 		caseName string
+		status   int // 404 if zero
 		attrs    []any
 		wantLog  string
 		denyLog  string
 	}{
 		{caseName: "no attrs", denyLog: "key="},
 		{caseName: "key attr", attrs: []any{"key", "a/b"}, wantLog: "key=a/b"},
+		{caseName: "a client error at debug", wantLog: "level=DEBUG"},
+		{caseName: "a 501 at warn", status: http.StatusNotImplemented, wantLog: "level=WARN"},
+		{caseName: "a server fault at error", status: http.StatusInternalServerError, wantLog: "level=ERROR"},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
 			buf := captureSlog(s.T())
-			logS3Error(httptest.NewRequest(http.MethodPost, "/b?delete", nil), "NoSuchKey", http.StatusNotFound, s2.ErrNotExist, tc.attrs...)
+			logS3Error(httptest.NewRequest(http.MethodPost, "/b?delete", nil), "NoSuchKey", cmp.Or(tc.status, http.StatusNotFound), s2.ErrNotExist, tc.attrs...)
 			s.Contains(buf.String(), "code=NoSuchKey")
 			if tc.wantLog != "" {
 				s.Contains(buf.String(), tc.wantLog)
