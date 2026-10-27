@@ -278,7 +278,7 @@ func TestStorageGetPutRejectsAFailedPut(t *testing.T) {
 }
 
 // cyclingStorage ignores After and hands out a fresh token on every page, so a walk by NextAfter never ends on its own.
-// With emptyTail, a page resumed by a token is empty instead.
+// With emptyTail, a page resumed by a token is empty instead. A prefixed List passes through uncounted.
 type cyclingStorage struct {
 	s2.Storage
 	emptyTail bool
@@ -286,6 +286,9 @@ type cyclingStorage struct {
 }
 
 func (s *cyclingStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	if opts.Prefix != "" {
+		return s.Storage.List(ctx, opts)
+	}
 	s.calls++
 	next := "token" + strconv.Itoa(s.calls)
 	if s.emptyTail && opts.After != "" {
@@ -327,6 +330,96 @@ func TestStorageListStopsOnCyclingTokens(t *testing.T) {
 			}
 			if strg.calls > 3 {
 				t.Errorf("List called %d times; the walk must stop at the repeat", strg.calls)
+			}
+		})
+	}
+}
+
+// objectPrefixStorage misanswers a non-recursive List whose prefix names an object: with an error, a token or that object.
+// dirs are added to the first page of the root, as if those directories existed.
+type objectPrefixStorage struct {
+	s2.Storage
+	fails bool
+	next  string
+	dirs  []string
+}
+
+func (s *objectPrefixStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	name := strings.TrimSuffix(opts.Prefix, "/")
+	if name == "" && opts.Limit == 0 && opts.StartAfter == "" {
+		res, err := s.Storage.List(ctx, opts)
+		res.CommonPrefixes = append(res.CommonPrefixes, s.dirs...)
+		return res, err
+	}
+	if name == "" || opts.Recursive {
+		return s.Storage.List(ctx, opts)
+	}
+	if ok, err := s.Exists(ctx, name); err != nil || !ok {
+		return s.Storage.List(ctx, opts)
+	}
+	if s.fails {
+		return s2.ListResult{}, errors.New("not a directory")
+	}
+	if s.next != "" {
+		return s2.ListResult{NextAfter: s.next}, nil
+	}
+	obj, err := s.Get(ctx, name)
+	return s2.ListResult{Objects: []s2.Object{obj}}, err
+}
+
+func TestStorageListObjectPrefix(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		fails    bool
+		next     string
+		dirs     []string
+		wantErrs []string
+		notWant  string
+	}{
+		{caseName: "an error", fails: true, wantErrs: []string{
+			`List(prefix="a.txt") naming an object failed: not a directory`,
+			`List(prefix="a.txt/") naming an object failed: not a directory`,
+		}},
+		{caseName: "the object", wantErrs: []string{
+			`List(prefix="a.txt") naming an object returned 1 entries, expected none`,
+			`List(prefix="a.txt/") naming an object returned 1 entries, expected none`,
+		}},
+		{caseName: "a token", next: "tok", wantErrs: []string{
+			`List(prefix="a.txt") naming an object returned an empty page with NextAfter "tok"`,
+			`List(prefix="a.txt/") naming an object returned an empty page with NextAfter "tok"`,
+		}},
+		{caseName: "a directory too", fails: true, dirs: []string{"a.txt/"}, wantErrs: []string{
+			`List(prefix="b.txt") naming an object failed: not a directory`,
+			`List(prefix="b.txt/") naming an object failed: not a directory`,
+		}, notWant: `prefix="a.txt`},
+		{caseName: "every name a directory", fails: true, dirs: []string{"a.txt/", "b.txt/"}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			ctx := t.Context()
+			strg := &objectPrefixStorage{Storage: newMemFS(t), fails: tc.fails, next: tc.next, dirs: tc.dirs}
+			for _, name := range []string{"a.txt", "b.txt"} {
+				if err := strg.Put(ctx, s2.NewObjectBytes(name, []byte("x"))); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := TestStorageList(ctx, strg, "", "a.txt", "b.txt")
+			if len(tc.wantErrs) == 0 {
+				if err != nil {
+					t.Fatalf("no name left to probe, got: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("a misanswered prefix naming an object must fail")
+			}
+			for _, want := range tc.wantErrs {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("want an error containing %q, got: %v", want, err)
+				}
+			}
+			if tc.notWant != "" && strings.Contains(err.Error(), tc.notWant) {
+				t.Errorf("want no error containing %q, got: %v", tc.notWant, err)
 			}
 		})
 	}
