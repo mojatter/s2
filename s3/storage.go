@@ -360,6 +360,26 @@ func mapNotExist(err error, name string) error {
 	return err
 }
 
+// mapConditionErr maps PreconditionFailed, NotImplemented and NoSuchKey under IfMatch on a conditional call to s2's errors.
+func mapConditionErr(err error, name string, opts s2.UploadOptions) error {
+	if !opts.Conditional() {
+		return err
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "PreconditionFailed":
+			return fmt.Errorf("%w: %s: %w", s2.ErrPreconditionFailed, name, err)
+		case "NotImplemented":
+			return fmt.Errorf("%w: %s: %w", errors.ErrUnsupported, name, err)
+		}
+	}
+	if opts.IfMatch != "" {
+		return mapNotExist(err, name)
+	}
+	return err
+}
+
 var _ s2.Uploader = (*storage)(nil)
 
 func (s *storage) Put(ctx context.Context, obj s2.Object) error {
@@ -372,9 +392,8 @@ func (s *storage) Upload(ctx context.Context, obj s2.Object, opts s2.UploadOptio
 	if err := s2.ValidateName(obj.Name()); err != nil {
 		return s2.UploadResult{}, err
 	}
-	// Conditional writes are not wired to the provider yet (#450).
-	if opts.Conditional() {
-		return s2.UploadResult{}, fmt.Errorf("s3: conditional upload: %w", errors.ErrUnsupported)
+	if err := opts.Validate(); err != nil {
+		return s2.UploadResult{}, err
 	}
 	rc, err := obj.Open()
 	if err != nil {
@@ -404,9 +423,16 @@ func (s *storage) Upload(ctx context.Context, obj s2.Object, opts s2.UploadOptio
 	if ct := obj.ContentType(); ct != "" {
 		input.ContentType = aws.String(ct)
 	}
+	// The provider holds the conditions until the write lands.
+	if opts.IfMatch != "" {
+		input.IfMatch = aws.String(opts.IfMatch)
+	}
+	if opts.IfNoneMatch != "" {
+		input.IfNoneMatch = aws.String(opts.IfNoneMatch)
+	}
 	out, err := s.client.PutObject(ctx, input)
 	if err != nil {
-		return s2.UploadResult{}, err
+		return s2.UploadResult{}, mapConditionErr(err, obj.Name(), opts)
 	}
 	return s2.UploadResult{ETag: aws.ToString(out.ETag)}, nil
 }
