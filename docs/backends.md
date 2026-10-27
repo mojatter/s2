@@ -99,6 +99,10 @@ When `S3Config` is nil or all fields are empty, the standard AWS SDK credential 
 
 `Open` and `OpenRange` read only the version `Get` or `List` saw: they send its ETag as If-Match and compare the ETag of the response, so a key replaced since then fails with `s2.ErrModified` rather than serving another body. A metadata update that gives the object a new ETag fails them too, which happens for an object whose ETag is not the MD5 of its body, such as one uploaded in parts or stored with SSE-KMS or SSE-C.
 
+`Copy`, `Move` and `PutMetadata` each send one CopyObject, which the provider refuses for a source above 5 GiB. s2-server's CopyObject is not affected: it streams the source through `Upload`.
+
+A body of 16 MiB or more goes up as a multipart upload, which s2 aborts when it fails. One that dies before the Abort, with the process, leaves its parts on the provider, billed until removed; a lifecycle rule that aborts incomplete multipart uploads (`AbortIncompleteMultipartUpload` on AWS) cleans them up.
+
 ## GCS
 
 When using the `gcs` backend, authentication uses [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) by default. Run `gcloud auth application-default login` for local development.
@@ -266,7 +270,7 @@ When `ContentType()` is `""`, s2-server guesses from the key's extension and fal
 
 The console's upload form is the one place that guesses before storing: it keeps the type the browser sent, unless that is missing or `application/octet-stream`, in which case it stores the extension's type — and nothing at all when the key's extension says nothing. The S3 API stores only what the client sent, so the same key can end up with a stored type through the console and none through `PutObject`.
 
-`ETag` values are quoted, as S3 returns them. s2 never assembles the composite `md5-of-md5s-N` form for multipart uploads; the ETag is whatever the backend stored for the whole assembled body. On an `s3` root with SSE-KMS or SSE-C the provider's ETag is not the body's MD5, and s2 passes it through unchanged. Pass `s2test.WithOpaqueETag` when running the conformance suite against such a root, or its ETag assertions fail on a correct implementation.
+`ETag` values are quoted, as S3 returns them. s2 never assembles the composite `md5-of-md5s-N` form for multipart uploads; the ETag is whatever the backend stored for the whole assembled body. An `s3` root uploads a body of 16 MiB or more to the provider in parts of 8 MiB, larger above 78 GiB so that no upload passes 10,000 parts, so that ETag takes the provider's `"<hex>-N"` form, where N counts those parts, not the client's. On an `s3` root with SSE-KMS or SSE-C the provider's ETag is not the body's MD5, and s2 passes it through unchanged. Pass `s2test.WithOpaqueETag` when running the conformance suite against such a root, or its ETag assertions fail on a correct implementation.
 
 All four backends satisfy the optional `s2.Uploader` interface, so `s2.Upload` reports the stored ETag without a read-back: the provider's own value on `s3` and `gcs`, and on `azblob` the `Content-MD5` s2 computes while streaming and sends with the blob, which is what a later read derives its ETag from. `osfs` and `memfs` report the MD5 they just wrote to the sidecar. s2-server uses it for PutObject, CopyObject, UploadPart and CompleteMultipartUpload, which is why those now answer the same ETag a later HEAD does, even where the provider does not derive it from the body. A backend that does not implement `Uploader` still gets the right answer: the free function falls back to `Put` followed by `Get`.
 

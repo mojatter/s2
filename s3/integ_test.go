@@ -3,7 +3,9 @@
 package s3
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"testing"
 
@@ -105,6 +107,36 @@ func (s *S3IntegrationSuite) TestUploadConditions() {
 	s.Require().NoError(s.strg.Delete(ctx, name))
 	_, err = s2.Upload(ctx, s.strg, s2.NewObjectBytes(name, []byte("fifth")), s2.UploadOptions{IfMatch: res.ETag})
 	s.Require().ErrorIs(err, s2.ErrNotExist)
+}
+
+// A body above the multipart threshold goes up in parts, with the conditions held at CompleteMultipartUpload.
+func (s *S3IntegrationSuite) TestUploadLargeBody() {
+	ctx := context.Background()
+	const name = "integ-upload-large.bin"
+	defer func() { _ = s.strg.Delete(ctx, name) }()
+
+	body := bytes.Repeat([]byte("0123456789abcdef"), (17<<20)/16)
+	upload := func(opts s2.UploadOptions) (s2.UploadResult, error) {
+		// NopCloser hides Seek, as the s3api handler's bodies do.
+		return s2.Upload(ctx, s.strg, s2.NewObjectReader(name, io.NopCloser(bytes.NewReader(body)), uint64(len(body))), opts)
+	}
+	res, err := upload(s2.UploadOptions{IfNoneMatch: "*"})
+	s.Require().NoError(err)
+	_, err = upload(s2.UploadOptions{IfNoneMatch: "*"})
+	s.Require().ErrorIs(err, s2.ErrPreconditionFailed)
+	res, err = upload(s2.UploadOptions{IfMatch: res.ETag})
+	s.Require().NoError(err)
+
+	got, err := s.strg.Get(ctx, name)
+	s.Require().NoError(err)
+	s.Equal(res.ETag, got.ETag())
+	rc, err := got.Open()
+	s.Require().NoError(err)
+	defer func() { _ = rc.Close() }()
+
+	stored, err := io.ReadAll(rc)
+	s.Require().NoError(err)
+	s.True(bytes.Equal(body, stored))
 }
 
 func (s *S3IntegrationSuite) TestGetNotExist() {
