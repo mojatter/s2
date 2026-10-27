@@ -614,6 +614,9 @@ func TestStorageUploadConditions(ctx context.Context, strg s2.Storage) error {
 	}{
 		{caseName: "IfNoneMatch over an object", opts: s2.UploadOptions{IfNoneMatch: "*"}, want: s2.ErrPreconditionFailed},
 		{caseName: "IfMatch another ETag", opts: s2.UploadOptions{IfMatch: `"s2test-stale"`}, want: s2.ErrPreconditionFailed},
+		// S3 answers 501 to both.
+		{caseName: "IfMatch any", opts: s2.UploadOptions{IfMatch: "*"}, want: errors.ErrUnsupported},
+		{caseName: "both conditions", opts: s2.UploadOptions{IfMatch: etag, IfNoneMatch: "*"}, want: errors.ErrUnsupported},
 		{caseName: "IfMatch the ETag", opts: s2.UploadOptions{IfMatch: etag}},
 	}
 	for _, tc := range testCases {

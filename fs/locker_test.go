@@ -2,6 +2,9 @@ package fs
 
 import (
 	"context"
+	"crypto/md5" // #nosec G501 -- the fs ETag is an MD5
+	"errors"
+	"fmt"
 	iofs "io/fs"
 	"os"
 	"path"
@@ -403,6 +406,8 @@ func TestWritesHoldTheLock(t *testing.T) {
 	move := func(src, dst string) func(context.Context, s2.Storage) error {
 		return func(ctx context.Context, strg s2.Storage) error { return s2.Move(ctx, strg, src, dst) }
 	}
+	// The ETag of the "x" body every seed writes.
+	seedETag := fmt.Sprintf(`"%x"`, md5.Sum([]byte("x"))) // #nosec G401 -- the fs ETag is an MD5
 	testCases := []struct {
 		caseName string
 		seed     []string // objects put through the root before each run; a/b/x if empty
@@ -427,7 +432,7 @@ func TestWritesHoldTheLock(t *testing.T) {
 			caseName: "conditional put checks under the name's lock",
 			reads:    true,
 			op: func(ctx context.Context, strg s2.Storage) error {
-				_, err := s2.Upload(ctx, strg, s2.NewObjectBytes("a/b/x", []byte("v")), s2.UploadOptions{IfMatch: "*"})
+				_, err := s2.Upload(ctx, strg, s2.NewObjectBytes("a/b/x", []byte("v")), s2.UploadOptions{IfMatch: seedETag})
 				return err
 			},
 			want:   []lockReq{s("."), x("A/B/X"), s("."), x("A/B/X")},
@@ -439,7 +444,7 @@ func TestWritesHoldTheLock(t *testing.T) {
 			noRename: true,
 			reads:    true,
 			op: func(ctx context.Context, strg s2.Storage) error {
-				_, err := s2.Upload(ctx, strg, s2.NewObjectBytes("a/b/x", []byte("v")), s2.UploadOptions{IfMatch: "*"})
+				_, err := s2.Upload(ctx, strg, s2.NewObjectBytes("a/b/x", []byte("v")), s2.UploadOptions{IfMatch: seedETag})
 				return err
 			},
 			want:   []lockReq{s("."), x("A/B/X")},
@@ -778,6 +783,33 @@ func TestDirLockerLeavesNoEntry(t *testing.T) {
 			l := dirLockerFor(dir)
 			tc.run(t, l, NewStorageDir(dir))
 			require.False(t, registered(l))
+		})
+	}
+}
+
+// An unsupported condition is refused before the write waits for any lock.
+func TestUploadRefusesBeforeLocking(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		opts     s2.UploadOptions
+	}{
+		{caseName: "IfMatch any", opts: s2.UploadOptions{IfMatch: "*"}},
+		{caseName: "both conditions", opts: s2.UploadOptions{IfMatch: `"a"`, IfNoneMatch: "*"}},
+		{caseName: "IfNoneMatch naming an ETag", opts: s2.UploadOptions{IfNoneMatch: `"a"`}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			lk := newNameLocker()
+			strg := NewStorageFS(s2.Config{Type: s2.TypeMemFS}, memfs.New(), WithNameLocker(lk))
+			unlock, err := lk.Lock(t.Context(), ".")
+			require.NoError(t, err)
+			defer unlock()
+
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+			defer cancel()
+
+			_, err = s2.Upload(ctx, strg, s2.NewObjectBytes("k.txt", []byte("v")), tc.opts)
+			require.ErrorIs(t, err, errors.ErrUnsupported)
 		})
 	}
 }

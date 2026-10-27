@@ -494,6 +494,10 @@ func (s *storage) Upload(ctx context.Context, obj s2.Object, opts s2.UploadOptio
 	if err := validateName(name); err != nil {
 		return s2.UploadResult{}, err
 	}
+	// Before the lock, as the other backends refuse before any request.
+	if err := opts.Validate(); err != nil {
+		return s2.UploadResult{}, err
+	}
 	rc, err := obj.Open()
 	if err != nil {
 		return s2.UploadResult{}, err
