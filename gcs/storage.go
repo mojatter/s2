@@ -237,9 +237,9 @@ func (s *gcsStorage) Upload(ctx context.Context, obj s2.Object, opts s2.UploadOp
 	if err := s2.ValidateName(obj.Name()); err != nil {
 		return s2.UploadResult{}, err
 	}
-	// Conditional writes are not wired to the provider yet (#450).
-	if opts.Conditional() {
-		return s2.UploadResult{}, fmt.Errorf("gcs: conditional upload: %w", errors.ErrUnsupported)
+	conds, err := s.uploadConds(ctx, obj.Name(), opts)
+	if err != nil {
+		return s2.UploadResult{}, err
 	}
 	rc, err := obj.Open()
 	if err != nil {
@@ -251,21 +251,59 @@ func (s *gcsStorage) Upload(ctx context.Context, obj s2.Object, opts s2.UploadOp
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	w := s.client.bucket(s.bucket).object(s.key(obj.Name())).newWriter(wctx, obj.Metadata(), obj.ContentType())
+	w := s.client.bucket(s.bucket).object(s.key(obj.Name())).newWriter(wctx, obj.Metadata(), obj.ContentType(), conds)
 
 	if _, err := io.Copy(w, rc); err != nil {
 		cancel()
 		_ = w.Close()
-		return s2.UploadResult{}, fmt.Errorf("gcs: put %q: %w", obj.Name(), err)
+		// A resumable upload, for a body past the chunk size, reports a failed precondition from Write.
+		return s2.UploadResult{}, mapPrecondition(fmt.Errorf("gcs: put %q: %w", obj.Name(), err), obj.Name(), conds != nil)
 	}
 	if err := w.Close(); err != nil {
-		return s2.UploadResult{}, err
+		return s2.UploadResult{}, mapPrecondition(err, obj.Name(), conds != nil)
 	}
 	attrs := w.attrs()
 	if attrs == nil {
 		return s2.UploadResult{}, nil
 	}
 	return s2.UploadResult{ETag: objectETag(attrs)}, nil
+}
+
+// mapPrecondition wraps the provider's 412 to a conditional write as s2.ErrPreconditionFailed.
+func mapPrecondition(err error, name string, conditional bool) error {
+	var apiErr *googleapi.Error
+	if conditional && errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed {
+		return fmt.Errorf("%w: %s: %w", s2.ErrPreconditionFailed, name, err)
+	}
+	return err
+}
+
+// uploadConds turns opts into the writer's preconditions: an ETag is judged on the attributes read here and held by their generation.
+func (s *gcsStorage) uploadConds(ctx context.Context, name string, opts s2.UploadOptions) (*storage.Conditions, error) {
+	if !opts.Conditional() {
+		return nil, nil
+	}
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
+	if opts.IfMatch == "" {
+		return &storage.Conditions{DoesNotExist: true}, nil
+	}
+	attrs, err := s.client.bucket(s.bucket).object(s.key(name)).attrs(ctx)
+	if errors.Is(err, storage.ErrObjectNotExist) {
+		return nil, opts.Check(name, "", false)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := opts.Check(name, objectETag(attrs), true); err != nil {
+		return nil, err
+	}
+	// Without a generation there is nothing to hold the write to; the SDK refuses empty conditions.
+	if attrs.Generation == 0 {
+		return nil, fmt.Errorf("gcs: IfMatch: endpoint reports no generation: %w", errors.ErrUnsupported)
+	}
+	return &storage.Conditions{GenerationMatch: attrs.Generation}, nil
 }
 
 // PutMetadata replaces the user metadata; a Content-Type under the legacy s2-content-type key moves to the object's own.

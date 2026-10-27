@@ -33,7 +33,8 @@ type gcsObject interface {
 	attrs(ctx context.Context) (*storage.ObjectAttrs, error)
 	// newRangeReader reads length bytes from offset, or to the end when length is negative, and reports the generation it read; a nonzero generation must still be the live one.
 	newRangeReader(ctx context.Context, offset, length, generation int64) (io.ReadCloser, int64, error)
-	newWriter(ctx context.Context, metadata map[string]string, contentType string) gcsWriter
+	// newWriter writes the object, under conds when non-nil.
+	newWriter(ctx context.Context, metadata map[string]string, contentType string, conds *storage.Conditions) gcsWriter
 	patch(ctx context.Context, p objectPatch) error
 	copyTo(ctx context.Context, dst gcsObject) error
 	delete(ctx context.Context) error
@@ -113,8 +114,12 @@ func (o *sdkObject) newRangeReader(ctx context.Context, offset, length, generati
 	return r, r.Attrs.Generation, nil
 }
 
-func (o *sdkObject) newWriter(ctx context.Context, metadata map[string]string, contentType string) gcsWriter {
-	w := o.obj.NewWriter(ctx)
+func (o *sdkObject) newWriter(ctx context.Context, metadata map[string]string, contentType string, conds *storage.Conditions) gcsWriter {
+	obj := o.obj
+	if conds != nil {
+		obj = obj.If(*conds)
+	}
+	w := obj.NewWriter(ctx)
 	if len(metadata) > 0 {
 		w.Metadata = metadata
 	}
