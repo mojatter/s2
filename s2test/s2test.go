@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"path"
 	"slices"
 	"sort"
@@ -1400,6 +1401,118 @@ func TestStorageNameEscape(ctx context.Context, strg s2.Storage) error {
 
 	if len(errs) > 0 {
 		return fmt.Errorf("TestStorageNameEscape found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
+	}
+	return nil
+}
+
+// TestStorageSubConsistency validates that a Sub is a view of its parent: an object written, described or deleted through one is the same through the other.
+func TestStorageSubConsistency(ctx context.Context, strg s2.Storage) error {
+	const dir = "s2test-sub"
+	defer func() { _ = strg.DeleteRecursive(ctx, dir+"/") }()
+
+	sub, err := strg.Sub(ctx, dir)
+	if err != nil {
+		return fmt.Errorf("Sub(%q) failed: %w", dir, err)
+	}
+	type view struct {
+		label, tag string
+		strg       s2.Storage
+		prefix     string
+	}
+	root, inner := view{"root", "root", strg, dir + "/"}, view{fmt.Sprintf("Sub(%q)", dir), "sub", sub, ""}
+
+	var errs []string
+	errorf := func(format string, args ...any) {
+		errs = append(errs, fmt.Sprintf(format, args...))
+	}
+	// compare reports how name differs between the writer and the reader.
+	compare := func(step string, writer, reader view, name string, md s2.Metadata) {
+		want, err := writer.strg.Get(ctx, writer.prefix+name)
+		if err != nil {
+			errorf("%s: %s.Get(%q) failed: %v", step, writer.label, writer.prefix+name, err)
+			return
+		}
+		got, err := reader.strg.Get(ctx, reader.prefix+name)
+		if err != nil {
+			errorf("%s: %s.Get(%q) failed: %v", step, reader.label, reader.prefix+name, err)
+			return
+		}
+		if got.ETag() != want.ETag() {
+			errorf("%s: %s.Get(%q).ETag() = %q, %s answers %q", step, reader.label, reader.prefix+name, got.ETag(), writer.label, want.ETag())
+		}
+		if got.ContentType() != want.ContentType() || got.ContentType() != "text/plain" {
+			errorf("%s: %s.Get(%q).ContentType() = %q, %s answers %q, want %q", step, reader.label, reader.prefix+name, got.ContentType(), writer.label, want.ContentType(), "text/plain")
+		}
+		// The views must agree; the writer must hold md, perhaps beside keys of the backend's own.
+		held := true
+		for k, v := range md {
+			if w, ok := want.Metadata().Get(k); !ok || w != v {
+				held = false
+			}
+		}
+		if !maps.Equal(got.Metadata(), want.Metadata()) || !held {
+			errorf("%s: %s.Get(%q).Metadata() = %v, %s answers %v, want %v", step, reader.label, reader.prefix+name, got.Metadata(), writer.label, want.Metadata(), md)
+		}
+	}
+
+	pairs := []struct {
+		name           string
+		writer, reader view
+	}{
+		{"a.txt", root, inner},
+		{"b.txt", inner, root},
+	}
+	for _, p := range pairs {
+		md := s2.Metadata{"writer": p.writer.tag}
+		obj := s2.NewObjectBytes(p.writer.prefix+p.name, []byte("body of "+p.name), s2.WithContentType("text/plain"), s2.WithMetadata(md))
+		if err := p.writer.strg.Put(ctx, obj); err != nil {
+			return fmt.Errorf("%s.Put(%q) failed: %w", p.writer.label, obj.Name(), err)
+		}
+		compare("Put", p.writer, p.reader, p.name, md)
+	}
+	// PutMetadata through the other view than the one that wrote the object.
+	for _, p := range pairs {
+		md := s2.Metadata{"described": p.reader.tag}
+		if err := p.reader.strg.PutMetadata(ctx, p.reader.prefix+p.name, md); err != nil {
+			errorf("%s.PutMetadata(%q) failed: %v", p.reader.label, p.reader.prefix+p.name, err)
+			continue
+		}
+		compare("PutMetadata", p.reader, p.writer, p.name, md)
+	}
+
+	// A non-recursive List of either view answers the same ETags.
+	etags := make([]map[string]string, 2)
+	for i, v := range []view{root, inner} {
+		res, err := v.strg.List(ctx, s2.ListOptions{Prefix: v.prefix})
+		if err != nil {
+			errorf("%s.List(prefix=%q) failed: %v", v.label, v.prefix, err)
+			continue
+		}
+		etags[i] = map[string]string{}
+		for _, o := range res.Objects {
+			etags[i][strings.TrimPrefix(o.Name(), v.prefix)] = o.ETag()
+		}
+	}
+	if etags[0] != nil && etags[1] != nil {
+		for _, p := range pairs {
+			if e0, e1 := etags[0][p.name], etags[1][p.name]; e0 == "" || e0 != e1 {
+				errorf("List: %s answers ETag %q for %q, %s answers %q", root.label, e0, p.name, inner.label, e1)
+			}
+		}
+	}
+
+	for _, p := range pairs {
+		if err := p.reader.strg.Delete(ctx, p.reader.prefix+p.name); err != nil {
+			errorf("%s.Delete(%q) failed: %v", p.reader.label, p.reader.prefix+p.name, err)
+			continue
+		}
+		if ok, err := p.writer.strg.Exists(ctx, p.writer.prefix+p.name); err != nil || ok {
+			errorf("%s.Exists(%q) after %s.Delete = %v, %v; want false", p.writer.label, p.writer.prefix+p.name, p.reader.label, ok, err)
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("TestStorageSubConsistency found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
 	}
 	return nil
 }

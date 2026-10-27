@@ -593,6 +593,23 @@ func (s *StorageTestSuite) TestS2TestNameEscape() {
 	}
 }
 
+func (s *StorageTestSuite) TestS2TestSubConsistency() {
+	testCases := []struct {
+		caseName string
+		prefix   string
+	}{
+		{caseName: "no prefix"},
+		{caseName: "with prefix", prefix: "pfx"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			_, strg := s.testMockClient()
+			strg.(*storage).prefix = tc.prefix
+			s.Require().NoError(s2test.TestStorageSubConsistency(context.Background(), strg))
+		})
+	}
+}
+
 func (s *StorageTestSuite) TestS2TestPutMetadata() {
 	_, strg := s.testMockClient()
 	s.Require().NoError(s2test.TestStoragePutMetadata(context.Background(), strg))

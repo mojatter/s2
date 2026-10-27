@@ -473,3 +473,123 @@ func TestStorageUploadConditionsPartialSupport(t *testing.T) {
 		})
 	}
 }
+
+// subStorage answers Sub with view applied to the parent's own Sub.
+type subStorage struct {
+	s2.Storage
+	view func(s2.Storage) s2.Storage
+}
+
+func (s *subStorage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
+	sub, err := s.Storage.Sub(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return s.view(sub), nil
+}
+
+// driftView answers Get with its own ETag, or with no Content-Type and metadata, List with listETag, and Delete without deleting when noDelete is set.
+type driftView struct {
+	s2.Storage
+	etag     string
+	dropMeta bool
+	listETag string
+	noDelete bool
+}
+
+func (s *driftView) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	res, err := s.Storage.List(ctx, opts)
+	if err != nil || s.listETag == "" {
+		return res, err
+	}
+	for i, o := range res.Objects {
+		res.Objects[i] = driftObject{Object: o, view: &driftView{etag: s.listETag}}
+	}
+	return res, nil
+}
+
+func (s *driftView) Delete(ctx context.Context, name string) error {
+	if s.noDelete {
+		return nil
+	}
+	return s.Storage.Delete(ctx, name)
+}
+
+func (s *driftView) Get(ctx context.Context, name string) (s2.Object, error) {
+	obj, err := s.Storage.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return driftObject{Object: obj, view: s}, nil
+}
+
+type driftObject struct {
+	s2.Object
+	view *driftView
+}
+
+func (o driftObject) ETag() string {
+	if o.view.etag != "" {
+		return o.view.etag
+	}
+	return o.Object.ETag()
+}
+
+func (o driftObject) ContentType() string {
+	if o.view.dropMeta {
+		return ""
+	}
+	return o.Object.ContentType()
+}
+
+func (o driftObject) Metadata() s2.Metadata {
+	if o.view.dropMeta {
+		return s2.Metadata{}
+	}
+	return o.Object.Metadata()
+}
+
+func TestStorageSubConsistencyRejects(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		view     func(t *testing.T) func(s2.Storage) s2.Storage
+		wantErrs []string
+	}{
+		{caseName: "a view", view: func(*testing.T) func(s2.Storage) s2.Storage { return func(sub s2.Storage) s2.Storage { return sub } }},
+		{caseName: "a copy", view: func(t *testing.T) func(s2.Storage) s2.Storage {
+			cp := newMemFS(t)
+			return func(s2.Storage) s2.Storage { return cp }
+		}, wantErrs: []string{`Put: Sub("s2test-sub").Get("a.txt") failed`, `Put: root.Get("s2test-sub/b.txt") failed`}},
+		{caseName: "another ETag", view: func(*testing.T) func(s2.Storage) s2.Storage {
+			return func(sub s2.Storage) s2.Storage { return &driftView{Storage: sub, etag: `"other"`} }
+		}, wantErrs: []string{`Put: Sub("s2test-sub").Get("a.txt").ETag() = "\"other\""`, `PutMetadata: root.Get("s2test-sub/a.txt").ETag()`}},
+		{caseName: "no metadata", view: func(*testing.T) func(s2.Storage) s2.Storage {
+			return func(sub s2.Storage) s2.Storage { return &driftView{Storage: sub, dropMeta: true} }
+		}, wantErrs: []string{`Sub("s2test-sub").Get("a.txt").ContentType() = ""`, `Sub("s2test-sub").Get("a.txt").Metadata() = map[]`}},
+		{caseName: "another ETag in List", view: func(*testing.T) func(s2.Storage) s2.Storage {
+			return func(sub s2.Storage) s2.Storage { return &driftView{Storage: sub, listETag: `"other"`} }
+		}, wantErrs: []string{`List: root answers ETag`}},
+		{caseName: "Delete does nothing", view: func(*testing.T) func(s2.Storage) s2.Storage {
+			return func(sub s2.Storage) s2.Storage { return &driftView{Storage: sub, noDelete: true} }
+		}, wantErrs: []string{`root.Exists("s2test-sub/a.txt") after Sub("s2test-sub").Delete = true`}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			err := TestStorageSubConsistency(t.Context(), &subStorage{Storage: newMemFS(t), view: tc.view(t)})
+			if len(tc.wantErrs) == 0 {
+				if err != nil {
+					t.Errorf("want no error, got: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("a Sub that is not a view of its parent must fail")
+			}
+			for _, want := range tc.wantErrs {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("want an error containing %q, got: %v", want, err)
+				}
+			}
+		})
+	}
+}

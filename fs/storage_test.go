@@ -336,6 +336,21 @@ func (s *StorageTestSuite) TestS2TestNameEscape() {
 	s.Require().NoError(s2test.TestStorageNameEscape(context.Background(), strg))
 }
 
+func (s *StorageTestSuite) TestS2TestSubConsistency() {
+	testCases := []struct {
+		caseName string
+		strg     s2.Storage
+	}{
+		{caseName: "memfs", strg: NewStorageMem(s2.Config{})},
+		{caseName: "osfs", strg: NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(s.T().TempDir()))},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.Require().NoError(s2test.TestStorageSubConsistency(context.Background(), tc.strg))
+		})
+	}
+}
+
 func (s *StorageTestSuite) TestS2TestPutMetadata() {
 	strg := NewStorageMem(s2.Config{})
 	s.Require().NoError(s2test.TestStoragePutMetadata(context.Background(), strg))
@@ -2104,7 +2119,7 @@ func (s *StorageTestSuite) TestMetaDirIsNotAnObjectName() {
 	s.Equal(s2.Metadata{"k": "v"}, obj.Metadata())
 }
 
-// Every view of a directory finds the same metadata file, whichever one wrote it (#291).
+// Every view of a directory, a DirFS on it included, finds the same metadata file, whichever one wrote it (#291).
 func (s *StorageTestSuite) TestMetaSharedAcrossViews() {
 	ctx := context.Background()
 	testCases := []struct {
@@ -2113,18 +2128,31 @@ func (s *StorageTestSuite) TestMetaSharedAcrossViews() {
 		writerName string
 		readerPath string
 		readerName string
+		dirFS      string // a view on this path is a DirFS opened on it rather than a Sub
 	}{
 		{caseName: "sub writes, root reads", writerPath: "photos", writerName: "a.txt", readerPath: "", readerName: "photos/a.txt"},
 		{caseName: "root writes, sub reads", writerPath: "", writerName: "photos/a.txt", readerPath: "photos", readerName: "a.txt"},
 		{caseName: "nested sub writes, sub reads", writerPath: "b/photos", writerName: "a.txt", readerPath: "b", readerName: "photos/a.txt"},
 		{caseName: "sub writes, nested sub reads", writerPath: "b", writerName: "photos/a.txt", readerPath: "b/photos", readerName: "a.txt"},
+		{caseName: "dirfs writes, root reads", writerPath: "photos", writerName: "a.txt", readerPath: "", readerName: "photos/a.txt", dirFS: "photos"},
+		{caseName: "root writes, dirfs reads", writerPath: "", writerName: "photos/a.txt", readerPath: "photos", readerName: "a.txt", dirFS: "photos"},
+		{caseName: "dirfs writes, sub reads", writerPath: "b/photos", writerName: "a.txt", readerPath: "b", readerName: "photos/a.txt", dirFS: "b/photos"},
+		{caseName: "sub writes, dirfs reads", writerPath: "b", writerName: "photos/a.txt", readerPath: "b/photos", readerName: "a.txt", dirFS: "b/photos"},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
 			root := NewStorageFS(s2.Config{}, memfs.New())
+			dir := s.T().TempDir()
+			if tc.dirFS != "" {
+				root = NewStorageDir(dir)
+				s.Require().NoError(os.MkdirAll(filepath.Join(dir, tc.dirFS), 0o755))
+			}
 			view := func(p string) s2.Storage {
 				if p == "" {
 					return root
+				}
+				if p == tc.dirFS {
+					return NewStorageDir(filepath.Join(dir, p))
 				}
 				sub, err := root.Sub(ctx, p)
 				s.Require().NoError(err)
