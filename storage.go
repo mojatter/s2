@@ -20,7 +20,8 @@ var (
 type ListOptions struct {
 	// Prefix restricts the listing to objects whose names begin with Prefix
 	// when Recursive is true. A non-recursive listing treats it as a
-	// directory, so every backend reads it as if it ended in "/".
+	// directory, so every backend reads it as if it ended in "/"; one naming
+	// an object, and no directory, returns an empty page.
 	Prefix string
 	// After is an opaque continuation token returned by a previous call as
 	// ListResult.NextAfter; pass it to fetch the next page. Empty for the

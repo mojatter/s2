@@ -29,6 +29,7 @@ import (
 // It exercises the flat-listing path of Storage.List (Recursive: false) for a
 // particular prefix against the expected direct object names, including both
 // resume paths: the After continuation token and the StartAfter key.
+// It also checks that a prefix naming an object, and no directory, lists an empty page.
 // The expected array should only contain names of objects immediately beneath the prefix.
 // expectedPrefixes is an optional list of expected common prefixes (subdirectories).
 func TestStorageList(ctx context.Context, strg s2.Storage, prefix string, expected ...string) error {
@@ -83,6 +84,20 @@ func TestStorageListWithPrefixes(ctx context.Context, strg s2.Storage, prefix st
 	} else {
 		checkMatch(fmt.Sprintf("List(prefix=%q)", prefix), res.Objects, expected)
 		checkPrefixes(fmt.Sprintf("List(prefix=%q) prefixes", prefix), res.CommonPrefixes, expectedPrefixes)
+
+		// A prefix naming an object, and no directory, selects nothing.
+		if i := slices.IndexFunc(expected, func(n string) bool { return !slices.Contains(res.CommonPrefixes, n+"/") }); i >= 0 {
+			for _, p := range []string{expected[i], expected[i] + "/"} {
+				res, err := strg.List(ctx, s2.ListOptions{Prefix: p})
+				if err != nil {
+					errorf("List(prefix=%q) naming an object failed: %v", p, err)
+				} else if n := len(res.Objects) + len(res.CommonPrefixes); n > 0 {
+					errorf("List(prefix=%q) naming an object returned %d entries, expected none", p, n)
+				} else if res.NextAfter != "" {
+					errorf("List(prefix=%q) naming an object returned an empty page with NextAfter %q", p, res.NextAfter)
+				}
+			}
+		}
 	}
 
 	// NextAfter fed back as After, one entry per page: CommonPrefixes count
