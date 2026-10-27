@@ -3505,10 +3505,16 @@ func (s *ObjectsTestSuite) TestConditionalWrites() {
 		{caseName: "put if-match miss", ifMatch: other, wantCode: "PreconditionFailed"},
 		{caseName: "put if-match weak is no strong match", ifMatch: "W/etag", wantCode: "PreconditionFailed"},
 		{caseName: "put if-match over no object", absent: true, ifMatch: other, wantCode: "NoSuchKey"},
+		// S3 answers 501 to If-Match "*" and to both conditions together.
+		{caseName: "put if-match any", ifMatch: "*", wantCode: "NotImplemented"},
+		{caseName: "put if-match any over no object", absent: true, ifMatch: "*", wantCode: "NotImplemented"},
+		{caseName: "put both conditions", ifMatch: "etag", ifNone: "*", wantCode: "NotImplemented"},
+		{caseName: "put both conditions over no object", absent: true, ifMatch: other, ifNone: "*", wantCode: "NotImplemented"},
 		{caseName: "copy if-none-match over no object", copy: true, absent: true, ifNone: "*"},
 		{caseName: "copy if-none-match over an object", copy: true, ifNone: "*", wantCode: "PreconditionFailed"},
 		{caseName: "copy if-match hit", copy: true, ifMatch: "etag"},
 		{caseName: "copy if-match over no object", copy: true, absent: true, ifMatch: other, wantCode: "NoSuchKey"},
+		{caseName: "copy if-match any", copy: true, ifMatch: "*", wantCode: "NotImplemented"},
 	}
 	wantStatus := map[string]int{"": http.StatusOK, "PreconditionFailed": http.StatusPreconditionFailed, "NotImplemented": http.StatusNotImplemented, "NoSuchKey": http.StatusNotFound}
 	s.putObject("cw", "src.txt", "copied")

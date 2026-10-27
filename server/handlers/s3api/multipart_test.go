@@ -726,8 +726,9 @@ func (s *MultipartTestSuite) TestCompleteMultipartUploadConditions() {
 		{caseName: "if-match hit", header: "If-Match", value: "etag"},
 		{caseName: "if-match miss", header: "If-Match", value: other, wantCode: "PreconditionFailed"},
 		{caseName: "if-match over no object", absent: true, header: "If-Match", value: other, wantCode: "NoSuchKey"},
+		{caseName: "if-match any", header: "If-Match", value: "*", wantCode: "NotImplemented"},
 	}
-	wantStatus := map[string]int{"": http.StatusOK, "PreconditionFailed": http.StatusPreconditionFailed, "NoSuchKey": http.StatusNotFound}
+	wantStatus := map[string]int{"": http.StatusOK, "PreconditionFailed": http.StatusPreconditionFailed, "NoSuchKey": http.StatusNotFound, "NotImplemented": http.StatusNotImplemented}
 	for i, tc := range testCases {
 		s.Run(tc.caseName, func() {
 			ctx := context.Background()

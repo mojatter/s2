@@ -41,10 +41,12 @@ type mockObject struct {
 }
 
 type mockGCSClient struct {
-	mu      sync.RWMutex
-	objects map[string]*mockObject // keyed by "bucket/key"
-	patches int                    // patch calls, so a test can pin how many requests PutMetadata takes
-	onAttrs func()                 // runs after reading attrs, to simulate a racing writer
+	mu             sync.RWMutex
+	objects        map[string]*mockObject // keyed by "bucket/key"
+	patches        int                    // patch calls, so a test can pin how many requests PutMetadata takes
+	onAttrs        func()                 // runs after reading attrs, to simulate a racing writer
+	judgeOnWrite   bool                   // judges preconditions on Write, as a resumable upload does
+	omitGeneration bool                   // reports attrs without a generation, as an endpoint that lacks one would
 	// ignoreGenerationMatch reads as an endpoint that does not honour ifGenerationMatch.
 	ignoreGenerationMatch bool
 	generations           atomic.Uint64
@@ -206,6 +208,9 @@ func (o *mockGCSObject) attrs(_ context.Context) (*storage.ObjectAttrs, error) {
 		Generation:     obj.generation,
 		Metageneration: obj.metageneration,
 	}
+	if o.client.omitGeneration {
+		attrs.Generation = 0
+	}
 	if o.client.onAttrs != nil {
 		o.client.onAttrs()
 	}
@@ -228,8 +233,8 @@ func (o *mockGCSObject) newRangeReader(_ context.Context, offset, length, genera
 	return io.NopCloser(bytes.NewReader(body[offset:end])), obj.generation, nil
 }
 
-func (o *mockGCSObject) newWriter(ctx context.Context, metadata map[string]string, contentType string) gcsWriter {
-	return &mockWriter{ctx: ctx, client: o.client, bucket: o.bucket, key: o.key, metadata: metadata, contentType: contentType}
+func (o *mockGCSObject) newWriter(ctx context.Context, metadata map[string]string, contentType string, conds *storage.Conditions) gcsWriter {
+	return &mockWriter{ctx: ctx, client: o.client, bucket: o.bucket, key: o.key, metadata: metadata, contentType: contentType, conds: conds}
 }
 
 func (o *mockGCSObject) patch(_ context.Context, p objectPatch) error {
@@ -308,16 +313,37 @@ type mockWriter struct {
 	buf         bytes.Buffer
 	metadata    map[string]string
 	contentType string
+	conds       *storage.Conditions
 	closed      bool
 }
 
 func (w *mockWriter) Write(p []byte) (int, error) {
+	if w.client.judgeOnWrite {
+		if err := w.judge(); err != nil {
+			return 0, err
+		}
+	}
 	return w.buf.Write(p)
+}
+
+// judge answers the service's 412 when the preconditions do not hold.
+func (w *mockWriter) judge() error {
+	if c := w.conds; c != nil {
+		cur, exists := w.client.get(w.bucket, w.key)
+		if c.DoesNotExist && exists || c.GenerationMatch != 0 && (!exists || cur.generation != c.GenerationMatch) {
+			return errPreconditionFailed
+		}
+	}
+	return nil
 }
 
 // Close mirrors the SDK: a cancelled context aborts the upload instead of committing it.
 func (w *mockWriter) Close() error {
 	if err := w.ctx.Err(); err != nil {
+		return err
+	}
+	// The service judges the preconditions when the upload commits.
+	if err := w.judge(); err != nil {
 		return err
 	}
 	w.client.put(w.bucket, w.key, w.buf.Bytes(), w.metadata)
@@ -1201,6 +1227,52 @@ func (s *StorageTestSuite) TestPutMetadataDetectsConcurrentWrite() {
 			s.ErrorIs(err, errPreconditionFailed)
 		})
 	}
+}
+
+// A write landing between the ETag check and the commit fails the conditional Upload instead of being overwritten.
+func (s *StorageTestSuite) TestUploadConditionsDetectConcurrentWrite() {
+	testCases := []struct {
+		caseName     string
+		race         func(m *mockGCSClient)
+		judgeOnWrite bool
+	}{
+		{caseName: "overwritten", race: func(m *mockGCSClient) { m.put("mybucket", "k.txt", []byte("raced"), nil) }},
+		{caseName: "deleted", race: func(m *mockGCSClient) { m.del("mybucket", "k.txt") }},
+		{caseName: "overwritten, judged on Write", race: func(m *mockGCSClient) { m.put("mybucket", "k.txt", []byte("raced"), nil) }, judgeOnWrite: true},
+		{caseName: "deleted, judged on Write", race: func(m *mockGCSClient) { m.del("mybucket", "k.txt") }, judgeOnWrite: true},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m, strg := s.testMockStorage()
+			m.judgeOnWrite = tc.judgeOnWrite
+			ctx := context.Background()
+			m.put("mybucket", "k.txt", []byte("first"), nil)
+			m.onAttrs = func() {
+				m.onAttrs = nil
+				tc.race(m)
+			}
+
+			_, err := s2.Upload(ctx, strg, s2.NewObjectBytes("k.txt", []byte("mine")), s2.UploadOptions{IfMatch: fmt.Sprintf(`"%x"`, mockMD5([]byte("first")))})
+
+			s.ErrorIs(err, s2.ErrPreconditionFailed)
+			if obj, ok := m.get("mybucket", "k.txt"); ok {
+				s.Equal("raced", string(obj.body))
+			}
+		})
+	}
+}
+
+// An IfMatch read that reports no generation cannot hold the write, so it is refused rather than failing with 500.
+func (s *StorageTestSuite) TestUploadIfMatchRefusesWithoutVersion() {
+	m, strg := s.testMockStorage()
+	m.put("mybucket", "k.txt", []byte("first"), nil)
+	m.omitGeneration = true
+
+	_, err := s2.Upload(context.Background(), strg, s2.NewObjectBytes("k.txt", []byte("mine")), s2.UploadOptions{IfMatch: fmt.Sprintf(`"%x"`, mockMD5([]byte("first")))})
+
+	s.ErrorIs(err, errors.ErrUnsupported)
+	obj, _ := m.get("mybucket", "k.txt")
+	s.Equal("first", string(obj.body))
 }
 
 func (s *StorageTestSuite) TestCopy() {

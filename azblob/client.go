@@ -48,8 +48,8 @@ type azblobClient interface {
 	getProperties(ctx context.Context, container, blob string) (blobProps, error)
 	// downloadStream reads the blob, or count bytes from offset when either is set; a nonempty ifMatch must still be its ETag.
 	downloadStream(ctx context.Context, container, blobName string, offset, count int64, ifMatch string) (io.ReadCloser, error)
-	// upload stores the blob and reports the ETag a later read derives.
-	upload(ctx context.Context, container, blobName string, body io.Reader, metadata map[string]*string, contentType string) (string, error)
+	// upload stores the blob and reports the ETag a later read derives; a nonempty ifMatch (Azure's ETag) or ifNoneMatch ("*") must hold at commit.
+	upload(ctx context.Context, container, blobName string, body io.Reader, metadata map[string]*string, contentType string, ifMatch, ifNoneMatch string) (string, error)
 	deleteBlob(ctx context.Context, container, blobName string) error
 	setMetadata(ctx context.Context, container, blobName string, metadata map[string]*string) error
 	copyBlob(ctx context.Context, container, src, dst string) error
@@ -110,16 +110,29 @@ func (c *sdkClient) downloadStream(ctx context.Context, ctr, blobName string, of
 	return resp.Body, nil
 }
 
-func (c *sdkClient) upload(ctx context.Context, ctr, blobName string, body io.Reader, metadata map[string]*string, contentType string) (string, error) {
+func (c *sdkClient) upload(ctx context.Context, ctr, blobName string, body io.Reader, metadata map[string]*string, contentType string, ifMatch, ifNoneMatch string) (string, error) {
 	headers := &blob.HTTPHeaders{}
 	if contentType != "" {
 		headers.BlobContentType = &contentType
 	}
 	r := &md5Reader{r: body, h: md5.New(), headers: headers} // #nosec G401 -- Content-MD5 is MD5 by definition
-	_, err := c.client.UploadStream(ctx, ctr, blobName, r, &azsdk.UploadStreamOptions{
+	opts := &azsdk.UploadStreamOptions{
 		Metadata:    metadata,
 		HTTPHeaders: headers,
-	})
+	}
+	if ifMatch != "" || ifNoneMatch != "" {
+		mac := &blob.ModifiedAccessConditions{}
+		if ifMatch != "" {
+			etag := azcore.ETag(ifMatch)
+			mac.IfMatch = &etag
+		}
+		if ifNoneMatch != "" {
+			etag := azcore.ETag(ifNoneMatch)
+			mac.IfNoneMatch = &etag
+		}
+		opts.AccessConditions = &blob.AccessConditions{ModifiedAccessConditions: mac}
+	}
+	_, err := c.client.UploadStream(ctx, ctr, blobName, r, opts)
 	if err != nil {
 		return "", err
 	}

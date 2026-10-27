@@ -43,6 +43,10 @@ type mockS3Client struct {
 	lastListInput *s3.ListObjectsV2Input
 	// ignoreIfMatch serves GetObject as an S3-compatible server that does not support If-Match.
 	ignoreIfMatch bool
+	// notImplemented answers every conditional PutObject with NotImplemented.
+	notImplemented bool
+	// preconditionFailed answers every PutObject with PreconditionFailed, as a proxy might.
+	preconditionFailed bool
 }
 
 // mockKey keys the store verbatim. S3 keys are opaque strings, and path.Join
@@ -66,6 +70,11 @@ func (m *mockS3Client) putWithContentType(bucket, key string, body []byte, metad
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.store(bucket, key, body, metadata, contentType)
+}
+
+// store writes the object; callers hold m.mu.
+func (m *mockS3Client) store(bucket, key string, body []byte, metadata map[string]string, contentType string) {
 	if contentType == "" {
 		contentType = mockDefaultContentType
 	}
@@ -192,7 +201,25 @@ func (m *mockS3Client) PutObject(ctx context.Context, params *s3.PutObjectInput,
 	if err != nil {
 		return nil, err
 	}
-	m.putWithContentType(aws.ToString(params.Bucket), aws.ToString(params.Key), b, params.Metadata, aws.ToString(params.ContentType))
+	// The mock judges the conditions and writes under one lock, as the service holds them until the write lands.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	bucket, key := aws.ToString(params.Bucket), aws.ToString(params.Key)
+	cur, exists := m.objects[mockKey(bucket, key)]
+	switch {
+	case m.notImplemented && (params.IfMatch != nil || params.IfNoneMatch != nil):
+		return nil, &smithy.GenericAPIError{Code: "NotImplemented"}
+	case m.preconditionFailed:
+		return nil, &smithy.GenericAPIError{Code: "PreconditionFailed"}
+	case params.IfMatch != nil && !exists:
+		return nil, &s3types.NoSuchKey{}
+	case params.IfMatch != nil && aws.ToString(params.IfMatch) != mockETag(cur.body):
+		return nil, &smithy.GenericAPIError{Code: "PreconditionFailed"}
+	case params.IfNoneMatch != nil && exists:
+		return nil, &smithy.GenericAPIError{Code: "PreconditionFailed"}
+	}
+	m.store(bucket, key, b, params.Metadata, aws.ToString(params.ContentType))
 	// The real PutObject answers the stored object's ETag, as Head and Get do.
 	return &s3.PutObjectOutput{ETag: aws.String(mockETag(b))}, nil
 }
@@ -466,6 +493,55 @@ func (s *StorageTestSuite) TestS2TestOpenSinceGet() {
 func (s *StorageTestSuite) TestS2TestUploadConditions() {
 	_, strg := s.testMockClient()
 	s.Require().NoError(s2test.TestStorageUploadConditions(context.Background(), strg))
+}
+
+// A PreconditionFailed reads as s2's only for a call that carried a condition.
+func (s *StorageTestSuite) TestUploadMapsPreconditionFailed() {
+	testCases := []struct {
+		caseName string
+		opts     s2.UploadOptions
+		mapped   bool
+	}{
+		{caseName: "conditional", opts: s2.UploadOptions{IfNoneMatch: "*"}, mapped: true},
+		{caseName: "unconditional is passed through"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m, strg := s.testMockClient()
+			m.preconditionFailed = true
+
+			_, err := s2.Upload(context.Background(), strg, s2.NewObjectBytes("k.txt", []byte("v")), tc.opts)
+
+			s.Require().Error(err)
+			s.Equal(tc.mapped, errors.Is(err, s2.ErrPreconditionFailed))
+		})
+	}
+}
+
+// S3's NotImplemented to a condition it does not take reads as ErrUnsupported, which s2-server answers 501.
+func (s *StorageTestSuite) TestUploadMapsNotImplemented() {
+	testCases := []struct {
+		caseName string
+		opts     s2.UploadOptions
+		want     error
+	}{
+		{caseName: "conditional", opts: s2.UploadOptions{IfNoneMatch: "*"}, want: errors.ErrUnsupported},
+		{caseName: "unconditional is not refused"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m, strg := s.testMockClient()
+			m.notImplemented = true
+
+			_, err := s2.Upload(context.Background(), strg, s2.NewObjectBytes("k.txt", []byte("v")), tc.opts)
+
+			if tc.want == nil {
+				s.NoError(err)
+				return
+			}
+			s.ErrorIs(err, tc.want)
+		})
+	}
 }
 
 func (s *StorageTestSuite) TestS2TestGetNotExist() {

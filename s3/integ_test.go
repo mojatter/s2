@@ -86,6 +86,27 @@ func (s *S3IntegrationSuite) TestOpenSinceGet() {
 	s.Require().NoError(s2test.TestStorageOpenSinceGet(context.Background(), s.strg))
 }
 
+func (s *S3IntegrationSuite) TestUploadConditions() {
+	ctx := context.Background()
+	s.Require().NoError(s2test.TestStorageUploadConditions(ctx, s.strg))
+
+	// The suite accepts ErrUnsupported; the provider must hold the conditions itself.
+	const name = "integ-upload-conditions.txt"
+	defer func() { _ = s.strg.Delete(ctx, name) }()
+
+	res, err := s2.Upload(ctx, s.strg, s2.NewObjectBytes(name, []byte("first")), s2.UploadOptions{IfNoneMatch: "*"})
+	s.Require().NoError(err)
+	_, err = s2.Upload(ctx, s.strg, s2.NewObjectBytes(name, []byte("second")), s2.UploadOptions{IfNoneMatch: "*"})
+	s.Require().ErrorIs(err, s2.ErrPreconditionFailed)
+	_, err = s2.Upload(ctx, s.strg, s2.NewObjectBytes(name, []byte("third")), s2.UploadOptions{IfMatch: res.ETag})
+	s.Require().NoError(err)
+	_, err = s2.Upload(ctx, s.strg, s2.NewObjectBytes(name, []byte("fourth")), s2.UploadOptions{IfMatch: res.ETag})
+	s.Require().ErrorIs(err, s2.ErrPreconditionFailed)
+	s.Require().NoError(s.strg.Delete(ctx, name))
+	_, err = s2.Upload(ctx, s.strg, s2.NewObjectBytes(name, []byte("fifth")), s2.UploadOptions{IfMatch: res.ETag})
+	s.Require().ErrorIs(err, s2.ErrNotExist)
+}
+
 func (s *S3IntegrationSuite) TestGetNotExist() {
 	s.Require().NoError(s2test.TestStorageGetNotExist(context.Background(), s.strg))
 }

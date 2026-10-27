@@ -205,8 +205,10 @@ func TestUploadOptionsCheck(t *testing.T) {
 		{caseName: "IfMatch the ETag", opts: UploadOptions{IfMatch: `"a"`}, etag: `"a"`, exists: true},
 		{caseName: "IfMatch another ETag", opts: UploadOptions{IfMatch: `"b"`}, etag: `"a"`, exists: true, want: ErrPreconditionFailed},
 		{caseName: "IfMatch over no object", opts: UploadOptions{IfMatch: `"a"`}, want: ErrNotExist},
-		{caseName: "IfMatch any over an object", opts: UploadOptions{IfMatch: "*"}, etag: `"a"`, exists: true},
-		{caseName: "IfMatch any over no object", opts: UploadOptions{IfMatch: "*"}, want: ErrNotExist},
+		{caseName: "IfMatch any over an object", opts: UploadOptions{IfMatch: "*"}, etag: `"a"`, exists: true, want: errors.ErrUnsupported},
+		{caseName: "IfMatch any over no object", opts: UploadOptions{IfMatch: "*"}, want: errors.ErrUnsupported},
+		{caseName: "both conditions over an object", opts: UploadOptions{IfMatch: `"a"`, IfNoneMatch: "*"}, etag: `"a"`, exists: true, want: errors.ErrUnsupported},
+		{caseName: "both conditions over no object", opts: UploadOptions{IfMatch: `"a"`, IfNoneMatch: "*"}, want: errors.ErrUnsupported},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {

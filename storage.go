@@ -178,9 +178,9 @@ type Uploader interface {
 	Upload(ctx context.Context, obj Object, opts UploadOptions) (UploadResult, error)
 }
 
-// UploadOptions controls an Upload call.
+// UploadOptions controls an Upload call. At most one condition is set, as S3 takes them; see Validate.
 type UploadOptions struct {
-	// IfMatch, when set, writes only while the key holds an object with this ETag, in the quoted form Object.ETag reports.
+	// IfMatch, when set, writes only while the key holds an object with this ETag, in the quoted form Object.ETag reports; "*" is unsupported.
 	IfMatch string
 	// IfNoneMatch, when "*", writes only while the key holds no object; any other value is unsupported.
 	IfNoneMatch string
@@ -191,18 +191,31 @@ func (o UploadOptions) Conditional() bool {
 	return o.IfMatch != "" || o.IfNoneMatch != ""
 }
 
+// Validate refuses with errors.ErrUnsupported, without reading the key, what S3 answers 501 to: IfMatch "*", both conditions, an IfNoneMatch other than "*".
+func (o UploadOptions) Validate() error {
+	switch {
+	case o.IfMatch != "" && o.IfNoneMatch != "":
+		return fmt.Errorf("s2: IfMatch with IfNoneMatch: %w", errors.ErrUnsupported)
+	case o.IfMatch == "*":
+		return fmt.Errorf("s2: IfMatch \"*\": %w", errors.ErrUnsupported)
+	case o.IfNoneMatch != "" && o.IfNoneMatch != "*":
+		return fmt.Errorf("s2: IfNoneMatch %q: %w", o.IfNoneMatch, errors.ErrUnsupported)
+	}
+	return nil
+}
+
 // Check judges opts against the object at name, whose ETag is etag when exists.
 // It wraps ErrNotExist when IfMatch finds no object, ErrPreconditionFailed when a condition fails,
-// and errors.ErrUnsupported for an IfNoneMatch other than "*".
+// and errors.ErrUnsupported for what Validate refuses.
 func (o UploadOptions) Check(name, etag string, exists bool) error {
-	if o.IfNoneMatch != "" && o.IfNoneMatch != "*" {
-		return fmt.Errorf("s2: IfNoneMatch %q: %w", o.IfNoneMatch, errors.ErrUnsupported)
+	if err := o.Validate(); err != nil {
+		return err
 	}
 	if o.IfMatch != "" {
 		if !exists {
 			return fmt.Errorf("%w: %s", ErrNotExist, name)
 		}
-		if o.IfMatch != "*" && o.IfMatch != etag {
+		if o.IfMatch != etag {
 			return fmt.Errorf("%w: %s", ErrPreconditionFailed, name)
 		}
 	}

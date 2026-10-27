@@ -45,6 +45,10 @@ type mockAzblobClient struct {
 	// the mock's simple map lookup cannot reproduce, e.g.
 	// CannotVerifyCopySource for a CopyFromURL whose source is missing.
 	copyBlobErr error
+	// onProperties runs after reading properties, to simulate a racing writer.
+	onProperties func()
+	// omitETag reports properties without Azure's ETag, as an endpoint that lacks one would.
+	omitETag bool
 	// etags counts writes, so no two writes share an ETag whatever the clock's resolution.
 	etags atomic.Uint64
 	// preconditionOnMissing answers If-Match on a missing blob with 412, as Azurite does.
@@ -101,14 +105,21 @@ func (m *mockAzblobClient) serviceURL() string {
 
 func (m *mockAzblobClient) getProperties(_ context.Context, container, blobName string) (blobProps, error) {
 	b, ok := m.get(container, blobName)
+	if m.onProperties != nil {
+		m.onProperties()
+	}
 	if !ok {
 		return blobProps{}, newBlobNotFoundError()
+	}
+	etag := b.etag
+	if m.omitETag {
+		etag = ""
 	}
 	return blobProps{
 		contentLength: int64(len(b.body)),
 		lastModified:  b.modified,
 		metadata:      b.metadata,
-		etag:          b.etag,
+		etag:          etag,
 		contentType:   b.contentType,
 		contentMD5:    b.contentMD5,
 	}, nil
@@ -136,10 +147,22 @@ func (m *mockAzblobClient) downloadStream(_ context.Context, container, blobName
 	return io.NopCloser(bytes.NewReader(body)), nil
 }
 
-func (m *mockAzblobClient) upload(_ context.Context, container, blobName string, body io.Reader, metadata map[string]*string, contentType string) (string, error) {
+func (m *mockAzblobClient) upload(_ context.Context, container, blobName string, body io.Reader, metadata map[string]*string, contentType string, ifMatch, ifNoneMatch string) (string, error) {
 	data, err := io.ReadAll(body)
 	if err != nil {
 		return "", err
+	}
+	// The service judges the access conditions when the upload commits.
+	cur, exists := m.get(container, blobName)
+	if ifNoneMatch == "*" && exists {
+		return "", &azcore.ResponseError{ErrorCode: string(bloberror.BlobAlreadyExists), StatusCode: http.StatusConflict}
+	}
+	// Azurite answers a missing blob under If-Match with ConditionNotMet; the service may say BlobNotFound.
+	if ifMatch != "" && !exists && !m.preconditionOnMissing {
+		return "", &azcore.ResponseError{ErrorCode: string(bloberror.BlobNotFound), StatusCode: http.StatusNotFound}
+	}
+	if ifMatch != "" && (!exists || ifMatch != cur.etag) {
+		return "", &azcore.ResponseError{ErrorCode: string(bloberror.ConditionNotMet), StatusCode: http.StatusPreconditionFailed}
 	}
 	m.put(container, blobName, data, metadata)
 	b, _ := m.get(container, blobName)
@@ -545,6 +568,54 @@ func (s *StorageTestSuite) TestS2TestOpenSinceGet() {
 func (s *StorageTestSuite) TestS2TestUploadConditions() {
 	_, strg := s.testMockStorage()
 	s.Require().NoError(s2test.TestStorageUploadConditions(context.Background(), strg))
+}
+
+// An IfMatch read that reports no ETag cannot hold the commit, so it is refused rather than written unconditionally.
+func (s *StorageTestSuite) TestUploadIfMatchRefusesWithoutVersion() {
+	m, strg := s.testMockStorage()
+	ctx := context.Background()
+	res, err := s2.Upload(ctx, strg, s2.NewObjectBytes("k.txt", []byte("first")), s2.UploadOptions{})
+	s.Require().NoError(err)
+	m.omitETag = true
+
+	_, err = s2.Upload(ctx, strg, s2.NewObjectBytes("k.txt", []byte("mine")), s2.UploadOptions{IfMatch: res.ETag})
+
+	s.ErrorIs(err, errors.ErrUnsupported)
+	b, _ := m.get("mycontainer", "k.txt")
+	s.Equal("first", string(b.body))
+}
+
+// A write landing between the ETag check and the commit fails the conditional Upload instead of being overwritten.
+func (s *StorageTestSuite) TestUploadConditionsDetectConcurrentWrite() {
+	testCases := []struct {
+		caseName              string
+		race                  func(m *mockAzblobClient)
+		preconditionOnMissing bool
+	}{
+		{caseName: "overwritten", race: func(m *mockAzblobClient) { m.put("mycontainer", "k.txt", []byte("raced"), nil) }},
+		{caseName: "deleted, answered BlobNotFound", race: func(m *mockAzblobClient) { m.del("mycontainer", "k.txt") }},
+		{caseName: "deleted, answered ConditionNotMet as Azurite does", race: func(m *mockAzblobClient) { m.del("mycontainer", "k.txt") }, preconditionOnMissing: true},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m, strg := s.testMockStorage()
+			m.preconditionOnMissing = tc.preconditionOnMissing
+			ctx := context.Background()
+			res, err := s2.Upload(ctx, strg, s2.NewObjectBytes("k.txt", []byte("first")), s2.UploadOptions{})
+			s.Require().NoError(err)
+			m.onProperties = func() {
+				m.onProperties = nil
+				tc.race(m)
+			}
+
+			_, err = s2.Upload(ctx, strg, s2.NewObjectBytes("k.txt", []byte("mine")), s2.UploadOptions{IfMatch: res.ETag})
+
+			s.ErrorIs(err, s2.ErrPreconditionFailed)
+			if b, ok := m.get("mycontainer", "k.txt"); ok {
+				s.Equal("raced", string(b.body))
+			}
+		})
+	}
 }
 
 func (s *StorageTestSuite) TestS2TestGetNotExist() {
