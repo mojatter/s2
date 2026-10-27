@@ -265,9 +265,9 @@ func (s *azblobStorage) Upload(ctx context.Context, obj s2.Object, opts s2.Uploa
 	if err := s2.ValidateName(obj.Name()); err != nil {
 		return s2.UploadResult{}, err
 	}
-	// Conditional writes are not wired to the provider yet (#450).
-	if opts.Conditional() {
-		return s2.UploadResult{}, fmt.Errorf("azblob: conditional upload: %w", errors.ErrUnsupported)
+	ifMatch, ifNoneMatch, err := s.uploadConds(ctx, obj.Name(), opts)
+	if err != nil {
+		return s2.UploadResult{}, err
 	}
 	rc, err := obj.Open()
 	if err != nil {
@@ -275,11 +275,43 @@ func (s *azblobStorage) Upload(ctx context.Context, obj s2.Object, opts s2.Uploa
 	}
 	defer func() { _ = rc.Close() }()
 
-	etag, err := s.client.upload(ctx, s.container, s.key(obj.Name()), rc, toPtrMetadata(obj.Metadata()), obj.ContentType())
+	etag, err := s.client.upload(ctx, s.container, s.key(obj.Name()), rc, toPtrMetadata(obj.Metadata()), obj.ContentType(), ifMatch, ifNoneMatch)
+	// If-None-Match "*" over a blob answers BlobAlreadyExists; If-Match over one deleted since the read may answer BlobNotFound.
+	if opts.Conditional() && bloberror.HasCode(err, bloberror.ConditionNotMet, bloberror.BlobAlreadyExists) || opts.IfMatch != "" && bloberror.HasCode(err, bloberror.BlobNotFound) {
+		return s2.UploadResult{}, fmt.Errorf("%w: %s: %w", s2.ErrPreconditionFailed, obj.Name(), err)
+	}
 	if err != nil {
 		return s2.UploadResult{}, err
 	}
 	return s2.UploadResult{ETag: etag}, nil
+}
+
+// uploadConds turns opts into the upload's access conditions: an ETag is judged on the properties read here and held by Azure's own ETag.
+func (s *azblobStorage) uploadConds(ctx context.Context, name string, opts s2.UploadOptions) (ifMatch, ifNoneMatch string, err error) {
+	if !opts.Conditional() {
+		return "", "", nil
+	}
+	if err := opts.Validate(); err != nil {
+		return "", "", err
+	}
+	if opts.IfMatch == "" {
+		return "", "*", nil
+	}
+	props, err := s.client.getProperties(ctx, s.container, s.key(name))
+	if isBlobNotFound(err) {
+		return "", "", opts.Check(name, "", false)
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if err := opts.Check(name, blobETag(props.contentMD5, props.etag), true); err != nil {
+		return "", "", err
+	}
+	// An empty ETag would send no access condition and write unconditionally.
+	if props.etag == "" {
+		return "", "", fmt.Errorf("azblob: IfMatch: endpoint reports no ETag: %w", errors.ErrUnsupported)
+	}
+	return props.etag, "", nil
 }
 
 func (s *azblobStorage) PutMetadata(ctx context.Context, name string, metadata s2.Metadata) error {
