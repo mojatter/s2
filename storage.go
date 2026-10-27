@@ -88,8 +88,9 @@ type SignedURLOptions struct {
 type Storage interface {
 	// Type returns the type of the storage.
 	Type() Type
-	// Sub returns a new storage scoped to the given prefix. The returned
-	// storage shares the parent's lifetime.
+	// Sub returns a view of the given prefix that shares the parent's lifetime:
+	// an object written through either is the same object, with the same ETag,
+	// Content-Type and metadata, through the other.
 	Sub(ctx context.Context, prefix string) (Storage, error)
 	// List returns the objects (and, when non-recursive, common prefixes)
 	// matching opts.
