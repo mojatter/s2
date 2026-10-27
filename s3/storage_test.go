@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -32,6 +33,7 @@ type mockObject struct {
 	lastModified time.Time
 	metadata     map[string]string
 	contentType  string
+	etag         string
 }
 
 // mockDefaultContentType is what S3 stores when a write sends no Content-Type.
@@ -43,10 +45,22 @@ type mockS3Client struct {
 	lastListInput *s3.ListObjectsV2Input
 	// ignoreIfMatch serves GetObject as an S3-compatible server that does not support If-Match.
 	ignoreIfMatch bool
-	// notImplemented answers every conditional PutObject with NotImplemented.
+	// notImplemented answers every conditional PutObject and CompleteMultipartUpload with NotImplemented.
 	notImplemented bool
-	// preconditionFailed answers every PutObject with PreconditionFailed, as a proxy might.
+	// preconditionFailed answers every PutObject and CompleteMultipartUpload with PreconditionFailed, as a proxy might.
 	preconditionFailed bool
+	uploads            map[string]*mockUpload
+	nextUploadID       int
+	// maxPartLen is the largest UploadPart body seen.
+	maxPartLen int
+	// checksumAlgorithm is what the last CreateMultipartUpload asked for.
+	checksumAlgorithm s3types.ChecksumAlgorithm
+}
+
+type mockUpload struct {
+	parts       map[int32][]byte
+	metadata    map[string]string
+	contentType string
 }
 
 // mockKey keys the store verbatim. S3 keys are opaque strings, and path.Join
@@ -59,6 +73,7 @@ func mockKey(bucket, key string) string {
 func newMockS3Client() *mockS3Client {
 	return &mockS3Client{
 		objects: make(map[string]*mockObject),
+		uploads: make(map[string]*mockUpload),
 	}
 }
 
@@ -85,6 +100,7 @@ func (m *mockS3Client) store(bucket, key string, body []byte, metadata map[strin
 		lastModified: time.Now(),
 		metadata:     metadata,
 		contentType:  contentType,
+		etag:         mockETag(body),
 	}
 }
 
@@ -173,7 +189,7 @@ func (m *mockS3Client) ListObjectsV2(ctx context.Context, params *s3.ListObjects
 				Key:          aws.String(obj.key),
 				Size:         aws.Int64(int64(len(obj.body))),
 				LastModified: aws.Time(obj.lastModified),
-				ETag:         aws.String(mockETag(obj.body)),
+				ETag:         aws.String(obj.etag),
 			})
 		}
 		n++
@@ -191,7 +207,7 @@ func (m *mockS3Client) HeadObject(ctx context.Context, params *s3.HeadObjectInpu
 		ContentLength: aws.Int64(int64(len(obj.body))),
 		LastModified:  aws.Time(obj.lastModified),
 		Metadata:      obj.metadata,
-		ETag:          aws.String(mockETag(obj.body)),
+		ETag:          aws.String(obj.etag),
 		ContentType:   aws.String(obj.contentType),
 	}, nil
 }
@@ -206,22 +222,97 @@ func (m *mockS3Client) PutObject(ctx context.Context, params *s3.PutObjectInput,
 	defer m.mu.Unlock()
 
 	bucket, key := aws.ToString(params.Bucket), aws.ToString(params.Key)
-	cur, exists := m.objects[mockKey(bucket, key)]
-	switch {
-	case m.notImplemented && (params.IfMatch != nil || params.IfNoneMatch != nil):
-		return nil, &smithy.GenericAPIError{Code: "NotImplemented"}
-	case m.preconditionFailed:
-		return nil, &smithy.GenericAPIError{Code: "PreconditionFailed"}
-	case params.IfMatch != nil && !exists:
-		return nil, &s3types.NoSuchKey{}
-	case params.IfMatch != nil && aws.ToString(params.IfMatch) != mockETag(cur.body):
-		return nil, &smithy.GenericAPIError{Code: "PreconditionFailed"}
-	case params.IfNoneMatch != nil && exists:
-		return nil, &smithy.GenericAPIError{Code: "PreconditionFailed"}
+	if err := m.refuse(bucket, key, params.IfMatch, params.IfNoneMatch); err != nil {
+		return nil, err
 	}
 	m.store(bucket, key, b, params.Metadata, aws.ToString(params.ContentType))
 	// The real PutObject answers the stored object's ETag, as Head and Get do.
 	return &s3.PutObjectOutput{ETag: aws.String(mockETag(b))}, nil
+}
+
+// refuse judges a write's conditions; callers hold m.mu.
+func (m *mockS3Client) refuse(bucket, key string, ifMatch, ifNoneMatch *string) error {
+	cur, exists := m.objects[mockKey(bucket, key)]
+	switch {
+	case m.notImplemented && (ifMatch != nil || ifNoneMatch != nil):
+		return &smithy.GenericAPIError{Code: "NotImplemented"}
+	case m.preconditionFailed:
+		return &smithy.GenericAPIError{Code: "PreconditionFailed"}
+	case ifMatch != nil && !exists:
+		return &s3types.NoSuchKey{}
+	case ifMatch != nil && aws.ToString(ifMatch) != cur.etag:
+		return &smithy.GenericAPIError{Code: "PreconditionFailed"}
+	case ifNoneMatch != nil && exists:
+		return &smithy.GenericAPIError{Code: "PreconditionFailed"}
+	}
+	return nil
+}
+
+func (m *mockS3Client) CreateMultipartUpload(ctx context.Context, params *s3.CreateMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CreateMultipartUploadOutput, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.nextUploadID++
+	m.checksumAlgorithm = params.ChecksumAlgorithm
+	id := fmt.Sprintf("upload-%d", m.nextUploadID)
+	m.uploads[id] = &mockUpload{parts: make(map[int32][]byte), metadata: params.Metadata, contentType: aws.ToString(params.ContentType)}
+	return &s3.CreateMultipartUploadOutput{Bucket: params.Bucket, Key: params.Key, UploadId: aws.String(id)}, nil
+}
+
+func (m *mockS3Client) UploadPart(ctx context.Context, params *s3.UploadPartInput, optFns ...func(*s3.Options)) (*s3.UploadPartOutput, error) {
+	b, err := io.ReadAll(params.Body)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	up, ok := m.uploads[aws.ToString(params.UploadId)]
+	if !ok {
+		return nil, &s3types.NoSuchUpload{}
+	}
+	up.parts[aws.ToInt32(params.PartNumber)] = b
+	m.maxPartLen = max(m.maxPartLen, len(b))
+	return &s3.UploadPartOutput{ETag: aws.String(mockETag(b))}, nil
+}
+
+// CompleteMultipartUpload assigns S3's md5-of-md5s-N ETag.
+func (m *mockS3Client) CompleteMultipartUpload(ctx context.Context, params *s3.CompleteMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.CompleteMultipartUploadOutput, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	up, ok := m.uploads[aws.ToString(params.UploadId)]
+	if !ok {
+		return nil, &s3types.NoSuchUpload{}
+	}
+	bucket, key := aws.ToString(params.Bucket), aws.ToString(params.Key)
+	if err := m.refuse(bucket, key, params.IfMatch, params.IfNoneMatch); err != nil {
+		return nil, err
+	}
+	var body, sums []byte
+	for _, p := range params.MultipartUpload.Parts {
+		b := up.parts[aws.ToInt32(p.PartNumber)]
+		sum := md5.Sum(b) // #nosec G401 -- mirrors S3's ETag
+		body, sums = append(body, b...), append(sums, sum[:]...)
+	}
+	m.store(bucket, key, body, up.metadata, up.contentType)
+	sum := md5.Sum(sums) // #nosec G401 -- mirrors S3's ETag
+	etag := fmt.Sprintf(`"%s-%d"`, hex.EncodeToString(sum[:]), len(params.MultipartUpload.Parts))
+	m.objects[mockKey(bucket, key)].etag = etag
+	delete(m.uploads, aws.ToString(params.UploadId))
+	return &s3.CompleteMultipartUploadOutput{Bucket: params.Bucket, Key: params.Key, ETag: aws.String(etag)}, nil
+}
+
+func (m *mockS3Client) AbortMultipartUpload(ctx context.Context, params *s3.AbortMultipartUploadInput, optFns ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	// A canceled context fails the call, as it does on the real client.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	delete(m.uploads, aws.ToString(params.UploadId))
+	return &s3.AbortMultipartUploadOutput{}, nil
 }
 
 func (m *mockS3Client) DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error) {
@@ -241,7 +332,7 @@ func (m *mockS3Client) GetObject(ctx context.Context, params *s3.GetObjectInput,
 	if !ok {
 		return nil, &s3types.NoSuchKey{}
 	}
-	if params.IfMatch != nil && !m.ignoreIfMatch && aws.ToString(params.IfMatch) != mockETag(obj.body) {
+	if params.IfMatch != nil && !m.ignoreIfMatch && aws.ToString(params.IfMatch) != obj.etag {
 		return nil, &smithy.GenericAPIError{Code: "PreconditionFailed"}
 	}
 	body := obj.body
@@ -257,7 +348,7 @@ func (m *mockS3Client) GetObject(ctx context.Context, params *s3.GetObjectInput,
 	return &s3.GetObjectOutput{
 		Body:          io.NopCloser(bytes.NewReader(body)),
 		ContentLength: aws.Int64(int64(len(body))),
-		ETag:          aws.String(mockETag(obj.body)),
+		ETag:          aws.String(obj.etag),
 		LastModified:  aws.Time(obj.lastModified),
 		Metadata:      obj.metadata,
 	}, nil
@@ -542,6 +633,121 @@ func (s *StorageTestSuite) TestUploadMapsNotImplemented() {
 			s.ErrorIs(err, tc.want)
 		})
 	}
+}
+
+// A body too large for one PutObject goes up in parts, never read whole, and a part or condition failure aborts the upload.
+func (s *StorageTestSuite) TestUploadStreamsLargeBody() {
+	const partLen = 8 << 20
+	body := bytes.Repeat([]byte("0123456789abcdef"), (2*partLen+1)/16+1)
+	errRead := errors.New("read failed")
+	whole := func(context.CancelFunc) io.Reader { return bytes.NewReader(body) }
+	testCases := []struct {
+		caseName string
+		existing bool
+		opts     s2.UploadOptions
+		body     func(cancel context.CancelFunc) io.Reader
+		seekable bool
+		checksum aws.RequestChecksumCalculation
+		want     error
+	}{
+		{caseName: "unconditional", body: whole},
+		{caseName: "seekable", body: whole, seekable: true},
+		{caseName: "when_required sends no checksum", body: whole, checksum: aws.RequestChecksumCalculationWhenRequired},
+		{caseName: "If-Match holds", existing: true, opts: s2.UploadOptions{IfMatch: mockETag([]byte("old"))}, body: whole},
+		{caseName: "If-None-Match fails at Complete", existing: true, opts: s2.UploadOptions{IfNoneMatch: "*"}, body: whole, want: s2.ErrPreconditionFailed},
+		{caseName: "If-Match on a missing key", opts: s2.UploadOptions{IfMatch: mockETag([]byte("old"))}, body: whole, want: s2.ErrNotExist},
+		{caseName: "body fails midway", body: func(context.CancelFunc) io.Reader {
+			return io.MultiReader(bytes.NewReader(body[:2*partLen+1]), iotest.ErrReader(errRead))
+		}, want: errRead},
+		{caseName: "caller's context canceled midway", body: func(cancel context.CancelFunc) io.Reader {
+			return io.MultiReader(bytes.NewReader(body[:2*partLen+1]), cancelReader(cancel))
+		}, want: context.Canceled},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			m, strg := s.testMockClient()
+			strg.(*storage).checksum = tc.checksum
+			if tc.existing {
+				m.put("mybucket", "big.bin", []byte("old"), nil)
+			}
+			// NopCloser hides Seek, as the s3api handler's bodies do.
+			r := tc.body(cancel)
+			rc := io.NopCloser(r)
+			if tc.seekable {
+				rc = seekCloser{r.(io.ReadSeeker)}
+			}
+			obj := s2.NewObjectReader("big.bin", rc, uint64(len(body)), s2.WithContentType("application/x-big"), s2.WithMetadata(s2.Metadata{"k": "v"}))
+
+			res, err := s2.Upload(ctx, strg, obj, tc.opts)
+
+			s.Positive(m.nextUploadID, "the upload crossed the multipart threshold")
+			s.Empty(m.uploads, "every multipart upload is completed or aborted")
+			s.LessOrEqual(m.maxPartLen, partLen)
+			wantAlgorithm := s3types.ChecksumAlgorithmCrc32
+			if tc.checksum == aws.RequestChecksumCalculationWhenRequired {
+				wantAlgorithm = ""
+			}
+			s.Equal(wantAlgorithm, m.checksumAlgorithm)
+			if tc.want != nil {
+				s.ErrorIs(err, tc.want)
+				if got, ok := m.get("mybucket", "big.bin"); ok {
+					s.Equal("old", string(got.body))
+				}
+				return
+			}
+			s.Require().NoError(err)
+			s.True(strings.HasSuffix(res.ETag, `-3"`), "ETag %s", res.ETag)
+			got, err := strg.Get(ctx, "big.bin")
+			s.Require().NoError(err)
+			s.Equal(res.ETag, got.ETag())
+			s.Equal("application/x-big", got.ContentType())
+			s.Equal(s2.Metadata{"k": "v"}, got.Metadata())
+			stored, _ := m.get("mybucket", "big.bin")
+			s.True(bytes.Equal(body, stored.body))
+		})
+	}
+}
+
+// A body one byte short of the threshold is one PutObject; one at the threshold is a multipart upload.
+func (s *StorageTestSuite) TestUploadThreshold() {
+	const threshold = 16 << 20
+	testCases := []struct {
+		caseName  string
+		length    int
+		multipart bool
+	}{
+		{caseName: "below", length: threshold - 1},
+		{caseName: "at", length: threshold, multipart: true},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m, strg := s.testMockClient()
+			body := bytes.Repeat([]byte("x"), tc.length)
+
+			_, err := s2.Upload(context.Background(), strg, s2.NewObjectReader("t.bin", io.NopCloser(bytes.NewReader(body)), uint64(len(body))), s2.UploadOptions{})
+
+			s.Require().NoError(err)
+			s.Equal(tc.multipart, m.nextUploadID > 0)
+			stored, _ := m.get("mybucket", "t.bin")
+			s.Len(stored.body, tc.length)
+		})
+	}
+}
+
+// seekCloser keeps Seek visible, as a file's body does.
+type seekCloser struct{ io.ReadSeeker }
+
+func (seekCloser) Close() error { return nil }
+
+// cancelReader cancels the upload's context when read, as a client hanging up does.
+type cancelReader context.CancelFunc
+
+func (c cancelReader) Read([]byte) (int, error) {
+	c()
+	return 0, context.Canceled
 }
 
 func (s *StorageTestSuite) TestS2TestGetNotExist() {

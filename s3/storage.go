@@ -1,18 +1,18 @@
 package s3
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"path"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
@@ -24,12 +24,9 @@ import (
 var ErrRequiredConfigRoot = s2.ErrRequiredConfigRoot
 
 type clientAPI interface {
-	s3.ListObjectsV2APIClient
-	HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error)
-	PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
+	transfermanager.S3APIClient
 	DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
 	DeleteObjects(ctx context.Context, params *s3.DeleteObjectsInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectsOutput, error)
-	GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 	CopyObject(ctx context.Context, params *s3.CopyObjectInput, optFns ...func(*s3.Options)) (*s3.CopyObjectOutput, error)
 }
 
@@ -43,6 +40,8 @@ type storage struct {
 	presignClient presignClientAPI
 	bucket        string
 	prefix        string
+	// checksum is the client's RequestChecksumCalculation, which transfermanager would otherwise override.
+	checksum aws.RequestChecksumCalculation
 }
 
 func init() {
@@ -136,10 +135,12 @@ func NewStorage(ctx context.Context, cfg s2.Config) (s2.Storage, error) {
 	}
 
 	bucket, prefix := s2.ParseRoot(cfg.Root)
+	client := s3.NewFromConfig(awsCfg, s3Opts...)
 	return &storage{
-		client: s3.NewFromConfig(awsCfg, s3Opts...),
-		bucket: bucket,
-		prefix: prefix,
+		client:   client,
+		bucket:   bucket,
+		prefix:   prefix,
+		checksum: client.Options().RequestChecksumCalculation,
 	}, nil
 }
 
@@ -152,9 +153,10 @@ func (s *storage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
 		return nil, err
 	}
 	return &storage{
-		client: s.client,
-		bucket: s.bucket,
-		prefix: path.Join(s.prefix, prefix),
+		client:   s.client,
+		bucket:   s.bucket,
+		prefix:   path.Join(s.prefix, prefix),
+		checksum: s.checksum,
 	}, nil
 }
 
@@ -387,7 +389,7 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 	return err
 }
 
-// Upload implements s2.Uploader with the ETag PutObject already answers.
+// Upload implements s2.Uploader with the ETag PutObject or CompleteMultipartUpload already answers.
 func (s *storage) Upload(ctx context.Context, obj s2.Object, opts s2.UploadOptions) (s2.UploadResult, error) {
 	if err := s2.ValidateName(obj.Name()); err != nil {
 		return s2.UploadResult{}, err
@@ -401,40 +403,38 @@ func (s *storage) Upload(ctx context.Context, obj s2.Object, opts s2.UploadOptio
 	}
 	defer func() { _ = rc.Close() }()
 
-	// The AWS SDK requires a seekable body for payload signing over HTTP
-	// and checksum calculation. If the stream is already seekable, use it
-	// as-is; otherwise buffer it into a bytes.Reader.
-	body, ok := rc.(io.ReadSeeker)
-	if !ok {
-		b, err := io.ReadAll(rc)
-		if err != nil {
-			return s2.UploadResult{}, err
-		}
-		body = bytes.NewReader(b)
-	}
-
-	input := &s3.PutObjectInput{
+	input := &transfermanager.UploadObjectInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(path.Join(s.prefix, obj.Name())),
-		Body:          body,
+		Body:          rc,
 		ContentLength: aws.Int64(s2.MustInt64(obj.Length())),
 		Metadata:      obj.Metadata(),
 	}
 	if ct := obj.ContentType(); ct != "" {
 		input.ContentType = aws.String(ct)
 	}
-	// The provider holds the conditions until the write lands.
+	// The provider holds the conditions until the write lands, on PutObject or CompleteMultipartUpload.
 	if opts.IfMatch != "" {
 		input.IfMatch = aws.String(opts.IfMatch)
 	}
 	if opts.IfNoneMatch != "" {
 		input.IfNoneMatch = aws.String(opts.IfNoneMatch)
 	}
-	out, err := s.client.PutObject(ctx, input)
+	// A body of 16 MiB or more goes up in 8 MiB parts, so it is never held whole and may pass PutObject's 5 GiB ceiling.
+	out, err := transfermanager.New(s.client, s.uploadOptions).UploadObject(ctx, input)
 	if err != nil {
 		return s2.UploadResult{}, mapConditionErr(err, obj.Name(), opts)
 	}
 	return s2.UploadResult{ETag: aws.ToString(out.ETag)}, nil
+}
+
+// uploadOptions pins the sizes the docs name, aborts on a fresh 30 s context, and forwards the client's checksum setting.
+func (s *storage) uploadOptions(o *transfermanager.Options) {
+	o.MultipartUploadThreshold = 16 << 20
+	o.PartSizeBytes = 8 << 20
+	o.Concurrency = 5
+	o.FailTimeout = 30 * time.Second
+	o.RequestChecksumCalculation = s.checksum
 }
 
 // PutMetadata copies the object onto itself, resending its Content-Type, which a REPLACE copy would otherwise reset.
