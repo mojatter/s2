@@ -653,6 +653,17 @@ func parseMetadataHeaders(r *http.Request) s2.Metadata {
 
 // parseCopySource reads x-amz-copy-source and authorizes reading it, writing the error when it fails.
 func parseCopySource(w http.ResponseWriter, r *http.Request, copySource string) (bucket, key string, ok bool) {
+	// S3 appends ?versionId=<id> unencoded; any other ? belongs to a key a client left unencoded.
+	if i := strings.LastIndex(copySource, "?"); i >= 0 {
+		if v, ok := strings.CutPrefix(copySource[i+1:], "versionId="); ok && !strings.Contains(v, "&") {
+			// s2 keeps no versions, so only null names an object.
+			if v != "null" {
+				writeError(w, r, "NotImplemented", "This operation is not implemented", http.StatusNotImplemented)
+				return "", "", false
+			}
+			copySource = copySource[:i]
+		}
+	}
 	// Parse copy source: /bucket/key or bucket/key (URL-encoded)
 	copySource, _ = url.PathUnescape(copySource)
 	copySource = strings.TrimPrefix(copySource, "/")

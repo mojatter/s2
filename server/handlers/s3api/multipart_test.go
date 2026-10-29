@@ -818,6 +818,7 @@ func (s *MultipartTestSuite) TestUploadPartCopy() {
 	s.putObject("mp-copy", "src.bin", src)
 	s.putObject("mp-copy", "big.bin", src+"!")
 	s.putObject("mp-copy", "empty.bin", "")
+	s.putObject("mp-copy", "q?.bin", src)
 	srcETag := bodyETag(src)
 	// May write the destination, as S3Action checks up front, but may not read the source.
 	writeOnly := &server.User{Policy: &server.Policy{Statement: []server.Statement{
@@ -850,6 +851,9 @@ func (s *MultipartTestSuite) TestUploadPartCopy() {
 		{caseName: "source past the upload limit", source: "/mp-copy/big.bin", wantCode: http.StatusBadRequest, wantErr: "InvalidRequest"},
 		{caseName: "range within the upload limit", source: "/mp-copy/big.bin", header: map[string]string{"x-amz-copy-source-range": "bytes=1-20"}, wantCode: http.StatusOK, wantPart: "123456789abcdefghij!"},
 		{caseName: "source the caller cannot read", source: "/mp-copy/src.bin", user: writeOnly, wantCode: http.StatusForbidden, wantErr: "AccessDenied"},
+		{caseName: "versionId null", source: "/mp-copy/src.bin?versionId=null", wantCode: http.StatusOK, wantPart: src},
+		{caseName: "unencoded ? in the key", source: "/mp-copy/q?.bin", wantCode: http.StatusOK, wantPart: src},
+		{caseName: "another versionId", source: "/mp-copy/src.bin?versionId=abc", wantCode: http.StatusNotImplemented, wantErr: "NotImplemented"},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {

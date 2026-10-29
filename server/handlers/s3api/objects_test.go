@@ -1840,6 +1840,43 @@ func (s *ObjectsTestSuite) TestCopyObject() {
 		handleGetObject(s.server, getW, getReq)
 		s.Equal(http.StatusNotFound, getW.Code)
 	})
+
+	// s2 keeps no versions: versionId=null names the object, any other version is not implemented.
+	s.Run("versionId", func() {
+		s.putObject("cv", "src.txt", "versioned")
+		s.putObject("cv", "q?.txt", "question")
+		testCases := []struct {
+			caseName   string
+			source     string
+			wantStatus int
+		}{
+			{caseName: "null", source: "/cv/src.txt?versionId=null", wantStatus: http.StatusOK},
+			{caseName: "another version", source: "/cv/src.txt?versionId=abc", wantStatus: http.StatusNotImplemented},
+			{caseName: "an encoded ? stays in the key", source: "/cv/src.txt%3FversionId=abc", wantStatus: http.StatusNotFound},
+			{caseName: "an unencoded ? stays in the key", source: "/cv/q?.txt", wantStatus: http.StatusOK},
+			{caseName: "versionId after an unencoded ?", source: "/cv/q?.txt?versionId=null", wantStatus: http.StatusOK},
+			{caseName: "a second query key is part of the key", source: "/cv/src.txt?versionId=null&foo=1", wantStatus: http.StatusNotFound},
+			{caseName: "two versionIds are part of the key", source: "/cv/src.txt?versionId=null&versionId=abc", wantStatus: http.StatusNotFound},
+		}
+		for i, tc := range testCases {
+			s.Run(tc.caseName, func() {
+				dst := fmt.Sprintf("dst%d.txt", i)
+				req := httptest.NewRequest("PUT", "/cv/"+dst, nil)
+				req.SetPathValue("bucket", "cv")
+				req.SetPathValue("key", dst)
+				req.Header.Set("x-amz-copy-source", tc.source)
+				w := httptest.NewRecorder()
+				handlePutObject(s.server, w, req)
+
+				s.Require().Equal(tc.wantStatus, w.Code, w.Body.String())
+				strg, err := s.server.Buckets.Get(context.Background(), "cv")
+				s.Require().NoError(err)
+				ok, err := strg.Exists(context.Background(), dst)
+				s.Require().NoError(err)
+				s.Equal(tc.wantStatus == http.StatusOK, ok)
+			})
+		}
+	})
 }
 
 // --- Tree constraints ---
