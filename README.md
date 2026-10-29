@@ -432,7 +432,7 @@ if _, err := strg.Get(ctx, "missing.txt"); errors.Is(err, s2.ErrNotExist) {
 | `S2_SERVER_USER` | — | Username for authentication (disables auth if empty) |
 | `S2_SERVER_PASSWORD` | — | Password for authentication |
 | `S2_SERVER_BUCKETS` | — | Comma-separated list of buckets to create on startup |
-| `S2_SERVER_MAX_UPLOAD_SIZE` | `5368709120` (`16777216` on `memfs`) | Largest object in bytes accepted by PUT, UploadPart and a console upload |
+| `S2_SERVER_MAX_UPLOAD_SIZE` | `5368709120` (`16777216` on `memfs`) | Largest object in bytes accepted by PutObject, UploadPart (and the range an UploadPartCopy copies) and a console upload |
 | `S2_SERVER_MAX_PREVIEW_SIZE` | `10485760` | Largest text file in bytes the console previews (0 or negative uses the default) |
 | `S2_SERVER_MULTIPART_MAX_AGE` | `86400` | Seconds an unfinished multipart upload stays usable; past it the upload is refused and its parts are reclaimed (negative keeps uploads forever) |
 | `S2_SERVER_LOG_LEVEL` | `info` | Lowest level logged: `debug`, `info`, `warn` or `error`; `debug` adds one line per S3 API request and the detail of 4xx error responses |
@@ -521,11 +521,12 @@ s2-server -f config.json
 | GET | `/{bucket}` | ListObjectsV2 |
 | GET | `/{bucket}/{key...}` | GetObject (Range supported) |
 | HEAD | `/{bucket}/{key...}` | HeadObject |
+| GET | `/{bucket}/{key...}?tagging` | GetObjectTagging (always an empty tag set; s2 keeps no tags) |
 | PUT | `/{bucket}/{key...}` | PutObject / CopyObject |
 | DELETE | `/{bucket}/{key...}` | DeleteObject |
 | POST | `/{bucket}?delete` | DeleteObjects |
 | POST | `/{bucket}/{key...}?uploads` | CreateMultipartUpload |
-| PUT | `/{bucket}/{key...}?uploadId&partNumber` | UploadPart |
+| PUT | `/{bucket}/{key...}?uploadId&partNumber` | UploadPart / UploadPartCopy (`x-amz-copy-source-range` supported) |
 | POST | `/{bucket}/{key...}?uploadId` | CompleteMultipartUpload |
 | DELETE | `/{bucket}/{key...}?uploadId` | AbortMultipartUpload |
 | GET | `/{bucket}?uploads` | ListMultipartUploads |
@@ -603,8 +604,7 @@ S2 aims to cover the parts of the S3 API that matter for local development and l
 - **Server-side encryption (SSE-S3 / SSE-KMS / SSE-C)** — Not implemented. Use full-disk encryption at the OS level if needed.
 - **Bucket ACLs, S3 bucket-policy JSON on individual buckets** — Not implemented. S2 does support multiple principals with IAM-style `Policy` documents scoped by bucket/key/action (see [docs/users-policy.md](docs/users-policy.md)), but there is no per-bucket ACL or bucket-attached policy document as AWS has; access control is entirely principal-side.
 - **Replication, lifecycle rules, object lock** — Not implemented.
-- **Subresources** — `PUT` and `DELETE` naming a subresource such as `?tagging`, `?acl`, `?policy` or `?versioning`, on a bucket or an object, answer `501 NotImplemented` rather than touching it; so does `DELETE` with `?versionId`, since s2 keeps no versions.
-- **UploadPartCopy** — `PUT /{bucket}/{key}?partNumber&uploadId` with `x-amz-copy-source` answers `501 NotImplemented`; CopyObject copies whole objects.
+- **Subresources** — `PUT` and `DELETE` naming a subresource such as `?tagging`, `?acl`, `?policy` or `?versioning`, on a bucket or an object, answer `501 NotImplemented` rather than touching it; so does `DELETE` with `?versionId`, and an `x-amz-copy-source` naming a `?versionId` other than `null`, since s2 keeps no versions.
 
 If your use case needs any of the above, S2 is probably not the right tool — consider AWS S3, Ceph RGW, or SeaweedFS.
 

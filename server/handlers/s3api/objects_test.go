@@ -1840,6 +1840,43 @@ func (s *ObjectsTestSuite) TestCopyObject() {
 		handleGetObject(s.server, getW, getReq)
 		s.Equal(http.StatusNotFound, getW.Code)
 	})
+
+	// s2 keeps no versions: versionId=null names the object, any other version is not implemented.
+	s.Run("versionId", func() {
+		s.putObject("cv", "src.txt", "versioned")
+		s.putObject("cv", "q?.txt", "question")
+		testCases := []struct {
+			caseName   string
+			source     string
+			wantStatus int
+		}{
+			{caseName: "null", source: "/cv/src.txt?versionId=null", wantStatus: http.StatusOK},
+			{caseName: "another version", source: "/cv/src.txt?versionId=abc", wantStatus: http.StatusNotImplemented},
+			{caseName: "an encoded ? stays in the key", source: "/cv/src.txt%3FversionId=abc", wantStatus: http.StatusNotFound},
+			{caseName: "an unencoded ? stays in the key", source: "/cv/q?.txt", wantStatus: http.StatusOK},
+			{caseName: "versionId after an unencoded ?", source: "/cv/q?.txt?versionId=null", wantStatus: http.StatusOK},
+			{caseName: "a second query key is part of the key", source: "/cv/src.txt?versionId=null&foo=1", wantStatus: http.StatusNotFound},
+			{caseName: "two versionIds are part of the key", source: "/cv/src.txt?versionId=null&versionId=abc", wantStatus: http.StatusNotFound},
+		}
+		for i, tc := range testCases {
+			s.Run(tc.caseName, func() {
+				dst := fmt.Sprintf("dst%d.txt", i)
+				req := httptest.NewRequest("PUT", "/cv/"+dst, nil)
+				req.SetPathValue("bucket", "cv")
+				req.SetPathValue("key", dst)
+				req.Header.Set("x-amz-copy-source", tc.source)
+				w := httptest.NewRecorder()
+				handlePutObject(s.server, w, req)
+
+				s.Require().Equal(tc.wantStatus, w.Code, w.Body.String())
+				strg, err := s.server.Buckets.Get(context.Background(), "cv")
+				s.Require().NoError(err)
+				ok, err := strg.Exists(context.Background(), dst)
+				s.Require().NoError(err)
+				s.Equal(tc.wantStatus == http.StatusOK, ok)
+			})
+		}
+	})
 }
 
 // --- Tree constraints ---
@@ -1937,7 +1974,7 @@ func (s *ObjectsTestSuite) TestObjectSubresource() {
 		{caseName: "PutObjectAcl", method: http.MethodPut, key: "put-acl", query: "?acl", wantStatus: http.StatusNotImplemented, wantBody: "body"},
 		{caseName: "UploadPart with an empty upload ID", method: http.MethodPut, key: "put-empty-upload", query: "?uploadId=&partNumber=1", wantStatus: http.StatusBadRequest, wantBody: "body"},
 		{caseName: "UploadPart without an upload ID", method: http.MethodPut, key: "put-no-upload", query: "?partNumber=1", wantStatus: http.StatusBadRequest, wantBody: "body"},
-		{caseName: "UploadPartCopy without an upload ID", method: http.MethodPut, key: "put-copy-no-upload", query: "?partNumber=1", copySource: "/obj-sub/src", wantStatus: http.StatusNotImplemented, wantBody: "body"},
+		{caseName: "UploadPartCopy without an upload ID", method: http.MethodPut, key: "put-copy-no-upload", query: "?partNumber=1", copySource: "/obj-sub/src", wantStatus: http.StatusBadRequest, wantBody: "body"},
 		{caseName: "abort with an empty upload ID", method: http.MethodDelete, key: "del-empty-upload", query: "?uploadId=", wantStatus: http.StatusBadRequest, wantBody: "body"},
 		{caseName: "PutObject with the SDK operation hint", method: http.MethodPut, key: "put-xid", query: "?x-id=PutObject", wantStatus: http.StatusOK, wantBody: "<Tagging/>"},
 		{caseName: "DeleteObject with the SDK operation hint", method: http.MethodDelete, key: "del-xid", query: "?x-id=DeleteObject", wantStatus: http.StatusNoContent},
@@ -3622,6 +3659,39 @@ func TestEtagListMatches(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
 			require.Equal(t, tc.want, etagListMatches(tc.list, tc.etag, tc.weak))
+		})
+	}
+}
+
+// GetObjectTagging answers an empty tag set for an object and 404 for anything else, instead of the body.
+func (s *ObjectsTestSuite) TestGetObjectTagging() {
+	s.putObject("tags", "a.txt", "body")
+	testCases := []struct {
+		caseName   string
+		target     string
+		wantStatus int
+		wantErr    string
+	}{
+		{caseName: "an object", target: "/tags/a.txt?tagging", wantStatus: http.StatusOK},
+		{caseName: "as aws-sdk-go-v2 sends it", target: "/tags/a.txt?tagging&x-id=GetObjectTagging", wantStatus: http.StatusOK},
+		{caseName: "a missing key", target: "/tags/nope.txt?tagging", wantStatus: http.StatusNotFound, wantErr: "NoSuchKey"},
+		{caseName: "a missing bucket", target: "/no-such-tags/a.txt?tagging", wantStatus: http.StatusNotFound, wantErr: "NoSuchBucket"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			w := httptest.NewRecorder()
+			s.server.S3Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.target, nil))
+
+			s.Require().Equal(tc.wantStatus, w.Code, w.Body.String())
+			if tc.wantErr != "" {
+				var errResp ErrorResponse
+				s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+				s.Equal(tc.wantErr, errResp.Code)
+				return
+			}
+			s.Contains(w.Body.String(), "<TagSet></TagSet>")
+			var got Tagging
+			s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &got))
 		})
 	}
 }

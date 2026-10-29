@@ -87,12 +87,12 @@ func handleCreateMultipartUpload(s *server.Server, w http.ResponseWriter, r *htt
 }
 
 func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) {
-	// UploadPartCopy sends no body, so storing one would leave an empty part.
-	if r.Header.Get(copySourceHeader) != "" {
-		writeError(w, r, "NotImplemented", "This operation is not implemented", http.StatusNotImplemented)
-		return
+	copySource := r.Header.Get(copySourceHeader)
+	if copySource != "" {
+		server.SetS3Operation(r, "UploadPartCopy", "upload_id", r.URL.Query().Get("uploadId"), "part_number", r.URL.Query().Get("partNumber"), "copy_source", copySource)
+	} else {
+		server.SetS3Operation(r, "UploadPart", "upload_id", r.URL.Query().Get("uploadId"), "part_number", r.URL.Query().Get("partNumber"))
 	}
-	server.SetS3Operation(r, "UploadPart", "upload_id", r.URL.Query().Get("uploadId"), "part_number", r.URL.Query().Get("partNumber"))
 	ctx := r.Context()
 	bucketName := r.PathValue("bucket")
 	key := r.PathValue("key")
@@ -127,6 +127,11 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 	}
 
 	maxSize := s.Config.EffectiveMaxUploadSize()
+	// UploadPartCopy sends no body; the part is the source's range.
+	if copySource != "" {
+		uploadPartCopy(s, w, r, uploadID, partNumber, copySource, maxSize)
+		return
+	}
 	body, length, ok := uploadBody(w, r, maxSize)
 	if !ok {
 		return
@@ -146,6 +151,78 @@ func handleUploadPart(s *server.Server, w http.ResponseWriter, r *http.Request) 
 		w.Header().Set("ETag", etag)
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+// uploadPartCopy stores the source, or the range x-amz-copy-source-range names, as part n.
+func uploadPartCopy(s *server.Server, w http.ResponseWriter, r *http.Request, uploadID string, n int, copySource string, maxSize int64) {
+	srcBucket, srcKey, ok := parseCopySource(w, r, copySource)
+	if !ok {
+		return
+	}
+	srcObj, ok := copySourceObject(s, w, r, srcBucket, srcKey)
+	if !ok {
+		return
+	}
+	start, length := uint64(0), srcObj.Length()
+	h := r.Header.Get("x-amz-copy-source-range")
+	if h != "" {
+		first, last, ok := parseCopySourceRange(h)
+		if !ok {
+			writeError(w, r, "InvalidArgument", "The x-amz-copy-source-range value must be of the form bytes=first-last where first and last are the zero-based offsets of the first and last bytes to copy", http.StatusBadRequest)
+			return
+		}
+		if last >= length {
+			writeError(w, r, "InvalidArgument", fmt.Sprintf("Range specified is not valid for source object of size: %d", length), http.StatusBadRequest)
+			return
+		}
+		start, length = first, last-first+1
+	}
+	if length > s2.MustUint64(maxSize) {
+		writeError(w, r, "InvalidRequest", fmt.Sprintf("The specified copy source is larger than the maximum allowable size for a copy source: %d", maxSize), http.StatusBadRequest)
+		return
+	}
+
+	// Only a range opens a range: its length is at least 1, which OpenRange needs on every backend.
+	var rc io.ReadCloser
+	var err error
+	if h != "" {
+		rc, err = srcObj.OpenRange(start, length)
+	} else {
+		rc, err = srcObj.Open()
+	}
+	if err != nil {
+		writeS2Error(w, r, err)
+		return
+	}
+	defer func() { _ = rc.Close() }()
+
+	etag, err := s.Multipart.PutPart(r.Context(), uploadID, n, rc, length)
+	if err != nil {
+		writeUploadError(w, r, err)
+		return
+	}
+	writeXML(w, http.StatusOK, CopyPartResult{LastModified: time.Now().UTC(), ETag: etag})
+}
+
+// parseCopySourceRange reads bytes=first-last, both offsets given and first <= last, as S3 requires.
+func parseCopySourceRange(h string) (first, last uint64, ok bool) {
+	spec, ok := strings.CutPrefix(h, "bytes=")
+	if !ok {
+		return 0, 0, false
+	}
+	a, b, ok := strings.Cut(spec, "-")
+	if !ok {
+		return 0, 0, false
+	}
+	first, err := strconv.ParseUint(a, 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	last, err = strconv.ParseUint(b, 10, 64)
+	if err != nil || first > last {
+		return 0, 0, false
+	}
+	return first, last, true
 }
 
 func handleCompleteMultipartUpload(s *server.Server, w http.ResponseWriter, r *http.Request) {

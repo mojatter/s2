@@ -339,6 +339,11 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		handleListParts(s, w, r)
 		return
 	}
+	// The AWS CLI reads the source's tags before a multipart server-side copy.
+	if r.Method == http.MethodGet && r.URL.Query().Has("tagging") {
+		handleGetObjectTagging(s, w, r)
+		return
+	}
 	if r.Method == http.MethodHead {
 		server.SetS3Operation(r, "HeadObject")
 	} else {
@@ -466,6 +471,22 @@ func setObjectHeaders(w http.ResponseWriter, obj s2.Object, key string) {
 	setValidatorHeaders(w, obj)
 	w.Header().Set("Content-Type", server.ResolveContentType(obj, key))
 	w.Header().Set("Content-Length", strconv.FormatUint(obj.Length(), 10))
+}
+
+// handleGetObjectTagging answers the empty tag set of an existing object, since s2 keeps no tags.
+func handleGetObjectTagging(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	server.SetS3Operation(r, "GetObjectTagging")
+	ctx := r.Context()
+	strg, err := s.Buckets.Get(ctx, r.PathValue("bucket"))
+	if err != nil {
+		writeS2Error(w, r, err)
+		return
+	}
+	if _, err := strg.Get(ctx, r.PathValue("key")); err != nil {
+		writeS2Error(w, r, err)
+		return
+	}
+	writeXML(w, http.StatusOK, Tagging{})
 }
 
 // parseRangeHeader parses an RFC 7233 byte-range header against a total
@@ -630,40 +651,73 @@ func parseMetadataHeaders(r *http.Request) s2.Metadata {
 	return md
 }
 
-func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, copySource string) {
-	server.SetS3Operation(r, "CopyObject", "copy_source", copySource)
-	ctx := r.Context()
-	dstBucket := r.PathValue("bucket")
-	dstKey := r.PathValue("key")
-
+// parseCopySource reads x-amz-copy-source and authorizes reading it, writing the error when it fails.
+func parseCopySource(w http.ResponseWriter, r *http.Request, copySource string) (bucket, key string, ok bool) {
+	// S3 appends ?versionId=<id> unencoded; any other ? belongs to a key a client left unencoded.
+	if i := strings.LastIndex(copySource, "?"); i >= 0 {
+		if v, ok := strings.CutPrefix(copySource[i+1:], "versionId="); ok && !strings.Contains(v, "&") {
+			// s2 keeps no versions, so only null names an object.
+			if v != "null" {
+				writeError(w, r, "NotImplemented", "This operation is not implemented", http.StatusNotImplemented)
+				return "", "", false
+			}
+			copySource = copySource[:i]
+		}
+	}
 	// Parse copy source: /bucket/key or bucket/key (URL-encoded)
 	copySource, _ = url.PathUnescape(copySource)
 	copySource = strings.TrimPrefix(copySource, "/")
 	slashIdx := strings.Index(copySource, "/")
 	if slashIdx < 0 {
 		writeError(w, r, "InvalidArgument", "Invalid x-amz-copy-source", http.StatusBadRequest)
-		return
+		return "", "", false
 	}
-	srcBucket := copySource[:slashIdx]
-	srcKey := copySource[slashIdx+1:]
+	bucket, key = copySource[:slashIdx], copySource[slashIdx+1:]
 	// The header is not a URL path, so the mux's traversal check never saw it.
-	// An empty srcBucket would resolve to the root holding every bucket, and
+	// An empty bucket would resolve to the root holding every bucket, and
 	// the policy check below would run against a bucket named "".
-	if err := s2.ValidateName(srcBucket); err != nil {
+	if s2.ValidateName(bucket) != nil || s2.ValidateName(key) != nil {
 		writeError(w, r, "InvalidArgument", "Invalid x-amz-copy-source", http.StatusBadRequest)
-		return
-	}
-	if err := s2.ValidateName(srcKey); err != nil {
-		writeError(w, r, "InvalidArgument", "Invalid x-amz-copy-source", http.StatusBadRequest)
-		return
+		return "", "", false
 	}
 
-	// S3Action only authorized the destination (dstBucket/dstKey) against
-	// s3:PutObject up front -- the source is a distinct resource that must
-	// be checked separately, or a PutObject-only policy could be used to
-	// read arbitrary objects via CopyObject.
-	if !server.AllowedS3Action(server.UserFromContext(ctx), server.ActionGetObject, srcBucket, srcKey) {
+	// S3Action authorized only the destination; without this check a PutObject-only policy could read any object.
+	if !server.AllowedS3Action(server.UserFromContext(r.Context()), server.ActionGetObject, bucket, key) {
 		writeError(w, r, "AccessDenied", "Access Denied", http.StatusForbidden)
+		return "", "", false
+	}
+	return bucket, key, true
+}
+
+// copySourceObject gets the copy source and holds its x-amz-copy-source-if-* conditions, writing the error when it fails.
+func copySourceObject(s *server.Server, w http.ResponseWriter, r *http.Request, bucket, key string) (s2.Object, bool) {
+	ctx := r.Context()
+	srcStrg, err := s.Buckets.Get(ctx, bucket)
+	if err != nil {
+		writeS2Error(w, r, err)
+		return nil, false
+	}
+	srcObj, err := srcStrg.Get(ctx, key)
+	if err != nil {
+		writeS2Error(w, r, err)
+		return nil, false
+	}
+	// A copy answers 412 where a GET would answer 304, as S3 does.
+	if evalPreconditions(r.Header, "x-amz-copy-source-", srcObj) != 0 {
+		writeError(w, r, "PreconditionFailed", msgPreconditionFailed, http.StatusPreconditionFailed)
+		return nil, false
+	}
+	return srcObj, true
+}
+
+func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, copySource string) {
+	server.SetS3Operation(r, "CopyObject", "copy_source", copySource)
+	ctx := r.Context()
+	dstBucket := r.PathValue("bucket")
+	dstKey := r.PathValue("key")
+
+	srcBucket, srcKey, ok := parseCopySource(w, r, copySource)
+	if !ok {
 		return
 	}
 
@@ -674,21 +728,8 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	srcStrg, err := s.Buckets.Get(ctx, srcBucket)
-	if err != nil {
-		writeS2Error(w, r, err)
-		return
-	}
-
-	// Read source object
-	srcObj, err := srcStrg.Get(ctx, srcKey)
-	if err != nil {
-		writeS2Error(w, r, err)
-		return
-	}
-	// A copy answers 412 where a GET would answer 304, as S3 does.
-	if evalPreconditions(r.Header, "x-amz-copy-source-", srcObj) != 0 {
-		writeError(w, r, "PreconditionFailed", msgPreconditionFailed, http.StatusPreconditionFailed)
+	srcObj, ok := copySourceObject(s, w, r, srcBucket, srcKey)
+	if !ok {
 		return
 	}
 
