@@ -484,6 +484,59 @@ func (s *IntegrationSuite) TestMultipartUpload() {
 	s.Equal(part1+part2, buf.String())
 }
 
+// The SDK's UploadPartCopy reads the part's ETag from CopyPartResult, which Complete then checks.
+func (s *IntegrationSuite) TestMultipartUploadCopy() {
+	ctx := context.Background()
+	bucket := "mp-copy-bucket"
+	s.createTestBucket(bucket)
+	src := strings.Repeat("A", 1024) + strings.Repeat("B", 1024)
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("src.bin"),
+		Body:   strings.NewReader(src),
+	})
+	s.Require().NoError(err)
+
+	createOut, err := s.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("copy.bin"),
+	})
+	s.Require().NoError(err)
+	var parts []types.CompletedPart
+	for i, r := range []string{"bytes=1024-2047", "bytes=0-1023"} {
+		out, err := s.client.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
+			Bucket:          aws.String(bucket),
+			Key:             aws.String("copy.bin"),
+			UploadId:        createOut.UploadId,
+			PartNumber:      aws.Int32(int32(i + 1)),
+			CopySource:      aws.String(bucket + "/src.bin"),
+			CopySourceRange: aws.String(r),
+		})
+		s.Require().NoError(err)
+		s.Require().NotNil(out.CopyPartResult)
+		s.NotEmpty(aws.ToString(out.CopyPartResult.ETag))
+		parts = append(parts, types.CompletedPart{PartNumber: aws.Int32(int32(i + 1)), ETag: out.CopyPartResult.ETag})
+	}
+	_, err = s.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:          aws.String(bucket),
+		Key:             aws.String("copy.bin"),
+		UploadId:        createOut.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: parts},
+	})
+	s.Require().NoError(err)
+
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String("copy.bin"),
+	})
+	s.Require().NoError(err)
+	defer out.Body.Close()
+
+	got, err := io.ReadAll(out.Body)
+	s.Require().NoError(err)
+	s.Equal(src[1024:]+src[:1024], string(got))
+}
+
 func (s *IntegrationSuite) TestMultipartUploadAbort() {
 	ctx := context.Background()
 	bucket := "mp-abort-bucket"

@@ -811,23 +811,117 @@ func (s *MultipartTestSuite) TestUploadPartRacingAbort() {
 	s.False(exists, "the late part must not outlive the abort")
 }
 
-// UploadPartCopy is refused rather than stored as the empty part its body would give.
+// UploadPartCopy stores the source, or the range it names, as the part, and refuses what it cannot copy.
 func (s *MultipartTestSuite) TestUploadPartCopy() {
-	s.createBucket("mp-copy")
-	uploadID := s.initiateUpload("mp-copy", "file.bin", nil)
+	const src = "0123456789abcdefghij"
+	s.server.Config.MaxUploadSize = int64(len(src))
+	s.putObject("mp-copy", "src.bin", src)
+	s.putObject("mp-copy", "big.bin", src+"!")
+	s.putObject("mp-copy", "empty.bin", "")
+	srcETag := bodyETag(src)
+	// May write the destination, as S3Action checks up front, but may not read the source.
+	writeOnly := &server.User{Policy: &server.Policy{Statement: []server.Statement{
+		{Effect: "Allow", Action: []string{server.ActionPutObject}, Resource: []string{"arn:aws:s3:::mp-copy/dst.bin"}},
+	}}}
 
-	req := httptest.NewRequest("PUT", "/mp-copy/file.bin?partNumber=1&uploadId="+url.QueryEscape(uploadID), nil)
-	req.Header.Set("x-amz-copy-source", "/mp-copy/src.bin")
-	w := httptest.NewRecorder()
-	s.server.S3Handler().ServeHTTP(w, req)
+	testCases := []struct {
+		caseName string
+		source   string
+		header   map[string]string
+		user     *server.User
+		wantCode int
+		wantErr  string
+		wantPart string
+	}{
+		{caseName: "whole object", source: "/mp-copy/src.bin", wantCode: http.StatusOK, wantPart: src},
+		{caseName: "without leading slash", source: "mp-copy/src.bin", wantCode: http.StatusOK, wantPart: src},
+		{caseName: "range", source: "/mp-copy/src.bin", header: map[string]string{"x-amz-copy-source-range": "bytes=5-9"}, wantCode: http.StatusOK, wantPart: "56789"},
+		{caseName: "last byte", source: "/mp-copy/src.bin", header: map[string]string{"x-amz-copy-source-range": "bytes=19-19"}, wantCode: http.StatusOK, wantPart: "j"},
+		{caseName: "empty source", source: "/mp-copy/empty.bin", wantCode: http.StatusOK, wantPart: ""},
+		{caseName: "source condition holds", source: "/mp-copy/src.bin", header: map[string]string{"x-amz-copy-source-if-match": srcETag}, wantCode: http.StatusOK, wantPart: src},
+		{caseName: "source condition fails", source: "/mp-copy/src.bin", header: map[string]string{"x-amz-copy-source-if-match": `"other"`}, wantCode: http.StatusPreconditionFailed, wantErr: "PreconditionFailed"},
+		{caseName: "missing source", source: "/mp-copy/nope.bin", wantCode: http.StatusNotFound, wantErr: "NoSuchKey"},
+		{caseName: "missing source bucket", source: "/no-such-bucket/src.bin", wantCode: http.StatusNotFound, wantErr: "NoSuchBucket"},
+		{caseName: "source with no key", source: "/mp-copy", wantCode: http.StatusBadRequest, wantErr: "InvalidArgument"},
+		{caseName: "open-ended range", source: "/mp-copy/src.bin", header: map[string]string{"x-amz-copy-source-range": "bytes=5-"}, wantCode: http.StatusBadRequest, wantErr: "InvalidArgument"},
+		{caseName: "suffix range", source: "/mp-copy/src.bin", header: map[string]string{"x-amz-copy-source-range": "bytes=-5"}, wantCode: http.StatusBadRequest, wantErr: "InvalidArgument"},
+		{caseName: "reversed range", source: "/mp-copy/src.bin", header: map[string]string{"x-amz-copy-source-range": "bytes=9-5"}, wantCode: http.StatusBadRequest, wantErr: "InvalidArgument"},
+		{caseName: "range past the end", source: "/mp-copy/src.bin", header: map[string]string{"x-amz-copy-source-range": "bytes=10-20"}, wantCode: http.StatusBadRequest, wantErr: "InvalidArgument"},
+		{caseName: "source past the upload limit", source: "/mp-copy/big.bin", wantCode: http.StatusBadRequest, wantErr: "InvalidRequest"},
+		{caseName: "range within the upload limit", source: "/mp-copy/big.bin", header: map[string]string{"x-amz-copy-source-range": "bytes=1-20"}, wantCode: http.StatusOK, wantPart: "123456789abcdefghij!"},
+		{caseName: "source the caller cannot read", source: "/mp-copy/src.bin", user: writeOnly, wantCode: http.StatusForbidden, wantErr: "AccessDenied"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			uploadID := s.initiateUpload("mp-copy", "dst.bin", nil)
 
-	s.Equal(http.StatusNotImplemented, w.Code)
-	var errResp ErrorResponse
-	s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
-	s.Equal("NotImplemented", errResp.Code)
-	lw, parts := s.listParts("mp-copy", "file.bin", uploadID, "")
-	s.Require().Equal(http.StatusOK, lw.Code)
-	s.Empty(parts.Parts)
+			req := httptest.NewRequest("PUT", "/mp-copy/dst.bin?partNumber=1&uploadId="+url.QueryEscape(uploadID), nil)
+			req.SetPathValue("bucket", "mp-copy")
+			req.SetPathValue("key", "dst.bin")
+			req.Header.Set("x-amz-copy-source", tc.source)
+			for k, v := range tc.header {
+				req.Header.Set(k, v)
+			}
+			if tc.user != nil {
+				req = req.WithContext(server.WithUser(req.Context(), tc.user))
+			}
+			w := httptest.NewRecorder()
+			handleUploadPart(s.server, w, req)
+
+			s.Require().Equal(tc.wantCode, w.Code, w.Body.String())
+			if tc.wantErr != "" {
+				var errResp ErrorResponse
+				s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+				s.Equal(tc.wantErr, errResp.Code)
+				_, err := s.server.Multipart.Part(ctx, uploadID, 1)
+				s.ErrorIs(err, s2.ErrNotExist, "a refused copy stores no part")
+				return
+			}
+			var result CopyPartResult
+			s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+			s.Equal(bodyETag(tc.wantPart), result.ETag)
+			s.False(result.LastModified.IsZero())
+			part, err := s.server.Multipart.Part(ctx, uploadID, 1)
+			s.Require().NoError(err)
+			rc, err := part.Open()
+			s.Require().NoError(err)
+			defer func() { _ = rc.Close() }()
+
+			got, err := io.ReadAll(rc)
+			s.Require().NoError(err)
+			s.Equal(tc.wantPart, string(got))
+		})
+	}
+}
+
+// Copied ranges and an uploaded part, sent through the router, complete into one object.
+func (s *MultipartTestSuite) TestUploadPartCopyCompletes() {
+	const src = "0123456789abcdefghij"
+	s.putObject("mp-copy", "src.bin", src)
+	uploadID := s.initiateUpload("mp-copy", "dst.bin", nil)
+	copyPart := func(n int, rangeHeader string) CompletePart {
+		s.T().Helper()
+
+		req := httptest.NewRequest("PUT", fmt.Sprintf("/mp-copy/dst.bin?partNumber=%d&uploadId=%s", n, url.QueryEscape(uploadID)), nil)
+		req.Header.Set("x-amz-copy-source", "/mp-copy/src.bin")
+		req.Header.Set("x-amz-copy-source-range", rangeHeader)
+		w := httptest.NewRecorder()
+		s.server.S3Handler().ServeHTTP(w, req)
+		s.Require().Equal(http.StatusOK, w.Code, w.Body.String())
+
+		var result CopyPartResult
+		s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &result))
+		return CompletePart{PartNumber: n, ETag: result.ETag}
+	}
+
+	s.completeUpload("mp-copy", "dst.bin", uploadID,
+		copyPart(1, "bytes=10-19"),
+		copyPart(2, "bytes=0-9"),
+		s.uploadPart("mp-copy", "dst.bin", uploadID, 3, "!"),
+	)
+
+	s.Equal("abcdefghij0123456789!", s.getObject("mp-copy", "dst.bin").Body.String())
 }
 
 // A part that exists but cannot be read is the server's fault, not the client's.

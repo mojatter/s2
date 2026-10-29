@@ -102,6 +102,20 @@ run_test "GetCopiedObject" sh -c '
   [ "$out" = "hello e2e" ]
 '
 
+# Above the CLI's 8 MB threshold, cp reads the source's tags, then copies it with UploadPartCopy.
+run_test "ServerSideMultipartCopy" sh -c '
+  EP="'"$ENDPOINT"'"
+  set -e
+  head -c 20000000 /dev/urandom > /tmp/big-src.bin
+  aws s3 --endpoint-url "$EP" cp /tmp/big-src.bin s3://test-bucket/big-src.bin
+  aws s3 --endpoint-url "$EP" cp s3://test-bucket/big-src.bin s3://test-bucket/big-copy.bin
+  aws s3 --endpoint-url "$EP" cp s3://test-bucket/big-copy.bin /tmp/big-copy.bin
+  # The image has no cmp.
+  [ "$(sha256sum < /tmp/big-src.bin)" = "$(sha256sum < /tmp/big-copy.bin)" ]
+  aws s3 --endpoint-url "$EP" rm s3://test-bucket/big-src.bin
+  aws s3 --endpoint-url "$EP" rm s3://test-bucket/big-copy.bin
+'
+
 # List objects
 run_test "ListObjects" sh -c '
   out=$(aws s3api --endpoint-url "'"$ENDPOINT"'" list-objects-v2 --bucket test-bucket --query "Contents[].Key" --output text)

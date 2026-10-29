@@ -63,6 +63,13 @@ type CopyObjectResult struct {
 	ETag         string    `xml:"ETag,omitempty"`
 }
 
+// CopyPartResult represents the XML response for UploadPartCopy.
+type CopyPartResult struct {
+	XMLName      xml.Name  `xml:"http://s3.amazonaws.com/doc/2006-03-01/ CopyPartResult"`
+	LastModified time.Time `xml:"LastModified"`
+	ETag         string    `xml:"ETag,omitempty"`
+}
+
 // Tagging represents the XML response for GetObjectTagging; s2 keeps no tags, so the set is always empty.
 type Tagging struct {
 	XMLName xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ Tagging"`

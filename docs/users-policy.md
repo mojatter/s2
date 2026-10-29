@@ -78,8 +78,8 @@ A principal with **no `policy` field** (or the legacy `user`/`password` pair) ha
 | `s3:DeleteBucket` | `DELETE /{bucket}` |
 | `s3:ListBucket` | `HEAD /{bucket}`, `GET /{bucket}` (ListObjectsV2), and per-bucket filtering of `GET /` |
 | `s3:GetBucketLocation` | `GET /{bucket}?location` |
-| `s3:GetObject` | `GET`/`HEAD /{bucket}/{key}`, and the copy-source side of CopyObject |
-| `s3:PutObject` | `PUT /{bucket}/{key}` (including CopyObject's destination, UploadPart, and the multipart upload lifecycle) |
+| `s3:GetObject` | `GET`/`HEAD /{bucket}/{key}`, `GET /{bucket}/{key}?tagging`, and the copy-source side of CopyObject and UploadPartCopy |
+| `s3:PutObject` | `PUT /{bucket}/{key}` (including the destination of CopyObject and UploadPartCopy, UploadPart, and the multipart upload lifecycle) |
 | `s3:DeleteObject` | `DELETE /{bucket}/{key}`, batch `DeleteObjects`, and recursive folder delete in the Web Console |
 | `s3:ListBucketMultipartUploads` | `GET /{bucket}?uploads` (ListMultipartUploads) |
 | `s3:ListMultipartUploadParts` | `GET /{bucket}/{key}?uploadId=…` (ListParts) |

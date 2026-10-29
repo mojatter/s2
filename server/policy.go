@@ -24,8 +24,7 @@ const (
 	actionListMultipartUploadParts   = "s3:ListMultipartUploadParts"
 	// ActionListBucket is exported for FilterBucketNames' per-bucket check.
 	ActionListBucket = "s3:ListBucket"
-	// ActionGetObject is exported: handleCopyObject checks its copy-source
-	// object, which S3Action's destination-only mapping doesn't cover.
+	// ActionGetObject is exported: parseCopySource checks the copy source, which S3Action's destination-only mapping doesn't cover.
 	ActionGetObject = "s3:GetObject"
 	ActionPutObject = "s3:PutObject"
 	// ActionDeleteObject is exported for per-key checks on resources

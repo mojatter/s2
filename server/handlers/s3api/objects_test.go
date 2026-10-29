@@ -1937,7 +1937,7 @@ func (s *ObjectsTestSuite) TestObjectSubresource() {
 		{caseName: "PutObjectAcl", method: http.MethodPut, key: "put-acl", query: "?acl", wantStatus: http.StatusNotImplemented, wantBody: "body"},
 		{caseName: "UploadPart with an empty upload ID", method: http.MethodPut, key: "put-empty-upload", query: "?uploadId=&partNumber=1", wantStatus: http.StatusBadRequest, wantBody: "body"},
 		{caseName: "UploadPart without an upload ID", method: http.MethodPut, key: "put-no-upload", query: "?partNumber=1", wantStatus: http.StatusBadRequest, wantBody: "body"},
-		{caseName: "UploadPartCopy without an upload ID", method: http.MethodPut, key: "put-copy-no-upload", query: "?partNumber=1", copySource: "/obj-sub/src", wantStatus: http.StatusNotImplemented, wantBody: "body"},
+		{caseName: "UploadPartCopy without an upload ID", method: http.MethodPut, key: "put-copy-no-upload", query: "?partNumber=1", copySource: "/obj-sub/src", wantStatus: http.StatusBadRequest, wantBody: "body"},
 		{caseName: "abort with an empty upload ID", method: http.MethodDelete, key: "del-empty-upload", query: "?uploadId=", wantStatus: http.StatusBadRequest, wantBody: "body"},
 		{caseName: "PutObject with the SDK operation hint", method: http.MethodPut, key: "put-xid", query: "?x-id=PutObject", wantStatus: http.StatusOK, wantBody: "<Tagging/>"},
 		{caseName: "DeleteObject with the SDK operation hint", method: http.MethodDelete, key: "del-xid", query: "?x-id=DeleteObject", wantStatus: http.StatusNoContent},
