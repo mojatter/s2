@@ -521,6 +521,7 @@ s2-server -f config.json
 | GET | `/{bucket}` | ListObjectsV2 |
 | GET | `/{bucket}/{key...}` | GetObject (Range supported) |
 | HEAD | `/{bucket}/{key...}` | HeadObject |
+| GET | `/{bucket}/{key...}?tagging` | GetObjectTagging (always an empty tag set; s2 keeps no tags) |
 | PUT | `/{bucket}/{key...}` | PutObject / CopyObject |
 | DELETE | `/{bucket}/{key...}` | DeleteObject |
 | POST | `/{bucket}?delete` | DeleteObjects |

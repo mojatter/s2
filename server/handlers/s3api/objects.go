@@ -339,6 +339,11 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		handleListParts(s, w, r)
 		return
 	}
+	// The AWS CLI reads the source's tags before a multipart server-side copy.
+	if r.Method == http.MethodGet && r.URL.Query().Has("tagging") {
+		handleGetObjectTagging(s, w, r)
+		return
+	}
 	if r.Method == http.MethodHead {
 		server.SetS3Operation(r, "HeadObject")
 	} else {
@@ -466,6 +471,22 @@ func setObjectHeaders(w http.ResponseWriter, obj s2.Object, key string) {
 	setValidatorHeaders(w, obj)
 	w.Header().Set("Content-Type", server.ResolveContentType(obj, key))
 	w.Header().Set("Content-Length", strconv.FormatUint(obj.Length(), 10))
+}
+
+// handleGetObjectTagging answers the empty tag set of an existing object, since s2 keeps no tags.
+func handleGetObjectTagging(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	server.SetS3Operation(r, "GetObjectTagging")
+	ctx := r.Context()
+	strg, err := s.Buckets.Get(ctx, r.PathValue("bucket"))
+	if err != nil {
+		writeS2Error(w, r, err)
+		return
+	}
+	if _, err := strg.Get(ctx, r.PathValue("key")); err != nil {
+		writeS2Error(w, r, err)
+		return
+	}
+	writeXML(w, http.StatusOK, Tagging{})
 }
 
 // parseRangeHeader parses an RFC 7233 byte-range header against a total

@@ -3625,3 +3625,36 @@ func TestEtagListMatches(t *testing.T) {
 		})
 	}
 }
+
+// GetObjectTagging answers an empty tag set for an object and 404 for anything else, instead of the body.
+func (s *ObjectsTestSuite) TestGetObjectTagging() {
+	s.putObject("tags", "a.txt", "body")
+	testCases := []struct {
+		caseName   string
+		target     string
+		wantStatus int
+		wantErr    string
+	}{
+		{caseName: "an object", target: "/tags/a.txt?tagging", wantStatus: http.StatusOK},
+		{caseName: "as aws-sdk-go-v2 sends it", target: "/tags/a.txt?tagging&x-id=GetObjectTagging", wantStatus: http.StatusOK},
+		{caseName: "a missing key", target: "/tags/nope.txt?tagging", wantStatus: http.StatusNotFound, wantErr: "NoSuchKey"},
+		{caseName: "a missing bucket", target: "/no-such-tags/a.txt?tagging", wantStatus: http.StatusNotFound, wantErr: "NoSuchBucket"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			w := httptest.NewRecorder()
+			s.server.S3Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.target, nil))
+
+			s.Require().Equal(tc.wantStatus, w.Code, w.Body.String())
+			if tc.wantErr != "" {
+				var errResp ErrorResponse
+				s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &errResp))
+				s.Equal(tc.wantErr, errResp.Code)
+				return
+			}
+			s.Contains(w.Body.String(), "<TagSet></TagSet>")
+			var got Tagging
+			s.Require().NoError(xml.Unmarshal(w.Body.Bytes(), &got))
+		})
+	}
+}
