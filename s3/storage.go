@@ -528,7 +528,7 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 			objects = append(objects, s3types.ObjectIdentifier{Key: c.Key})
 		}
 
-		_, err = s.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		out, err := s.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
 			Bucket: aws.String(s.bucket),
 			Delete: &s3types.Delete{
 				Objects: objects,
@@ -536,6 +536,11 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 		})
 		if err != nil {
 			return fmt.Errorf("failed to delete objects: %w", err)
+		}
+		// S3 answers 200 for the batch and reports each key it kept in Errors.
+		if len(out.Errors) > 0 {
+			e := out.Errors[0]
+			return fmt.Errorf("failed to delete objects: %q: %s: %s", aws.ToString(e.Key), aws.ToString(e.Code), aws.ToString(e.Message))
 		}
 	}
 	return nil
