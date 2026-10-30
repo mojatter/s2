@@ -25,6 +25,13 @@ The steps below take a root from any version since v0.14.0 to the current one in
 
 Each section lists whether the data at rest changes, what to do, and, where known, what a downgrade does. A version not listed here changes nothing on disk and needs no step; what its responses change is in its release notes.
 
+### v0.29.0
+
+- **Data at rest:** unchanged; downgrading to v0.28.0 is safe.
+- On an `s3`, `gcs` or `azblob` root, ListObjectsV2 and the console no longer list a zero-byte key ending in `/`, the directory marker the AWS console, rclone or s3fs writes ([#275](https://github.com/mojatter/s2/issues/275)), and DeleteBucket succeeds on a bucket that holds nothing else instead of answering `409 BucketNotEmpty`; the delete removes the markers. A prefix that holds only markers still lists as a common prefix; DeleteBucket, or the console's folder delete as a user without a policy, removes it.
+- On an `s3` root, DeleteBucket, the console's bucket delete and its folder delete for a user without a policy now fail when the provider refuses to delete a key, for example with `AccessDenied` for credentials that lack `s3:DeleteObject` on it ([#484](https://github.com/mojatter/s2/issues/484)); DeleteBucket answers `500 InternalError`. Keys deleted before the refusal stay deleted; retry once the grant is fixed. Every earlier release reported success and left the key in place. To check for past damage, list the configured root with the provider's own tool: a bucket that DeleteBucket or the console deleted but that still has keys under `<bucket>/` was affected, and it still appears in ListBuckets, since s2 lists a bucket for every top-level prefix.
+- The same refusal now fails AbortMultipartUpload with `500 InternalError`, and the stale-upload sweep logs `Failed to remove stale multipart upload` at Warn; CompleteMultipartUpload still answers `200` and leaves the parts. Parts an earlier release left behind this way stay under `.multipart/<uploadId>/` in the root; once the grant is fixed, the hourly sweep removes them when they are older than `S2_SERVER_MULTIPART_MAX_AGE`, unless it is negative.
+
 ### v0.28.0
 
 - **Data at rest:** unchanged; downgrading to v0.27.0 is safe.
