@@ -162,12 +162,18 @@ func (s *azblobStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListR
 		if err != nil {
 			return s2.ListResult{}, fmt.Errorf("azblob: list blobs: %w", err)
 		}
+		if res.nextMarker != "" && res.nextMarker == marker {
+			return s2.ListResult{}, fmt.Errorf("azblob: list blobs: marker %q does not advance", marker)
+		}
 		marker = res.nextMarker
 
 		for _, item := range res.items {
 			// Names are sorted, so this only discards a leading run: what
 			// survives is a page tail the marker still points just past.
 			if item.name <= startAfter {
+				continue
+			}
+			if isDirMarker(item.name, item.contentLength) {
 				continue
 			}
 			out.Objects = append(out.Objects, &object{
@@ -417,6 +423,11 @@ func isBlobNotFound(err error) bool {
 		return false
 	}
 	return bloberror.HasCode(err, bloberror.BlobNotFound, bloberror.ContainerNotFound, bloberror.ResourceNotFound)
+}
+
+// isDirMarker reports a zero-byte key ending in "/", a directory marker another tool wrote: s2 cannot name it, so List hides it (#275).
+func isDirMarker(key string, size int64) bool {
+	return size == 0 && strings.HasSuffix(key, "/")
 }
 
 // joinKeepSlash is path.Join that keeps the trailing slash confining a listing

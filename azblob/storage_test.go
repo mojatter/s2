@@ -47,6 +47,8 @@ type mockAzblobClient struct {
 	copyBlobErr error
 	// onProperties runs after reading properties, to simulate a racing writer.
 	onProperties func()
+	// stuckMarker hands a continued listing back its own marker, as a broken endpoint might.
+	stuckMarker bool
 	// omitETag reports properties without Azure's ETag, as an endpoint that lacks one would.
 	omitETag bool
 	// etags counts writes, so no two writes share an ETag whatever the clock's resolution.
@@ -262,10 +264,11 @@ func (m *mockAzblobClient) doList(ctr, prefix, delimiter string, maxResults int3
 			continue
 		}
 
-		entry := b.key
+		// A key with the delimiter past the prefix rolls up, even one ending at it, as in the real service.
+		entry, rolled := b.key, false
 		if delimiter != "" {
 			if idx := strings.Index(b.key[len(prefix):], delimiter); idx >= 0 {
-				entry = b.key[:len(prefix)+idx+len(delimiter)]
+				entry, rolled = b.key[:len(prefix)+idx+len(delimiter)], true
 			}
 		}
 		if entry == last {
@@ -273,11 +276,14 @@ func (m *mockAzblobClient) doList(ctr, prefix, delimiter string, maxResults int3
 		}
 		if n >= maxResults {
 			result.nextMarker = mockMarkerPrefix + entry
+			if m.stuckMarker && marker != "" {
+				result.nextMarker = marker
+			}
 			break
 		}
 		n++
 		last = entry
-		if entry != b.key {
+		if rolled {
 			result.prefixes = append(result.prefixes, entry)
 			continue
 		}
@@ -553,6 +559,74 @@ func (s *StorageTestSuite) TestListPrefixesAreRelative() {
 	res, err := strg.List(context.Background(), s2.ListOptions{})
 	s.Require().NoError(err)
 	s.Equal([]string{"dd/"}, res.CommonPrefixes)
+}
+
+// A zero-byte key ending in "/" is a directory marker another tool wrote: List hides it, DeleteRecursive still removes it (#275).
+func (s *StorageTestSuite) TestListHidesDirMarkers() {
+	testCases := []struct {
+		caseName     string
+		prefix       string
+		keys         map[string]string
+		opts         s2.ListOptions
+		stuck        bool
+		want         []string
+		wantPrefixes []string
+		wantErr      string
+	}{
+		{caseName: "zero-byte marker", keys: map[string]string{"photos/": "", "photos/a.jpg": "a"}, opts: s2.ListOptions{Recursive: true}, want: []string{"photos/a.jpg"}},
+		{caseName: "marker with a body", keys: map[string]string{"photos/": "DATA"}, opts: s2.ListOptions{Recursive: true}, want: []string{"photos/"}},
+		{caseName: "delimited listing of the marked prefix", keys: map[string]string{"photos/": "", "photos/a.jpg": "a"}, opts: s2.ListOptions{Prefix: "photos/"}, want: []string{"photos/a.jpg"}},
+		{caseName: "storage prefix's own marker", prefix: "b1", keys: map[string]string{"b1/": "", "b1/a.txt": "a"}, opts: s2.ListOptions{Recursive: true}, want: []string{"a.txt"}},
+		{caseName: "page of markers only", keys: map[string]string{"a/": "", "b.txt": "b"}, opts: s2.ListOptions{Recursive: true, Limit: 1}, want: []string{"b.txt"}},
+		{caseName: "run of markers across pages", keys: map[string]string{"a/": "", "b/": "", "c.txt": "c"}, opts: s2.ListOptions{Recursive: true, Limit: 1}, want: []string{"c.txt"}},
+		{caseName: "trailing marker", keys: map[string]string{"a.txt": "a", "b/": ""}, opts: s2.ListOptions{Recursive: true, Limit: 1}, want: []string{"a.txt"}},
+		{caseName: "marker-only prefix still lists as a common prefix", keys: map[string]string{"photos/": ""}, want: []string{}, wantPrefixes: []string{"photos/"}},
+		{caseName: "marker beside the object it folds onto", keys: map[string]string{"photos": "n", "photos/": ""}, opts: s2.ListOptions{Recursive: true}, want: []string{"photos"}},
+		{caseName: "token that does not advance", keys: map[string]string{"a/": "", "b/": "", "c.txt": "c"}, opts: s2.ListOptions{Recursive: true, Limit: 1}, stuck: true, wantErr: "does not advance"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m := newMockAzblobClient()
+			m.stuckMarker = tc.stuck
+			for k, v := range tc.keys {
+				m.put("mycontainer", k, []byte(v), nil)
+			}
+			strg := &azblobStorage{client: m, container: "mycontainer", prefix: tc.prefix}
+			ctx := context.Background()
+
+			got, prefixes := []string{}, []string{}
+			opts := tc.opts
+			for {
+				res, err := strg.List(ctx, opts)
+				if tc.wantErr != "" && err != nil {
+					s.ErrorContains(err, tc.wantErr)
+					return
+				}
+				s.Require().NoError(err)
+				got = append(got, objectNames(res.Objects)...)
+				prefixes = append(prefixes, res.CommonPrefixes...)
+				if res.NextAfter == "" {
+					break
+				}
+				s.NotEmpty(res.Objects, "a page with NextAfter is empty")
+				opts.After = res.NextAfter
+			}
+			s.Empty(tc.wantErr, "List did not fail")
+			s.Equal(tc.want, got)
+			if tc.wantPrefixes != nil {
+				s.Equal(tc.wantPrefixes, prefixes)
+			}
+		})
+	}
+	s.Run("DeleteRecursive removes a marker", func() {
+		m := newMockAzblobClient()
+		m.put("mycontainer", "photos/", nil, nil)
+		m.put("mycontainer", "photos/a.jpg", []byte("a"), nil)
+		strg := &azblobStorage{client: m, container: "mycontainer"}
+
+		s.Require().NoError(strg.DeleteRecursive(context.Background(), "photos"))
+		s.Empty(m.blobs)
+	})
 }
 
 func (s *StorageTestSuite) TestS2TestGetPut() {

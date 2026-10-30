@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,7 +41,7 @@ type mockObject struct {
 
 type mockGCSClient struct {
 	mu             sync.RWMutex
-	objects        map[string]*mockObject // keyed by "bucket/key"
+	objects        map[string]*mockObject // keyed by bucket + "/" + key, verbatim: path.Join would fold "photos/" onto "photos"
 	patches        int                    // patch calls, so a test can pin how many requests PutMetadata takes
 	onAttrs        func()                 // runs after reading attrs, to simulate a racing writer
 	judgeOnWrite   bool                   // judges preconditions on Write, as a resumable upload does
@@ -50,6 +49,8 @@ type mockGCSClient struct {
 	// ignoreGenerationMatch reads as an endpoint that does not honour ifGenerationMatch.
 	ignoreGenerationMatch bool
 	generations           atomic.Uint64
+	// stuckToken makes listings hand back the token they resumed at.
+	stuckToken bool
 }
 
 func newMockGCSClient() *mockGCSClient {
@@ -70,7 +71,7 @@ func (m *mockGCSClient) put(bucket, key string, body []byte, metadata map[string
 	}
 	// A new generation resets the metageneration, as the service does; generations are never reused, even after a delete.
 	generation := int64(m.generations.Add(1))
-	m.objects[path.Join(bucket, key)] = &mockObject{
+	m.objects[bucket+"/"+key] = &mockObject{
 		bucket:         bucket,
 		key:            key,
 		body:           body,
@@ -85,7 +86,7 @@ func (m *mockGCSClient) get(bucket, key string) (*mockObject, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	obj, ok := m.objects[path.Join(bucket, key)]
+	obj, ok := m.objects[bucket+"/"+key]
 	return obj, ok
 }
 
@@ -93,7 +94,7 @@ func (m *mockGCSClient) del(bucket, key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	delete(m.objects, path.Join(bucket, key))
+	delete(m.objects, bucket+"/"+key)
 }
 
 func mockMD5(body []byte) []byte {
@@ -180,7 +181,7 @@ func (b *mockBucket) objects(ctx context.Context, q *storage.Query) gcsObjectIte
 		})
 	}
 
-	return &mockIterator{entries: entries}
+	return &mockIterator{entries: entries, stuck: b.client.stuckToken}
 }
 
 func (b *mockBucket) signedURL(name string, opts *storage.SignedURLOptions) (string, error) {
@@ -375,6 +376,9 @@ type mockIterator struct {
 	pageEnd int // exclusive end of the page currently buffered
 	maxSize int
 	err     error
+	// stuck hands back one token for every page, as a broken endpoint might.
+	stuck bool
+	token string
 }
 
 func (i *mockIterator) next() (*storage.ObjectAttrs, error) {
@@ -398,6 +402,7 @@ func (i *mockIterator) next() (*storage.ObjectAttrs, error) {
 }
 
 func (i *mockIterator) setPageToken(token string) {
+	i.token = token
 	if token == "" {
 		return
 	}
@@ -421,6 +426,12 @@ func (i *mockIterator) remaining() int {
 func (i *mockIterator) nextPageToken() string {
 	if i.pageEnd >= len(i.entries) {
 		return ""
+	}
+	if i.stuck {
+		if i.token == "" {
+			i.token = mockPageTokenPrefix + strconv.Itoa(i.pageEnd)
+		}
+		return i.token
 	}
 	return mockPageTokenPrefix + strconv.Itoa(i.pageEnd)
 }
@@ -619,6 +630,13 @@ func (s *StorageTestSuite) TestListCursors() {
 			want:       []string{"c2.txt"},
 		},
 		{
+			caseName:   "start after with limit one still fills the page",
+			startAfter: "a.txt",
+			limit:      1,
+			want:       []string{"b.txt"},
+			wantNext:   true,
+		},
+		{
 			caseName: "limit yields a page token",
 			limit:    2,
 			want:     []string{"a.txt", "b.txt"},
@@ -693,6 +711,74 @@ func (s *StorageTestSuite) TestListPrefixesAreRelative() {
 	res, err := strg.List(context.Background(), s2.ListOptions{})
 	s.Require().NoError(err)
 	s.Equal([]string{"dd/"}, res.CommonPrefixes)
+}
+
+// A zero-byte key ending in "/" is a directory marker another tool wrote: List hides it, DeleteRecursive still removes it (#275).
+func (s *StorageTestSuite) TestListHidesDirMarkers() {
+	testCases := []struct {
+		caseName     string
+		prefix       string
+		keys         map[string]string
+		opts         s2.ListOptions
+		stuck        bool
+		want         []string
+		wantPrefixes []string
+		wantErr      string
+	}{
+		{caseName: "zero-byte marker", keys: map[string]string{"photos/": "", "photos/a.jpg": "a"}, opts: s2.ListOptions{Recursive: true}, want: []string{"photos/a.jpg"}},
+		{caseName: "marker with a body", keys: map[string]string{"photos/": "DATA"}, opts: s2.ListOptions{Recursive: true}, want: []string{"photos/"}},
+		{caseName: "delimited listing of the marked prefix", keys: map[string]string{"photos/": "", "photos/a.jpg": "a"}, opts: s2.ListOptions{Prefix: "photos/"}, want: []string{"photos/a.jpg"}},
+		{caseName: "storage prefix's own marker", prefix: "b1", keys: map[string]string{"b1/": "", "b1/a.txt": "a"}, opts: s2.ListOptions{Recursive: true}, want: []string{"a.txt"}},
+		{caseName: "page of markers only", keys: map[string]string{"a/": "", "b.txt": "b"}, opts: s2.ListOptions{Recursive: true, Limit: 1}, want: []string{"b.txt"}},
+		{caseName: "run of markers across pages", keys: map[string]string{"a/": "", "b/": "", "c.txt": "c"}, opts: s2.ListOptions{Recursive: true, Limit: 1}, want: []string{"c.txt"}},
+		{caseName: "trailing marker", keys: map[string]string{"a.txt": "a", "b/": ""}, opts: s2.ListOptions{Recursive: true, Limit: 1}, want: []string{"a.txt"}},
+		{caseName: "marker-only prefix still lists as a common prefix", keys: map[string]string{"photos/": ""}, want: []string{}, wantPrefixes: []string{"photos/"}},
+		{caseName: "marker beside the object it folds onto", keys: map[string]string{"photos": "n", "photos/": ""}, opts: s2.ListOptions{Recursive: true}, want: []string{"photos"}},
+		{caseName: "token that does not advance", keys: map[string]string{"a/": "", "b/": "", "c.txt": "c"}, opts: s2.ListOptions{Recursive: true, Limit: 1}, stuck: true, wantErr: "does not advance"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m := newMockGCSClient()
+			m.stuckToken = tc.stuck
+			for k, v := range tc.keys {
+				m.put("mybucket", k, []byte(v), nil)
+			}
+			strg := &gcsStorage{client: m, bucket: "mybucket", prefix: tc.prefix}
+			ctx := context.Background()
+
+			got, prefixes := []string{}, []string{}
+			opts := tc.opts
+			for {
+				res, err := strg.List(ctx, opts)
+				if tc.wantErr != "" && err != nil {
+					s.ErrorContains(err, tc.wantErr)
+					return
+				}
+				s.Require().NoError(err)
+				got = append(got, objectNames(res.Objects)...)
+				prefixes = append(prefixes, res.CommonPrefixes...)
+				if res.NextAfter == "" {
+					break
+				}
+				s.NotEmpty(res.Objects, "a page with NextAfter is empty")
+				opts.After = res.NextAfter
+			}
+			s.Empty(tc.wantErr, "List did not fail")
+			s.Equal(tc.want, got)
+			if tc.wantPrefixes != nil {
+				s.Equal(tc.wantPrefixes, prefixes)
+			}
+		})
+	}
+	s.Run("DeleteRecursive removes a marker", func() {
+		m := newMockGCSClient()
+		m.put("mybucket", "photos/", nil, nil)
+		m.put("mybucket", "photos/a.jpg", []byte("a"), nil)
+		strg := &gcsStorage{client: m, bucket: "mybucket"}
+
+		s.Require().NoError(strg.DeleteRecursive(context.Background(), "photos"))
+		s.Empty(m.objects)
+	})
 }
 
 func (s *StorageTestSuite) TestS2TestGetPut() {
