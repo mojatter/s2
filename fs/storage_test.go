@@ -33,9 +33,9 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
-// errReadDirFS wraps an fs.FS and injects a ReadDir error for a specific path.
+// errReadDirFS wraps a writable memfs and injects a ReadDir error for a specific path.
 type errReadDirFS struct {
-	fs.FS
+	*memfs.MemFS
 	errorPath string
 }
 
@@ -43,11 +43,7 @@ func (e *errReadDirFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	if name == e.errorPath {
 		return nil, fmt.Errorf("injected ReadDir error for %q", name)
 	}
-	return fs.ReadDir(e.FS, name)
-}
-
-func (e *errReadDirFS) Open(name string) (fs.File, error) {
-	return e.FS.Open(name)
+	return e.MemFS.ReadDir(name)
 }
 
 // goneStatFS answers ErrNotExist for one path's Stat while ReadDir still sees
@@ -809,19 +805,21 @@ func (s *StorageTestSuite) TestListRecursivePaginationOrder() {
 // TestListRecursiveReadDir verifies that a failed ReadDir is propagated, and that a directory the walk prunes is never read.
 func (s *StorageTestSuite) TestListRecursiveReadDir() {
 	testCases := []struct {
-		caseName string
-		opts     s2.ListOptions
-		want     []string
-		wantErr  string
+		caseName  string
+		errorPath string
+		opts      s2.ListOptions
+		want      []string
+		wantErr   string
 	}{
-		{caseName: "propagates the error", opts: s2.ListOptions{Limit: 10}, wantErr: "injected ReadDir error"},
-		{caseName: "skips a directory the prefix rules out", opts: s2.ListOptions{Prefix: "a", Limit: 10}, want: []string{"a.txt"}},
-		{caseName: "skips a directory before the cursor", opts: s2.ListOptions{StartAfter: "d", Limit: 10}},
-		{caseName: "stops before a directory past the page", opts: s2.ListOptions{Limit: 1}, want: []string{"a.txt"}},
+		{caseName: "propagates the error", errorPath: "cc", opts: s2.ListOptions{Limit: 10}, wantErr: "injected ReadDir error"},
+		{caseName: "skips a directory the prefix rules out", errorPath: "cc", opts: s2.ListOptions{Prefix: "a", Limit: 10}, want: []string{"a.txt"}},
+		{caseName: "skips a directory before the cursor", errorPath: "cc", opts: s2.ListOptions{StartAfter: "d", Limit: 10}},
+		{caseName: "stops before a directory past the page", errorPath: "cc", opts: s2.ListOptions{Limit: 1}, want: []string{"a.txt"}},
+		{caseName: "starts at the prefix's directory", errorPath: ".", opts: s2.ListOptions{Prefix: "cc/c", Limit: 10}, want: []string{"cc/c1.txt", "cc/c2.txt"}},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			strg := &storage{lk: newNameLocker(), fsys: &errReadDirFS{FS: s.testMemFS(), errorPath: "cc"}}
+			strg := &storage{lk: newNameLocker(), fsys: &errReadDirFS{MemFS: s.testMemFS().(*memfs.MemFS), errorPath: tc.errorPath}}
 			tc.opts.Recursive = true
 			res, err := strg.List(context.Background(), tc.opts)
 			if tc.wantErr != "" {
@@ -1108,6 +1106,20 @@ func (s *StorageTestSuite) TestDeleteRecursive() {
 			prefix:   "a.txt/",
 			wantLeft: []string{"a.txt", "b.txt", "cc/c1.txt", "cc/c2.txt"},
 		},
+		{
+			caseName: "memfs below an object",
+			strg:     &storage{lk: newNameLocker(), fsys: s.testMemFS()},
+			ctx:      context.Background(),
+			prefix:   "a.txt/x/",
+			wantLeft: []string{"a.txt", "b.txt", "cc/c1.txt", "cc/c2.txt"},
+		},
+		{
+			caseName: "osfs below an object",
+			strg:     &storage{lk: newNameLocker(), fsys: s.testOSFS()},
+			ctx:      context.Background(),
+			prefix:   "a.txt/x/",
+			wantLeft: []string{"a.txt", "b.txt", "cc/c1.txt", "cc/c2.txt"},
+		},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
@@ -1219,8 +1231,8 @@ func (s *StorageTestSuite) TestCount() {
 	}
 }
 
-// A symlinked directory is unsupported, but Count must still agree with a recursive List, which does not follow it.
-func (s *StorageTestSuite) TestCountDoesNotFollowASymlinkedDirectory() {
+// A symlinked directory is unsupported, but Count must still agree with a recursive List, which follows it only as the prefix's directory.
+func (s *StorageTestSuite) TestCountFollowsASymlinkedDirectoryAsList() {
 	dir := s.T().TempDir()
 	strg := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(dir))
 	for _, name := range []string{"real/a.txt", "real/b.txt"} {
@@ -1233,7 +1245,7 @@ func (s *StorageTestSuite) TestCountDoesNotFollowASymlinkedDirectory() {
 		prefix   string
 		want     int64
 	}{
-		{caseName: "inside the link", prefix: "link/", want: 0},
+		{caseName: "inside the link", prefix: "link/", want: 2},
 		{caseName: "the link itself", prefix: "li", want: 1},
 		{caseName: "the real directory", prefix: "real/", want: 2},
 	}
@@ -1247,6 +1259,15 @@ func (s *StorageTestSuite) TestCountDoesNotFollowASymlinkedDirectory() {
 			s.Len(res.Objects, int(tc.want), "Count must match a recursive List")
 		})
 	}
+	// DeleteRecursive follows it too, as the console's per-object folder delete does through List.
+	s.Run("DeleteRecursive inside the link", func() {
+		s.Require().NoError(strg.DeleteRecursive(context.Background(), "link/"))
+		got, err := s2.Count(context.Background(), strg, s2.CountOptions{Prefix: "real/"})
+		s.Require().NoError(err)
+		s.Zero(got.Objects)
+		_, err = os.Lstat(filepath.Join(dir, "link"))
+		s.ErrorIs(err, fs.ErrNotExist)
+	})
 }
 
 // A root that is not a directory is a misconfiguration, not an empty bucket:
@@ -1425,6 +1446,20 @@ func (s *StorageTestSuite) TestDeleteRecursiveUnreadableRoot() {
 	strg := &storage{lk: newNameLocker(), fsys: &errStatMemFS{memfs.New()}}
 
 	s.ErrorIs(strg.DeleteRecursive(context.Background(), ""), fs.ErrPermission)
+}
+
+// A prefix delete walks from the prefix's directory, so it never reads the root.
+func (s *StorageTestSuite) TestDeleteRecursiveStartsAtThePrefixsDirectory() {
+	base := s.testMemFS().(*memfs.MemFS)
+	strg := &storage{lk: newNameLocker(), fsys: &errReadDirFS{MemFS: base, errorPath: "."}}
+
+	s.Require().NoError(strg.DeleteRecursive(context.Background(), "cc/c"))
+	for _, name := range []string{"cc/c1.txt", "cc/c2.txt"} {
+		_, err := fs.Stat(base, name)
+		s.ErrorIs(err, fs.ErrNotExist, name)
+	}
+	_, err := fs.Stat(base, "a.txt")
+	s.NoError(err)
 }
 
 func (s *StorageTestSuite) TestSub() {

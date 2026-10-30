@@ -237,7 +237,7 @@ An `osfs` or `memfs` object is two files, its body and its metadata file, each r
 - `Copy` holds its source shared, so a `Get` or another `Copy` of it runs alongside and only a write of the source waits for it; on a filesystem without `Rename` that section lasts while the body streams.
 - A write (`Put`, `Upload`, `Copy`, `PutMetadata`, `MigrateMeta`, and `Move` without `Rename`) needs `wfs.WriteFileFS` plus `Rename` or `RemoveFile`, and fails with `wfs.ErrNotImplemented` on a filesystem with neither, where it could only write in place and a key copied onto itself would end up empty. `Delete` needs `RemoveFile`. Nothing is checked when the storage is created.
 - `fs.MigrateMeta` takes no lock; run it while nothing writes.
-- A symlinked directory inside a root is not supported: a listing shows it as an object, and deleting an object under it removes the link.
+- A symlinked directory inside a root is not supported: a listing shows it as an object unless the prefix reaches into it, when the listing, `Count` and `DeleteRecursive` follow it, and deleting under it, by name or with `DeleteRecursive`, removes the target's objects and can remove the link while the target still holds others.
 
 ### What a NameLocker is asked for
 
