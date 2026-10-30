@@ -57,6 +57,8 @@ type mockS3Client struct {
 	checksumAlgorithm s3types.ChecksumAlgorithm
 	// stuckToken hands a continued listing back its own token, as a broken endpoint might.
 	stuckToken bool
+	// refuseDelete names a raw key DeleteObjects keeps and reports in Errors.
+	refuseDelete string
 }
 
 type mockUpload struct {
@@ -327,10 +329,15 @@ func (m *mockS3Client) DeleteObject(ctx context.Context, params *s3.DeleteObject
 }
 
 func (m *mockS3Client) DeleteObjects(ctx context.Context, params *s3.DeleteObjectsInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectsOutput, error) {
+	out := &s3.DeleteObjectsOutput{}
 	for _, id := range params.Delete.Objects {
+		if aws.ToString(id.Key) == m.refuseDelete {
+			out.Errors = append(out.Errors, s3types.Error{Key: id.Key, Code: aws.String("AccessDenied"), Message: aws.String("Access Denied")})
+			continue
+		}
 		m.delete(aws.ToString(params.Bucket), aws.ToString(id.Key))
 	}
-	return &s3.DeleteObjectsOutput{}, nil
+	return out, nil
 }
 
 func (m *mockS3Client) GetObject(ctx context.Context, params *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
@@ -1204,28 +1211,37 @@ func (s *StorageTestSuite) TestDelete() {
 
 func (s *StorageTestSuite) TestDeleteRecursive() {
 	testCases := []struct {
-		caseName string
-		ctx      context.Context
-		prefix   string
-		wantErr  string
-		wantLeft []string
+		caseName     string
+		ctx          context.Context
+		prefix       string
+		refuseDelete string
+		wantErr      string
+		wantLeft     []string
 	}{
 		{
 			caseName: "typical",
 			prefix:   "cc",
 			wantLeft: []string{"a.txt", "b.txt"},
 		},
+		{
+			caseName:     "key the batch reports in Errors",
+			prefix:       "cc",
+			refuseDelete: "cc/c2.txt",
+			wantErr:      `"cc/c2.txt": AccessDenied: Access Denied`,
+			wantLeft:     []string{"a.txt", "b.txt", "cc/c2.txt"},
+		},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
-			_, strg := s.testMockClient()
+			m, strg := s.testMockClient()
+			m.refuseDelete = tc.refuseDelete
 
 			err := strg.DeleteRecursive(tc.ctx, tc.prefix)
 			if tc.wantErr != "" {
 				s.ErrorContains(err, tc.wantErr)
-				return
+			} else {
+				s.Require().NoError(err)
 			}
-			s.Require().NoError(err)
 
 			res, err := strg.List(tc.ctx, s2.ListOptions{Limit: 10, Recursive: true})
 			s.Require().NoError(err)
