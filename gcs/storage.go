@@ -116,8 +116,7 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 	}
 
 	it := s.client.bucket(s.bucket).objects(ctx, q)
-	// One s2 page is one SDK page, so the token the SDK hands back resumes
-	// where this call stops.
+	// An s2 page ends with an SDK page, so the token the SDK hands back resumes where this call stops.
 	it.setMaxSize(limit)
 	it.setPageToken(opts.After)
 
@@ -125,6 +124,7 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 		Objects:        make([]s2.Object, 0),
 		CommonPrefixes: make([]string, 0),
 	}
+	prev := opts.After
 	for {
 		attrs, err := it.next()
 		if errors.Is(err, iterator.Done) {
@@ -141,7 +141,7 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 			if q.StartOffset == "" || attrs.Prefix > q.StartOffset {
 				out.CommonPrefixes = append(out.CommonPrefixes, s2.RelName(s.prefix, attrs.Prefix))
 			}
-		} else if name := s2.RelName(s.prefix, attrs.Name); q.StartOffset == "" || name != opts.StartAfter {
+		} else if name := s2.RelName(s.prefix, attrs.Name); (q.StartOffset == "" || name != opts.StartAfter) && !isDirMarker(attrs.Name, attrs.Size) {
 			md, contentType := objectMetadata(attrs)
 			out.Objects = append(out.Objects, &object{
 				client:       s.client,
@@ -158,10 +158,17 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 		}
 
 		// Once the buffered page is drained, the token the SDK holds resumes
-		// at the next one.
+		// at the next one; a page left empty reads on, as it must not carry it.
 		if it.remaining() == 0 {
-			out.NextAfter = it.nextPageToken()
-			break
+			tok := it.nextPageToken()
+			if tok == "" || len(out.Objects) > 0 || len(out.CommonPrefixes) > 0 {
+				out.NextAfter = tok
+				break
+			}
+			if tok == prev {
+				return s2.ListResult{}, fmt.Errorf("gcs: list objects: page token %q does not advance", tok)
+			}
+			prev = tok
 		}
 	}
 	return out, nil
@@ -470,6 +477,11 @@ func emulatorEndpoint(host string) (string, error) {
 	}
 	u.Path = "storage/v1/"
 	return u.String(), nil
+}
+
+// isDirMarker reports a zero-byte key ending in "/", a directory marker another tool wrote: s2 cannot name it, so List hides it (#275).
+func isDirMarker(key string, size int64) bool {
+	return size == 0 && strings.HasSuffix(key, "/")
 }
 
 // joinKeepSlash is path.Join that keeps the trailing slash confining a listing

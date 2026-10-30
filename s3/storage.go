@@ -202,34 +202,46 @@ func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult,
 		input.Delimiter = aws.String(delimiter)
 	}
 
-	res, err := s.client.ListObjectsV2(ctx, input)
-	if err != nil {
-		return s2.ListResult{}, fmt.Errorf("failed to list objects: %w", err)
-	}
-
 	out := s2.ListResult{
-		CommonPrefixes: make([]string, 0, len(res.CommonPrefixes)),
-		Objects:        make([]s2.Object, 0, len(res.Contents)),
+		CommonPrefixes: make([]string, 0),
+		Objects:        make([]s2.Object, 0),
 	}
-	for _, p := range res.CommonPrefixes {
-		out.CommonPrefixes = append(out.CommonPrefixes, s2.RelName(s.prefix, aws.ToString(p.Prefix)))
+	for {
+		res, err := s.client.ListObjectsV2(ctx, input)
+		if err != nil {
+			return s2.ListResult{}, fmt.Errorf("failed to list objects: %w", err)
+		}
+		for _, p := range res.CommonPrefixes {
+			out.CommonPrefixes = append(out.CommonPrefixes, s2.RelName(s.prefix, aws.ToString(p.Prefix)))
+		}
+		for _, c := range res.Contents {
+			if isDirMarker(aws.ToString(c.Key), aws.ToInt64(c.Size)) {
+				continue
+			}
+			key := s2.RelName(s.prefix, aws.ToString(c.Key))
+			out.Objects = append(out.Objects, &object{
+				client:       s.client,
+				bucket:       s.bucket,
+				prefix:       s.prefix,
+				name:         key,
+				length:       s2.MustUint64(aws.ToInt64(c.Size)),
+				lastModified: aws.ToTime(c.LastModified),
+				etag:         aws.ToString(c.ETag),
+			})
+		}
+		out.NextAfter = ""
+		if aws.ToBool(res.IsTruncated) {
+			out.NextAfter = aws.ToString(res.NextContinuationToken)
+		}
+		// A page the hidden markers emptied is refilled: an empty page must not carry NextAfter.
+		if len(out.Objects) > 0 || len(out.CommonPrefixes) > 0 || out.NextAfter == "" {
+			return out, nil
+		}
+		if out.NextAfter == aws.ToString(input.ContinuationToken) {
+			return s2.ListResult{}, fmt.Errorf("failed to list objects: continuation token %q does not advance", out.NextAfter)
+		}
+		input.ContinuationToken = aws.String(out.NextAfter)
 	}
-	for _, c := range res.Contents {
-		key := s2.RelName(s.prefix, aws.ToString(c.Key))
-		out.Objects = append(out.Objects, &object{
-			client:       s.client,
-			bucket:       s.bucket,
-			prefix:       s.prefix,
-			name:         key,
-			length:       s2.MustUint64(aws.ToInt64(c.Size)),
-			lastModified: aws.ToTime(c.LastModified),
-			etag:         aws.ToString(c.ETag),
-		})
-	}
-	if aws.ToBool(res.IsTruncated) {
-		out.NextAfter = aws.ToString(res.NextContinuationToken)
-	}
-	return out, nil
 }
 
 // listPrefix joins the storage prefix with the caller's, restoring the
@@ -572,6 +584,11 @@ func (s *storage) SignedURL(ctx context.Context, opts s2.SignedURLOptions) (stri
 		}
 		return req.URL, nil
 	}
+}
+
+// isDirMarker reports a zero-byte key ending in "/", a directory marker another tool wrote: s2 cannot name it, so List hides it (#275).
+func isDirMarker(key string, size int64) bool {
+	return size == 0 && strings.HasSuffix(key, "/")
 }
 
 // joinKeepSlash is path.Join that keeps the trailing slash confining a listing

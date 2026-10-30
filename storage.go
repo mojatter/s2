@@ -54,6 +54,7 @@ type ListResult struct {
 	CommonPrefixes []string
 	// NextAfter is an opaque continuation token, set only when an entry
 	// followed the page as it was read. When empty, the listing is exhausted.
+	// On s3, gcs and azblob, hidden directory markers ending a listing can leave the page after it empty.
 	NextAfter string
 }
 

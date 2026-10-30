@@ -141,9 +141,7 @@ func listObjects(ctx context.Context, strg s2.Storage, p listObjectsParams) (obj
 	// directory semantics. Split the prefix at the last "/" so we list the
 	// directory portion and filter the entries by the remaining basename.
 	listDir, baseFilter := splitS3Prefix(p.prefix)
-	// A directory portion the storage would refuse as a prefix cannot begin
-	// any name it holds -- no stored key carries a "..", "." or empty element
-	// -- so the answer is the empty page rather than its refusal.
+	// A directory portion the storage refuses as a prefix begins no name s2 can address, so the answer is the empty page, not the refusal.
 	if s2.ValidatePrefix(listDir) != nil {
 		return nil, nil, "", nil
 	}

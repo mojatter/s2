@@ -55,6 +55,8 @@ type mockS3Client struct {
 	maxPartLen int
 	// checksumAlgorithm is what the last CreateMultipartUpload asked for.
 	checksumAlgorithm s3types.ChecksumAlgorithm
+	// stuckToken hands a continued listing back its own token, as a broken endpoint might.
+	stuckToken bool
 }
 
 type mockUpload struct {
@@ -168,10 +170,11 @@ func (m *mockS3Client) ListObjectsV2(ctx context.Context, params *s3.ListObjects
 	out := &s3.ListObjectsV2Output{IsTruncated: aws.Bool(false)}
 	n, last := 0, ""
 	for _, obj := range objs {
-		entry := obj.key
+		// A key with the delimiter past the prefix rolls up, even one ending at it, as in the real service.
+		entry, rolled := obj.key, false
 		if delimiter != "" {
 			if idx := strings.Index(obj.key[len(prefix):], delimiter); idx >= 0 {
-				entry = obj.key[:len(prefix)+idx+len(delimiter)]
+				entry, rolled = obj.key[:len(prefix)+idx+len(delimiter)], true
 			}
 		}
 		if entry == last || entry <= after {
@@ -180,9 +183,12 @@ func (m *mockS3Client) ListObjectsV2(ctx context.Context, params *s3.ListObjects
 		if n == limit {
 			out.IsTruncated = aws.Bool(true)
 			out.NextContinuationToken = aws.String(mockContinuationPrefix + last)
+			if m.stuckToken && params.ContinuationToken != nil {
+				out.NextContinuationToken = params.ContinuationToken
+			}
 			break
 		}
-		if entry != obj.key {
+		if rolled {
 			out.CommonPrefixes = append(out.CommonPrefixes, s3types.CommonPrefix{Prefix: aws.String(entry)})
 		} else {
 			out.Contents = append(out.Contents, s3types.Object{
@@ -569,6 +575,74 @@ func (s *StorageTestSuite) TestListPrefixesAreRelative() {
 	res, err := strg.List(context.Background(), s2.ListOptions{})
 	s.Require().NoError(err)
 	s.Equal([]string{"dd/"}, res.CommonPrefixes)
+}
+
+// A zero-byte key ending in "/" is a directory marker another tool wrote: List hides it, DeleteRecursive still removes it (#275).
+func (s *StorageTestSuite) TestListHidesDirMarkers() {
+	testCases := []struct {
+		caseName     string
+		prefix       string
+		keys         map[string]string
+		opts         s2.ListOptions
+		stuck        bool
+		want         []string
+		wantPrefixes []string
+		wantErr      string
+	}{
+		{caseName: "zero-byte marker", keys: map[string]string{"photos/": "", "photos/a.jpg": "a"}, opts: s2.ListOptions{Recursive: true}, want: []string{"photos/a.jpg"}},
+		{caseName: "marker with a body", keys: map[string]string{"photos/": "DATA"}, opts: s2.ListOptions{Recursive: true}, want: []string{"photos/"}},
+		{caseName: "delimited listing of the marked prefix", keys: map[string]string{"photos/": "", "photos/a.jpg": "a"}, opts: s2.ListOptions{Prefix: "photos/"}, want: []string{"photos/a.jpg"}},
+		{caseName: "storage prefix's own marker", prefix: "b1", keys: map[string]string{"b1/": "", "b1/a.txt": "a"}, opts: s2.ListOptions{Recursive: true}, want: []string{"a.txt"}},
+		{caseName: "page of markers only", keys: map[string]string{"a/": "", "b.txt": "b"}, opts: s2.ListOptions{Recursive: true, Limit: 1}, want: []string{"b.txt"}},
+		{caseName: "run of markers across pages", keys: map[string]string{"a/": "", "b/": "", "c.txt": "c"}, opts: s2.ListOptions{Recursive: true, Limit: 1}, want: []string{"c.txt"}},
+		{caseName: "trailing marker", keys: map[string]string{"a.txt": "a", "b/": ""}, opts: s2.ListOptions{Recursive: true, Limit: 1}, want: []string{"a.txt"}},
+		{caseName: "marker-only prefix still lists as a common prefix", keys: map[string]string{"photos/": ""}, want: []string{}, wantPrefixes: []string{"photos/"}},
+		{caseName: "marker beside the object it folds onto", keys: map[string]string{"photos": "n", "photos/": ""}, opts: s2.ListOptions{Recursive: true}, want: []string{"photos"}},
+		{caseName: "token that does not advance", keys: map[string]string{"a/": "", "b/": "", "c.txt": "c"}, opts: s2.ListOptions{Recursive: true, Limit: 1}, stuck: true, wantErr: "does not advance"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m := newMockS3Client()
+			m.stuckToken = tc.stuck
+			for k, v := range tc.keys {
+				m.put("mybucket", k, []byte(v), nil)
+			}
+			strg := &storage{client: m, presignClient: m, bucket: "mybucket", prefix: tc.prefix}
+			ctx := context.Background()
+
+			got, prefixes := []string{}, []string{}
+			opts := tc.opts
+			for {
+				res, err := strg.List(ctx, opts)
+				if tc.wantErr != "" && err != nil {
+					s.ErrorContains(err, tc.wantErr)
+					return
+				}
+				s.Require().NoError(err)
+				got = append(got, objectNames(res.Objects)...)
+				prefixes = append(prefixes, res.CommonPrefixes...)
+				if res.NextAfter == "" {
+					break
+				}
+				s.NotEmpty(res.Objects, "a page with NextAfter is empty")
+				opts.After = res.NextAfter
+			}
+			s.Empty(tc.wantErr, "List did not fail")
+			s.Equal(tc.want, got)
+			if tc.wantPrefixes != nil {
+				s.Equal(tc.wantPrefixes, prefixes)
+			}
+		})
+	}
+	s.Run("DeleteRecursive removes a marker", func() {
+		m := newMockS3Client()
+		m.put("mybucket", "photos/", nil, nil)
+		m.put("mybucket", "photos/a.jpg", []byte("a"), nil)
+		strg := &storage{client: m, presignClient: m, bucket: "mybucket"}
+
+		s.Require().NoError(strg.DeleteRecursive(context.Background(), "photos"))
+		s.Empty(m.objects)
+	})
 }
 
 func (s *StorageTestSuite) TestS2TestGetPut() {
@@ -1327,10 +1401,10 @@ func (s *StorageTestSuite) TestSignedURL() {
 
 func (s *StorageTestSuite) TestListedObjectOpensItself() {
 	m := newMockS3Client()
-	// A zero-byte folder marker written by another tool, beside the object
-	// whose name it folds onto.
+	// A key ending in "/" written by another tool, beside the object whose
+	// name it folds onto; a zero-byte one is hidden as a directory marker.
 	m.put("mybucket", "photos", []byte("THE NEIGHBOUR"), nil)
-	m.put("mybucket", "photos/", []byte(""), nil)
+	m.put("mybucket", "photos/", []byte("MARKER"), nil)
 	strg := &storage{client: m, presignClient: m, bucket: "mybucket"}
 
 	res, err := strg.List(context.Background(), s2.ListOptions{Recursive: true})
