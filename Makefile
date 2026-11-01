@@ -21,7 +21,7 @@ test-integration:
 # HTTP handler. Shorter than bench-warp and requires no external binaries,
 # so it's the right knob for in-loop regression checks.
 BENCH_GO_PACKAGES ?= ./fs/ ./server/handlers/s3api/
-BENCH_GO_RE       ?= BenchmarkPutObject|BenchmarkGetObject|BenchmarkHTTPPutObject|BenchmarkHTTPGetObject
+BENCH_GO_RE       ?= BenchmarkPutObject|BenchmarkGetObject|BenchmarkHTTPPutObject|BenchmarkHTTPGetObject|^BenchmarkList(ETag|ETagPrefetch|MemFS|ETagMemFS)?$$
 BENCH_GO_TIME     ?= 2s
 
 .PHONY: bench
