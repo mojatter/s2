@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -40,6 +41,28 @@ type Object interface {
 	// ETag returns the object's entity tag in quoted form, or "" when unknown.
 	// Objects returned by List carry it without extra network round trips.
 	ETag() string
+}
+
+// prefetchWorkers caps the goroutines PrefetchMetadata runs.
+const prefetchWorkers = 8
+
+// PrefetchMetadata reads the Metadata of objs, a List page whose ContentType, ETag or Metadata the caller will read, on up to 8 goroutines at once.
+// Reads fail as the accessors do; the accessors' own errors are not reported.
+func PrefetchMetadata(objs []Object) {
+	next := make(chan Object)
+	var wg sync.WaitGroup
+	for range min(prefetchWorkers, len(objs)) {
+		wg.Go(func() {
+			for o := range next {
+				_ = o.Metadata()
+			}
+		})
+	}
+	for _, o := range objs {
+		next <- o
+	}
+	close(next)
+	wg.Wait()
 }
 
 // ObjectOption is a functional option for configuring objects created by

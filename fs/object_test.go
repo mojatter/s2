@@ -2,6 +2,7 @@ package fs
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mojatter/s2"
+	"github.com/mojatter/wfs"
 	"github.com/mojatter/wfs/memfs"
 	"github.com/stretchr/testify/suite"
 )
@@ -235,6 +237,82 @@ func (s *ObjectTestSuite) TestObjectAccessorsAreConcurrencySafe() {
 		})
 	}
 	wg.Wait()
+}
+
+// TestPrefetchMetadata checks s2.PrefetchMetadata reads the metadata files of the fs objects passed, and only those. Meaningful under -race.
+func (s *ObjectTestSuite) TestPrefetchMetadata() {
+	ctx := context.Background()
+	testCases := []struct {
+		caseName   string
+		pick       func(objs []s2.Object) []s2.Object
+		breakFiles bool
+		wantLoaded int
+	}{
+		{caseName: "every object", pick: func(objs []s2.Object) []s2.Object { return objs }, wantLoaded: 20},
+		{caseName: "a subset", pick: func(objs []s2.Object) []s2.Object { return objs[:5] }, wantLoaded: 5},
+		{
+			caseName: "another backend's objects first",
+			pick: func(objs []s2.Object) []s2.Object {
+				return append([]s2.Object{s2.NewObjectBytes("other", nil)}, objs...)
+			},
+			wantLoaded: 20,
+		},
+		{caseName: "missing and corrupt metadata files", pick: func(objs []s2.Object) []s2.Object { return objs }, breakFiles: true, wantLoaded: 20},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			strg := NewStorageMem(s2.Config{})
+			want := map[string]string{}
+			for i := range 20 {
+				obj := s2.NewObjectBytes(fmt.Sprintf("d/%02d.txt", i), fmt.Appendf(nil, "body %d", i))
+				s.Require().NoError(strg.Put(ctx, obj))
+				got, err := strg.Get(ctx, obj.Name())
+				s.Require().NoError(err)
+				want[obj.Name()] = got.ETag()
+			}
+			if tc.breakFiles {
+				fsys := strg.(*storage).fsys
+				s.Require().NoError(wfs.RemoveFile(fsys, metaPath("d/05.txt")))
+				_, err := wfs.WriteFile(fsys, metaPath("d/06.txt"), []byte("{bad"), fs.ModePerm)
+				s.Require().NoError(err)
+			}
+			res, err := strg.List(ctx, s2.ListOptions{Prefix: "d/"})
+			s.Require().NoError(err)
+			s.Require().Len(res.Objects, 20)
+
+			s2.PrefetchMetadata(tc.pick(res.Objects))
+			loaded := 0
+			for _, o := range res.Objects {
+				obj := o.(*object)
+				fallback := fmt.Sprintf(`"%x-%x"`, obj.LastModified().UnixNano(), obj.Length())
+				switch {
+				case tc.breakFiles && obj.Name() == "d/05.txt":
+					s.NoError(obj.loadErr)
+					s.Equal(fallback, obj.ETag())
+				case tc.breakFiles && obj.Name() == "d/06.txt":
+					s.Error(obj.loadErr)
+					s.Equal(fallback, obj.ETag())
+				case obj.m.ETag != "":
+					s.Equal(want[obj.Name()], obj.m.ETag, obj.Name())
+				default:
+					continue
+				}
+				loaded++
+			}
+			s.Equal(tc.wantLoaded, loaded)
+
+			fresh, err := strg.List(ctx, s2.ListOptions{Prefix: "d/"})
+			s.Require().NoError(err)
+			var wg sync.WaitGroup
+			wg.Go(func() { s2.PrefetchMetadata(fresh.Objects) })
+			for _, o := range fresh.Objects {
+				if !tc.breakFiles {
+					wg.Go(func() { s.Equal(want[o.Name()], o.ETag(), o.Name()) })
+				}
+			}
+			wg.Wait()
+		})
+	}
 }
 
 // TestOpenRefusesAReplacedBody checks Open serves the body Get saw or fails, never another body under Get's length and ETag (#349).

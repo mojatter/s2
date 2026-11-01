@@ -1971,7 +1971,7 @@ func benchGetObject(b *testing.B, typ s2.Type) {
 	}
 }
 
-func benchList(b *testing.B, typ s2.Type, readETag bool) {
+func benchList(b *testing.B, typ s2.Type, readETag, prefetch bool) {
 	ctx := context.Background()
 	strg := newBenchStorage(b, typ)
 	for i := range 1000 {
@@ -1987,6 +1987,9 @@ func benchList(b *testing.B, typ s2.Type, readETag bool) {
 		if err != nil {
 			b.Fatal(err)
 		}
+		if prefetch {
+			s2.PrefetchMetadata(res.Objects)
+		}
 		if readETag {
 			for _, obj := range res.Objects {
 				_ = obj.ETag()
@@ -1995,11 +1998,12 @@ func benchList(b *testing.B, typ s2.Type, readETag bool) {
 	}
 }
 
-// BenchmarkList lists a 1000-object page; the ETag variants add the lazy sidecar reads.
-func BenchmarkList(b *testing.B)          { benchList(b, s2.TypeOSFS, false) }
-func BenchmarkListETag(b *testing.B)      { benchList(b, s2.TypeOSFS, true) }
-func BenchmarkListMemFS(b *testing.B)     { benchList(b, s2.TypeMemFS, false) }
-func BenchmarkListETagMemFS(b *testing.B) { benchList(b, s2.TypeMemFS, true) }
+// BenchmarkList lists a 1000-object page; the ETag variants add the metadata file reads, serially or prefetched as ListObjectsV2 does.
+func BenchmarkList(b *testing.B)             { benchList(b, s2.TypeOSFS, false, false) }
+func BenchmarkListETag(b *testing.B)         { benchList(b, s2.TypeOSFS, true, false) }
+func BenchmarkListETagPrefetch(b *testing.B) { benchList(b, s2.TypeOSFS, true, true) }
+func BenchmarkListMemFS(b *testing.B)        { benchList(b, s2.TypeMemFS, false, false) }
+func BenchmarkListETagMemFS(b *testing.B)    { benchList(b, s2.TypeMemFS, true, false) }
 
 func benchListRecursive(b *testing.B, typ s2.Type, prefix string) {
 	ctx := context.Background()

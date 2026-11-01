@@ -308,6 +308,7 @@ func handleListObjects(s *server.Server, w http.ResponseWriter, r *http.Request)
 		writeS2Error(w, r, err)
 		return
 	}
+	s2.PrefetchMetadata(objs)
 
 	writeXML(w, http.StatusOK, buildListBucketResult(p, objs, prefixes, nextToken, nextToken != ""))
 }
