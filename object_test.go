@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -210,4 +211,53 @@ func TestOpenRange(t *testing.T) {
 		_, err := badObj.OpenRange(0, 5)
 		assert.Error(t, err)
 	})
+}
+
+// countingObject records its Metadata calls and the most of them running at once, each held until gate closes.
+type countingObject struct {
+	Object
+	calls, running, peak *atomic.Int32
+	gate                 chan struct{}
+}
+
+func (o countingObject) Metadata() Metadata {
+	o.calls.Add(1)
+	n := o.running.Add(1)
+	for p := o.peak.Load(); n > p && !o.peak.CompareAndSwap(p, n); p = o.peak.Load() {
+	}
+	<-o.gate
+	o.running.Add(-1)
+	return nil
+}
+
+func TestPrefetchMetadata(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		n        int
+		wantPeak int32
+	}{
+		{caseName: "none", n: 0, wantPeak: 0},
+		{caseName: "one", n: 1, wantPeak: 1},
+		{caseName: "a page", n: 100, wantPeak: prefetchWorkers},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			var calls, running, peak atomic.Int32
+			gate := make(chan struct{})
+			objs := make([]Object, tc.n)
+			for i := range objs {
+				objs[i] = countingObject{Object: NewObjectBytes("k", nil), calls: &calls, running: &running, peak: &peak, gate: gate}
+			}
+			done := make(chan struct{})
+			go func() {
+				PrefetchMetadata(objs)
+				close(done)
+			}()
+			assert.Eventually(t, func() bool { return running.Load() == tc.wantPeak }, 5*time.Second, time.Millisecond)
+			close(gate)
+			<-done
+			assert.Equal(t, int32(tc.n), calls.Load())
+			assert.Equal(t, tc.wantPeak, peak.Load())
+		})
+	}
 }

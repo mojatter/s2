@@ -311,6 +311,7 @@ func (ms *MultipartStore) Parts(ctx context.Context, id string) ([]Part, error) 
 		if err != nil {
 			return nil, err
 		}
+		s2.PrefetchMetadata(res.Objects)
 		for _, obj := range res.Objects {
 			n, err := strconv.Atoi(obj.Name())
 			if err != nil || uploadPartName(n) != obj.Name() {
