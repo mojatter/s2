@@ -119,7 +119,7 @@ func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
 			return nil, err
 		}
 		return &limitReadCloser{
-			Reader: io.LimitReader(seeker, s2.MustInt64(length)),
+			lr:     &io.LimitedReader{R: seeker, N: s2.MustInt64(length)},
 			Closer: rc,
 		}, nil
 	}
@@ -129,18 +129,23 @@ func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
 		return nil, err
 	}
 	return &limitReadCloser{
-		Reader: io.LimitReader(rc, s2.MustInt64(length)),
+		lr:     &io.LimitedReader{R: rc, N: s2.MustInt64(length)},
 		Closer: rc,
 	}, nil
 }
 
 type limitReadCloser struct {
-	io.Reader
+	lr *io.LimitedReader
 	io.Closer
 }
 
 func (l *limitReadCloser) Read(p []byte) (n int, err error) {
-	return l.Reader.Read(p)
+	return l.lr.Read(p)
+}
+
+// LimitedReader exposes the positioned file and the bytes left so a server can send the range with sendfile.
+func (l *limitReadCloser) LimitedReader() *io.LimitedReader {
+	return l.lr
 }
 
 // Keys s2-server stored in the flat sidecar format before v0.18.
