@@ -552,18 +552,30 @@ Numbers below are local runs on an Apple M4 (`darwin/arm64`, single process). Tr
 
 | Benchmark | ns/op | B/op | allocs/op |
 |---|---:|---:|---:|
-| `BenchmarkPutObject` (osfs) | 4,475,049 | 2,841 | 31 |
-| `BenchmarkGetObject` (osfs) | 38,294 | 1,051 | 12 |
-| `BenchmarkPutObjectMemFS` | 2,357 | 4,072 | 78 |
-| `BenchmarkGetObjectMemFS` | 334 | 416 | 14 |
-| `BenchmarkHTTPPutObject` (osfs) | 8,624,073 | 48,583 | 169 |
-| `BenchmarkHTTPGetObject` (osfs) | 114,265 | 10,280 | 126 |
-| `BenchmarkHTTPPutObjectMemFS` | 86,952 | 46,504 | 193 |
-| `BenchmarkHTTPGetObjectMemFS` | 34,773 | 43,115 | 117 |
+| `BenchmarkPutObject` (osfs) | 9,444,800 | 40,499 | 91 |
+| `BenchmarkGetObject` (osfs) | 82,947 | 3,034 | 33 |
+| `BenchmarkPutObjectMemFS` | 7,781 | 39,772 | 128 |
+| `BenchmarkGetObjectMemFS` | 1,375 | 2,192 | 35 |
+| `BenchmarkHTTPPutObject` (osfs) | 9,862,317 | 52,248 | 221 |
+| `BenchmarkHTTPGetObject` (osfs) | 140,662 | 15,212 | 182 |
+| `BenchmarkHTTPPutObjectMemFS` | 103,358 | 48,527 | 215 |
+| `BenchmarkHTTPGetObjectMemFS` | 55,263 | 14,332 | 170 |
 
-The `osfs` PUT path always fsyncs before rename — that durability guarantee is roughly **4 ms of the 4.2 ms per storage-layer PUT** on this machine. For apples-to-apples comparisons against benchmarks from other S3-compatible servers, make sure they are running with fsync enabled as well. Many default to write-through-page-cache and will look proportionally faster until you flip the fsync switch on.
+The `osfs` PUT path always fsyncs the object and its metadata file before renaming each into place — those two fsyncs are roughly **7 to 8 ms of the 9.4 ms per storage-layer PUT** on this machine, where one fsync of a 1 KiB file takes 3.4 to 4 ms. For apples-to-apples comparisons against benchmarks from other S3-compatible servers, make sure they are running with fsync enabled as well. Many default to write-through-page-cache and will look proportionally faster until you flip the fsync switch on.
 
-The `memfs` columns exist because S2 ships an in-memory backend specifically for tests. Skipping the disk barrier makes `GetObject` over **100x faster** and `PutObject` over **1800x faster** than `osfs` on the same hardware. That speedup is what makes `memfs` worth reaching for in unit tests that need an S3-compatible target without Docker or a temp directory.
+The `memfs` columns exist because S2 ships an in-memory backend specifically for tests. Running on `memfs` makes `GetObject` about **60x faster** and `PutObject` over **1000x faster** than `osfs` on the same hardware. That speedup is what makes `memfs` worth reaching for in unit tests that need an S3-compatible target without Docker or a temp directory.
+
+#### Listing
+
+Listing a 1000-object page of one-byte objects with `Limit: 1000`, 2-second bench time. The ETag rows also read every object's metadata file, one after another or through `s2.PrefetchMetadata` as `ListObjectsV2` does. `make bench` runs these too.
+
+| Benchmark | ns/op | B/op | allocs/op |
+|---|---:|---:|---:|
+| `BenchmarkList` (osfs) | 1,936,912 | 709,842 | 6,022 |
+| `BenchmarkListETag` (osfs) | 47,032,704 | 2,483,269 | 26,031 |
+| `BenchmarkListETagPrefetch` (osfs) | 14,723,591 | 2,512,974 | 26,045 |
+| `BenchmarkListMemFS` | 86,924 | 343,512 | 2,023 |
+| `BenchmarkListETagMemFS` | 1,171,072 | 1,890,304 | 23,027 |
 
 ### End-to-end benchmark with warp
 
@@ -571,11 +583,11 @@ Captured with the default `make bench-warp` settings (1 MiB objects, 8 concurren
 
 | Operation | Throughput | p50 latency | p99 latency |
 |---|---|---|---|
-| **PUT** | 134.45 MiB/s (134.45 obj/s) | 54.8 ms | 71.7 ms |
-| **GET** | 402.85 MiB/s (402.85 obj/s) | 0.5 ms | 5.3 ms |
-| **STAT** | 268.59 obj/s | 0.2 ms | 4.5 ms |
-| **DELETE** | 89.74 obj/s | 4.1 ms | 12.0 ms |
-| **Total** | **537.31 MiB/s, 895.64 obj/s** | — | — |
+| **PUT** | 133.53 MiB/s (133.53 obj/s) | 53.6 ms | 73.4 ms |
+| **GET** | 401.30 MiB/s (401.30 obj/s) | 0.5 ms | 7.7 ms |
+| **STAT** | 267.93 obj/s | 0.2 ms | 5.5 ms |
+| **DELETE** | 89.08 obj/s | 4.3 ms | 14.8 ms |
+| **Total** | **534.83 MiB/s, 891.83 obj/s** | — | — |
 
 You can run any other warp workload by overriding the Makefile variables, e.g. larger objects:
 

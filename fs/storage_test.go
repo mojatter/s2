@@ -1971,11 +1971,26 @@ func benchGetObject(b *testing.B, typ s2.Type) {
 	}
 }
 
+// noSyncFS is an osfs whose files cannot Sync, so a benchmark seeds its objects without fsyncs it does not measure.
+type noSyncFS struct{ *osfs.OSFS }
+
+func (f noSyncFS) CreateFile(name string, mode fs.FileMode) (wfs.WriterFile, error) {
+	w, err := f.OSFS.CreateFile(name, mode)
+	if err != nil {
+		return nil, err
+	}
+	return struct{ wfs.WriterFile }{w}, nil
+}
+
 func benchList(b *testing.B, typ s2.Type, readETag, prefetch bool) {
 	ctx := context.Background()
 	strg := newBenchStorage(b, typ)
+	seed := strg
+	if typ == s2.TypeOSFS {
+		seed = NewStorageFS(s2.Config{Type: typ}, noSyncFS{strg.(*storage).fsys.(*osfs.OSFS)})
+	}
 	for i := range 1000 {
-		if err := strg.Put(ctx, s2.NewObjectBytes(fmt.Sprintf("obj-%04d.txt", i), []byte("a"))); err != nil {
+		if err := seed.Put(ctx, s2.NewObjectBytes(fmt.Sprintf("obj-%04d.txt", i), []byte("a"))); err != nil {
 			b.Fatal(err)
 		}
 	}
