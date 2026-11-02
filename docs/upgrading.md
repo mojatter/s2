@@ -25,6 +25,11 @@ The steps below take a root from any version since v0.14.0 to the current one in
 
 Each section lists whether the data at rest changes, what to do, and, where known, what a downgrade does. A version not listed here changes nothing on disk and needs no step; what its responses change is in its release notes.
 
+### v0.30.0
+
+- **Data at rest:** unchanged; downgrading to v0.29.0 is safe.
+- On `osfs`, a symlinked directory inside a root, which is not supported ([docs/backends.md](backends.md)), is now followed by a recursive listing or delete whose prefix reaches into it ([#469](https://github.com/mojatter/s2/issues/469)): ListObjectsV2 without a delimiter and the console's search list the objects of the link's target, and a recursive delete under it, the console's folder delete or a client that lists and then deletes, such as `aws s3 rm --recursive s3://<bucket>/<link>/`, removes them and the link, even when the target lies outside the root. v0.29.0 listed nothing under such a prefix, so such a delete removed no object; a listing from above the link shows it as an object, and a listing with a delimiter, the console's folder view and a delete by key followed the link, on both versions. This includes a bucket that is itself a symlink in `$S2_SERVER_ROOT`: the console's bucket delete now empties the link's target and removes the link, and DeleteBucket does the same when the target holds nothing but `.keep` (otherwise both versions answer `409 BucketNotEmpty`), where v0.29.0 answered `204` and left the link and its target untouched, so the bucket stayed. Neither version lists such a bucket in ListBuckets or the console. To find links to directories before upgrading, run `find -H "${S2_SERVER_ROOT:?}" -type l -exec test -d {} \; -print`; `-H` makes `find` descend when the root itself is a link. Remove each with `rm`, or move its target into the root: a DeleteObject of the link's key answers `204` and leaves it, on both versions.
+
 ### v0.29.0
 
 - **Data at rest:** unchanged; downgrading to v0.28.0 is safe.
