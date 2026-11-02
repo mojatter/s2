@@ -16,6 +16,12 @@ func CopyBody(w http.ResponseWriter, r *http.Request, src io.Reader) {
 	if sendfile {
 		// Keeps sendfile, which reads the file in the kernel without calling Read.
 		body = &bodyFile{bodyReader: br, sc: sc}
+	} else if lr, sc, ok := limitedFile(src); ok {
+		// net's sendfile unwraps only a bare *io.LimitedReader around the file, and counts down its N.
+		br.r = lr.R
+		lr.R = &bodyFile{bodyReader: br, sc: sc}
+		body = lr
+		sendfile = true
 	}
 	n, err := io.Copy(w, body)
 	if err == nil {
@@ -31,6 +37,22 @@ func CopyBody(w http.ResponseWriter, r *http.Request, src io.Reader) {
 		args = append([]any{"request_id", id}, args...)
 	}
 	slog.Log(r.Context(), level, "Failed to send object body", args...)
+}
+
+// limitedReaderer is a ranged body that exposes its positioned source and the bytes left, as fs OpenRange does on osfs.
+type limitedReaderer interface {
+	LimitedReader() *io.LimitedReader
+}
+
+// limitedFile returns the reader and file behind a ranged body whose source is a file.
+func limitedFile(src io.Reader) (*io.LimitedReader, syscall.Conn, bool) {
+	l, ok := src.(limitedReaderer)
+	if !ok {
+		return nil, nil, false
+	}
+	lr := l.LimitedReader()
+	sc, ok := lr.R.(syscall.Conn)
+	return lr, sc, ok
 }
 
 // clientGone reports an error a write to a peer that went away returns.

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -413,5 +414,37 @@ func (s *ObjectTestSuite) TestOpenRangeRefusesAReplacedBody() {
 func putBody(name, body string) func(strg s2.Storage) error {
 	return func(strg s2.Storage) error {
 		return strg.Put(context.Background(), s2.NewObjectBytes(name, []byte(body)))
+	}
+}
+
+// TestOpenRangeExposesTheFile checks a range on osfs hands s2-server its file and length for sendfile (#431).
+func (s *ObjectTestSuite) TestOpenRangeExposesTheFile() {
+	testCases := []struct {
+		caseName string
+		strg     func() s2.Storage
+		wantConn bool
+	}{
+		{caseName: "osfs", strg: func() s2.Storage { return NewStorageDir(s.T().TempDir()) }, wantConn: true},
+		{caseName: "memfs", strg: func() s2.Storage { return NewStorageMem(s2.Config{}) }},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			strg := tc.strg()
+			s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("k", []byte("hello world"))))
+			obj, err := strg.Get(ctx, "k")
+			s.Require().NoError(err)
+			rc, err := obj.OpenRange(6, 5)
+			s.Require().NoError(err)
+			defer func() { _ = rc.Close() }()
+
+			lr := rc.(interface{ LimitedReader() *io.LimitedReader }).LimitedReader()
+			s.Equal(int64(5), lr.N)
+			_, ok := lr.R.(syscall.Conn)
+			s.Equal(tc.wantConn, ok)
+			b, err := io.ReadAll(rc)
+			s.Require().NoError(err)
+			s.Equal("world", string(b))
+		})
 	}
 }

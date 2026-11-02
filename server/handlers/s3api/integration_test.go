@@ -3,6 +3,7 @@ package s3api
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -385,7 +386,12 @@ func (s *IntegrationSuite) TestGetObjectRange() {
 	bucket := "range-bucket"
 	s.createTestBucket(bucket)
 
-	body := "0123456789"
+	// Longer than the 512 bytes net/http writes before handing the rest to sendfile.
+	var sb strings.Builder
+	for i := range 1024 {
+		fmt.Fprintf(&sb, "%04d", i)
+	}
+	body := sb.String()
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String("data.txt"),
@@ -398,10 +404,12 @@ func (s *IntegrationSuite) TestGetObjectRange() {
 		rangeStr string
 		want     string
 	}{
-		{"mid range", "bytes=2-5", "2345"},
-		{"from start", "bytes=0-3", "0123"},
-		{"suffix", "bytes=-3", "789"},
-		{"open end", "bytes=7-", "789"},
+		{"mid range", "bytes=2-5", body[2:6]},
+		{"from start", "bytes=0-3", body[:4]},
+		{"suffix", "bytes=-3", body[len(body)-3:]},
+		{"open end", "bytes=7-", body[7:]},
+		{"sendfile offset", "bytes=1000-3000", body[1000:3001]},
+		{"sendfile open end", "bytes=700-", body[700:]},
 	}
 
 	for _, tc := range testCases {
