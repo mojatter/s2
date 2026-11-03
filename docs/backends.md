@@ -237,7 +237,7 @@ An `osfs` or `memfs` object is two files, its body and its metadata file, each r
 - `Copy` holds its source shared, so a `Get` or another `Copy` of it runs alongside and only a write of the source waits for it; on a filesystem without `Rename` that section lasts while the body streams.
 - A write (`Put`, `Upload`, `Copy`, `PutMetadata`, `MigrateMeta`, and `Move` without `Rename`) needs `wfs.WriteFileFS` plus `Rename` or `RemoveFile`, and fails with `wfs.ErrNotImplemented` on a filesystem with neither, where it could only write in place and a key copied onto itself would end up empty. `Delete` needs `RemoveFile`. Nothing is checked when the storage is created.
 - `fs.MigrateMeta` takes no lock; run it while nothing writes.
-- A symlinked directory inside a root is not supported. A listing shows it as an object unless the prefix reaches into it, when the listing, `Count` and `DeleteRecursive` follow it; deleting under it, by name or with `DeleteRecursive`, removes the target's objects, even when the target lies outside the root, and can remove the link while the target still holds others.
+- A symlinked directory inside a root is not supported; [Symlinks on osfs](#symlinks-on-osfs) describes what happens with one.
 
 ### What a NameLocker is asked for
 
@@ -256,6 +256,19 @@ Each row is one or more sections; within a section the root is taken first, then
 | `Exists`, `List`, `Count`, `SignedURL` | nothing |
 
 On a filesystem without `Rename`, `Put`, `Upload`, `Copy` and `Move` write in their first section and take no second. A `NameLocker` without `SLock` gets `Lock(".")` alone in place of every write's calls.
+
+## Symlinks on osfs
+
+A symlink inside a root is not supported. This section describes what `osfs` does with one, not a guarantee, and is not exhaustive: an operation it does not mention has no defined result on a link, and a later release may change any of it. `memfs` has no symlinks.
+
+Take a root, for s2-server a bucket's directory under `$S2_SERVER_ROOT`, holding `link`, a symlink to a directory `/ext` that may lie outside the root.
+
+- **Listing:** a listing, `Count` or request whose prefix reaches into the link, such as `link/`, follows it and acts on the target's objects, with or without a delimiter. A listing from above the link, such as prefix `""`, shows it as one object named `link`, which GetObject answers with `404 NoSuchKey` and DeleteObject leaves in place with `204`.
+- **Deletes reach the target, even outside the root:** a recursive delete whose prefix reaches into the link, which the console's folder delete sends when no user policy applies, removes the objects under that prefix and then the link, whatever else the target holds. A client that lists and then deletes by key, such as `aws s3 rm --recursive` or the console's folder delete under a user policy, removes them one by one until a delete empties the target or a directory at its top level, which takes the link with it; the deletes and listings that follow find nothing and succeed, so the client reports success while the target's remaining objects stay on disk.
+- **A bucket that is itself a symlink** in `$S2_SERVER_ROOT` is not listed by ListBuckets or the console, and requests into it act on the target. Deletes by key never remove the link, so `aws s3 rm --recursive` removes every object of the target. The console's bucket delete empties the target and removes the link, and so does DeleteBucket when the target holds nothing but `.keep`, which otherwise answers `409 BucketNotEmpty`.
+- **A symlink to a file** is listed as an object with the link's own size, modification time and ETag, not the target's. GetObject and HeadObject answer with the target's body, size, modification time and ETag, which differ from the listing's; DeleteObject removes only the link, and PutObject to its key replaces the link with a regular file.
+
+To find links under a server root, run `find -H "${S2_SERVER_ROOT:?}" -type l` (`-H` makes `find` descend when the root itself is a link), and remove each with `rm`; to keep what a link serves, then move its target to the link's path.
 
 ## Content-Type and ETag
 
