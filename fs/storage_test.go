@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"testing/fstest"
 	"testing/iotest"
@@ -1233,7 +1234,7 @@ func (s *StorageTestSuite) TestCount() {
 	}
 }
 
-// Count must agree with a recursive List, which follows a symlinked directory only as the prefix's directory.
+// Count must agree with a recursive List, which follows a symlinked directory wherever the walk meets it (#501).
 func (s *StorageTestSuite) TestCountFollowsASymlinkedDirectoryAsList() {
 	dir := s.T().TempDir()
 	strg := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(dir))
@@ -1248,8 +1249,9 @@ func (s *StorageTestSuite) TestCountFollowsASymlinkedDirectoryAsList() {
 		want     int64
 	}{
 		{caseName: "inside the link", prefix: "link/", want: 2},
-		{caseName: "the link itself", prefix: "li", want: 1},
+		{caseName: "the link's name without a slash", prefix: "li", want: 2},
 		{caseName: "the real directory", prefix: "real/", want: 2},
+		{caseName: "from above", prefix: "", want: 4},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
@@ -1261,18 +1263,207 @@ func (s *StorageTestSuite) TestCountFollowsASymlinkedDirectoryAsList() {
 			s.Len(res.Objects, int(tc.want), "Count must match a recursive List")
 		})
 	}
-	// DeleteRecursive follows it too, as the console's per-object folder delete does through List.
-	s.Run("DeleteRecursive inside the link", func() {
+	// A delete of the link's prefix removes the link alone, so the directory it leads to keeps its objects.
+	s.Run("DeleteRecursive of the link", func() {
 		s.Require().NoError(strg.DeleteRecursive(context.Background(), "link/"))
 		got, err := s2.Count(context.Background(), strg, s2.CountOptions{Prefix: "real/"})
 		s.Require().NoError(err)
-		s.Zero(got.Objects)
+		s.Equal(int64(2), got.Objects)
 		_, err = os.Lstat(filepath.Join(dir, "link"))
 		s.ErrorIs(err, fs.ErrNotExist)
 	})
 }
 
-// Only a recursive delete of the link's prefix, or of a folder above it, removes a symlinked directory (#499).
+// A listing sees a symlink as what it leads to, so it agrees with Get from wherever it starts (#501).
+func (s *StorageTestSuite) TestListSeesASymlinkAsItsTarget() {
+	ctx := context.Background()
+	tmp := s.T().TempDir()
+	root, ext := filepath.Join(tmp, "root"), filepath.Join(tmp, "ext")
+	strg := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(root))
+	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("top.txt", []byte("t"))))
+	extStrg := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(ext))
+	s.Require().NoError(extStrg.Put(ctx, s2.NewObjectBytes("2024/a.txt", []byte("a"))))
+	s.Require().NoError(os.WriteFile(filepath.Join(tmp, "target.txt"), []byte("hello"), 0o600))
+	for link, target := range map[string]string{
+		"root/ext":      "ext",
+		"root/file.txt": "target.txt",
+		"root/dangling": "missing",
+		"root/self":     "root/self",
+		"root/through":  "target.txt/x",
+		"root/up":       "root", // back to the storage root
+		"ext/loop":      "ext",  // back to the link's own target
+	} {
+		s.Require().NoError(os.Symlink(filepath.Join(tmp, target), filepath.Join(tmp, link)))
+	}
+
+	testCases := []struct {
+		caseName     string
+		opts         s2.ListOptions
+		wantObjects  []string
+		wantPrefixes []string
+	}{
+		{
+			caseName:     "from above",
+			wantObjects:  []string{"file.txt", "top.txt"},
+			wantPrefixes: []string{"ext/"},
+		},
+		{
+			caseName:    "recursive from above",
+			opts:        s2.ListOptions{Recursive: true},
+			wantObjects: []string{"ext/2024/a.txt", "file.txt", "top.txt"},
+		},
+		{
+			caseName:     "inside the link",
+			opts:         s2.ListOptions{Prefix: "ext/"},
+			wantPrefixes: []string{"ext/2024/"},
+		},
+		{
+			caseName:     "inside a looping link",
+			opts:         s2.ListOptions{Prefix: "up/"},
+			wantObjects:  []string{"up/file.txt", "up/top.txt"},
+			wantPrefixes: []string{"up/ext/"},
+		},
+		{
+			caseName:    "recursive from a prefix of the link's name",
+			opts:        s2.ListOptions{Prefix: "e", Recursive: true},
+			wantObjects: []string{"ext/2024/a.txt"},
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			res, err := strg.List(ctx, tc.opts)
+			s.Require().NoError(err)
+			s.ElementsMatch(tc.wantObjects, objectNames(res.Objects))
+			s.ElementsMatch(tc.wantPrefixes, res.CommonPrefixes)
+			if tc.opts.Recursive {
+				got, err := s2.Count(ctx, strg, s2.CountOptions{Prefix: tc.opts.Prefix})
+				s.Require().NoError(err)
+				s.Equal(int64(len(tc.wantObjects)), got.Objects, "Count must match a recursive List")
+			}
+		})
+	}
+	s.Run("a symlink to a file is listed as its target", func() {
+		res, err := strg.List(ctx, s2.ListOptions{})
+		s.Require().NoError(err)
+		i := slices.IndexFunc(res.Objects, func(o s2.Object) bool { return o.Name() == "file.txt" })
+		s.Require().GreaterOrEqual(i, 0)
+		listed := res.Objects[i]
+		got, err := strg.Get(ctx, "file.txt")
+		s.Require().NoError(err)
+		s.Equal(uint64(5), listed.Length())
+		s.Equal(got.LastModified(), listed.LastModified())
+		s.Equal(got.ETag(), listed.ETag())
+		rc, err := listed.Open()
+		s.Require().NoError(err, "the listed object opens as Get's does")
+		s.NoError(rc.Close())
+	})
+}
+
+// A symlink to the lock root is a loop from a Sub too, so a bucket's listing leaves it out and never reaches the other buckets through it.
+func (s *StorageTestSuite) TestSymlinkToTheRootLoopsFromASub() {
+	ctx := context.Background()
+	root := s.T().TempDir()
+	strg := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(root))
+	for _, name := range []string{"a/k.txt", "b/k.txt"} {
+		s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes(name, []byte("x"))))
+	}
+	s.Require().NoError(os.Symlink(root, filepath.Join(root, "a", "all")))
+	sub, err := strg.Sub(ctx, "a")
+	s.Require().NoError(err)
+
+	res, err := sub.List(ctx, s2.ListOptions{})
+	s.Require().NoError(err)
+	s.Equal([]string{"k.txt"}, objectNames(res.Objects))
+	s.Empty(res.CommonPrefixes)
+	res, err = sub.List(ctx, s2.ListOptions{Recursive: true})
+	s.Require().NoError(err)
+	s.Equal([]string{"k.txt"}, objectNames(res.Objects))
+	got, err := s2.Count(ctx, sub, s2.CountOptions{})
+	s.Require().NoError(err)
+	s.Equal(int64(1), got.Objects)
+
+	// No delete holding its name reaches through it: each removes the link alone.
+	testCases := []struct {
+		caseName string
+		strg     s2.Storage
+		link     string
+		prefix   string
+		want     []string
+	}{
+		{caseName: "its folder", strg: sub, link: "a/all", prefix: "all/", want: []string{"a/k.txt", "b/k.txt"}},
+		{caseName: "its name without a slash", strg: sub, link: "a/all", prefix: "all", want: []string{"a/k.txt", "b/k.txt"}},
+		{caseName: "the bucket holding it", strg: sub, link: "a/all", prefix: "", want: []string{"b/k.txt"}},
+		{caseName: "a bucket that is such a link", strg: strg, link: "loop", prefix: "loop/", want: []string{"a/k.txt", "b/k.txt"}},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			for _, name := range []string{"a/k.txt", "b/k.txt"} {
+				s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes(name, []byte("x"))))
+			}
+			if _, err := os.Lstat(filepath.Join(root, tc.link)); err != nil {
+				s.Require().NoError(os.Symlink(root, filepath.Join(root, tc.link)))
+			}
+			s.Require().NoError(tc.strg.DeleteRecursive(ctx, tc.prefix))
+			_, err := os.Lstat(filepath.Join(root, tc.link))
+			s.ErrorIs(err, fs.ErrNotExist, "the link goes")
+			res, err := strg.List(ctx, s2.ListOptions{Recursive: true})
+			s.Require().NoError(err)
+			s.Equal(tc.want, objectNames(res.Objects))
+		})
+	}
+}
+
+// A symlink that cannot be read is left out of listings and Count; a delete removes it as any link when it can stat the target.
+func (s *StorageTestSuite) TestUnreadableSymlinkIsLeftOut() {
+	if os.Getuid() == 0 {
+		s.T().Skip("root ignores directory permissions")
+	}
+	testCases := []struct {
+		caseName string
+		// locked is the directory, under the target's parent, whose mode becomes 000.
+		locked string
+		// removed says whether a delete holding the link's name removes it; one that cannot be stat'd leads nowhere and stays.
+		removed bool
+	}{
+		{caseName: "a parent of the target unreadable", locked: "locked"},
+		{caseName: "the target itself unreadable", locked: "locked/dir", removed: true},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			tmp := s.T().TempDir()
+			root, locked := filepath.Join(tmp, "root"), filepath.Join(tmp, tc.locked)
+			s.Require().NoError(os.MkdirAll(filepath.Join(tmp, "locked", "dir"), 0o755))
+			strg := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(root))
+			s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("top.txt", []byte("t"))))
+			s.Require().NoError(os.Symlink(filepath.Join(tmp, "locked", "dir"), filepath.Join(root, "priv")))
+			s.Require().NoError(os.Chmod(locked, 0o000))
+			s.T().Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+			for _, recursive := range []bool{false, true} {
+				res, err := strg.List(ctx, s2.ListOptions{Recursive: recursive})
+				s.Require().NoError(err)
+				s.Equal([]string{"top.txt"}, objectNames(res.Objects))
+				s.Empty(res.CommonPrefixes)
+			}
+			got, err := s2.Count(ctx, strg, s2.CountOptions{})
+			s.Require().NoError(err)
+			s.Equal(int64(1), got.Objects)
+			s.Require().NoError(strg.DeleteRecursive(ctx, "p"))
+			link := filepath.Join(root, "priv")
+			_, err = os.Lstat(link)
+			s.Equal(tc.removed, errors.Is(err, fs.ErrNotExist), "a delete from above removes the link")
+			if tc.removed {
+				s.Require().NoError(os.Symlink(filepath.Join(tmp, "locked", "dir"), link))
+				s.Require().NoError(strg.DeleteRecursive(ctx, "priv/"))
+				_, err = os.Lstat(link)
+				s.ErrorIs(err, fs.ErrNotExist, "a delete of its prefix removes the link")
+			}
+		})
+	}
+}
+
+// A delete reaching inside a symlinked directory keeps the link (#499); one whose scope holds the link's name removes the link alone, as rm -r does (#501).
 func (s *StorageTestSuite) TestDeleteKeepsASymlinkedDirectory() {
 	ctx := context.Background()
 	testCases := []struct {
@@ -1314,8 +1505,8 @@ func (s *StorageTestSuite) TestDeleteKeepsASymlinkedDirectory() {
 			caseName: "DeleteRecursive of the link itself",
 			objects:  []string{"a/x.txt", "z.txt"},
 			del:      func(strg s2.Storage) error { return strg.DeleteRecursive(ctx, "link/") },
+			wantLeft: []string{"a/x.txt", "z.txt"},
 		},
-		// From above, the walk does not descend into the link, so the target is left as is.
 		{
 			caseName: "DeleteRecursive of a folder above the link",
 			under:    "x",
@@ -1323,11 +1514,28 @@ func (s *StorageTestSuite) TestDeleteKeepsASymlinkedDirectory() {
 			del:      func(strg s2.Storage) error { return strg.DeleteRecursive(ctx, "x/") },
 			wantLeft: []string{"a/x.txt", "z.txt"},
 		},
-		// Without the slash the walk starts above the link and does not descend into it either.
 		{
 			caseName: "DeleteRecursive of the link's name without a slash",
 			objects:  []string{"a/x.txt", "z.txt"},
 			del:      func(strg s2.Storage) error { return strg.DeleteRecursive(ctx, "link") },
+			wantLeft: []string{"a/x.txt", "z.txt"},
+		},
+		{
+			caseName: "DeleteRecursive of a prefix of the link's name",
+			objects:  []string{"a/x.txt", "z.txt"},
+			del:      func(strg s2.Storage) error { return strg.DeleteRecursive(ctx, "li") },
+			wantLeft: []string{"a/x.txt", "z.txt"},
+		},
+		{
+			caseName: "DeleteRecursive of everything",
+			objects:  []string{"a/x.txt", "z.txt"},
+			del:      func(strg s2.Storage) error { return strg.DeleteRecursive(ctx, "") },
+			wantLeft: []string{"a/x.txt", "z.txt"},
+		},
+		{
+			caseName: "DeleteRecursive of a prefix beside the link's name",
+			objects:  []string{"a/x.txt", "z.txt"},
+			del:      func(strg s2.Storage) error { return strg.DeleteRecursive(ctx, "linked") },
 			wantLink: true,
 			wantLeft: []string{"a/x.txt", "z.txt"},
 		},
@@ -1381,6 +1589,219 @@ func (s *StorageTestSuite) TestDeleteKeepsASymlinkedDirectory() {
 		s.Require().NoError(err)
 		s.NotZero(info.Mode()&fs.ModeSymlink, "the link stays a link")
 	})
+	s.Run("DeleteRecursive of a link removed meanwhile", func() {
+		tmp := s.T().TempDir()
+		root, ext := filepath.Join(tmp, "root"), filepath.Join(tmp, "ext")
+		s.Require().NoError(os.MkdirAll(root, 0o755))
+		s.Require().NoError(os.MkdirAll(ext, 0o755))
+		s.Require().NoError(os.Symlink(ext, filepath.Join(root, "link")))
+		hooks := newFSHooks()
+		hooks.removing["link"] = func() error { return os.Remove(filepath.Join(root, "link")) }
+		strg := newHookedStorage(osfs.DirFS(root).(*osfs.OSFS), hooks, newSpyLocker())
+
+		s.NoError(strg.DeleteRecursive(ctx, "link/"))
+		_, err := os.Stat(ext)
+		s.NoError(err, "the target directory stays")
+	})
+	s.Run("DeleteRecursive of a folder above a dangling link", func() {
+		root := filepath.Join(s.T().TempDir(), "root")
+		s.Require().NoError(os.MkdirAll(filepath.Join(root, "dir"), 0o755))
+		link := filepath.Join(root, "dir", "bad")
+		s.Require().NoError(os.Symlink(filepath.Join(root, "missing"), link))
+		strg := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(root))
+
+		s.Require().NoError(strg.DeleteRecursive(ctx, "dir/bad/"))
+		_, err := os.Lstat(link)
+		s.NoError(err, "a delete naming it keeps it")
+		s.Require().NoError(strg.DeleteRecursive(ctx, "dir/"))
+		_, err = os.Lstat(link)
+		s.ErrorIs(err, fs.ErrNotExist, "the folder above takes it")
+	})
+}
+
+// A link replaced before the root lock is deleted as what replaced it, never removed blindly (#501).
+func (s *StorageTestSuite) TestDeleteRecursiveOfAReplacedLink() {
+	ctx := context.Background()
+	testCases := []struct {
+		caseName string
+		replace  func(link string) error
+		wantFile string // under root, that must stay; "" when nothing must
+		goneFile string // under root, that must be deleted; "" when none
+	}{
+		{
+			caseName: "DeleteRecursive of a link removed before the lock",
+			replace:  os.Remove,
+		},
+		{
+			caseName: "DeleteRecursive of a link replaced by an object before the lock",
+			replace: func(link string) error {
+				if err := os.Remove(link); err != nil {
+					return err
+				}
+				return os.WriteFile(link, []byte("o"), 0o644)
+			},
+			wantFile: "link",
+		},
+		{
+			caseName: "DeleteRecursive of a link replaced by a directory before the lock",
+			replace: func(link string) error {
+				if err := os.Remove(link); err != nil {
+					return err
+				}
+				if err := os.Mkdir(link, 0o755); err != nil {
+					return err
+				}
+				return os.WriteFile(filepath.Join(link, "a.txt"), []byte("a"), 0o644)
+			},
+			goneFile: "link/a.txt",
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			tmp := s.T().TempDir()
+			root, ext := filepath.Join(tmp, "root"), filepath.Join(tmp, "ext")
+			s.Require().NoError(os.MkdirAll(root, 0o755))
+			s.Require().NoError(os.MkdirAll(ext, 0o755))
+			s.Require().NoError(os.WriteFile(filepath.Join(ext, "x.txt"), []byte("x"), 0o644))
+			link := filepath.Join(root, "link")
+			s.Require().NoError(os.Symlink(ext, link))
+			spy := newSpyLocker()
+			var once sync.Once
+			spy.onLock = func(string, bool) {
+				once.Do(func() { s.Require().NoError(tc.replace(link)) })
+			}
+			strg := newHookedStorage(osfs.DirFS(root).(*osfs.OSFS), newFSHooks(), spy)
+
+			s.Require().NoError(strg.DeleteRecursive(ctx, "link/"))
+			if tc.wantFile != "" {
+				_, err := os.Stat(filepath.Join(root, tc.wantFile))
+				s.NoError(err, "what the prefix does not select stays")
+			}
+			if tc.goneFile != "" {
+				_, err := os.Stat(filepath.Join(root, tc.goneFile))
+				s.ErrorIs(err, fs.ErrNotExist, "a directory in the link's place is deleted as any")
+			}
+			_, err := os.Stat(filepath.Join(ext, "x.txt"))
+			s.NoError(err, "the target keeps its objects")
+		})
+	}
+}
+
+// A delete selecting both a symlinked directory and its target removes the link too, in whichever order it meets them (#501).
+func (s *StorageTestSuite) TestDeleteRecursiveOfALinkAndItsTarget() {
+	ctx := context.Background()
+	testCases := []struct {
+		caseName string
+		link     string
+	}{
+		{caseName: "the link sorting before its target", link: "link"},
+		{caseName: "the link sorting after its target", link: "lzz"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			root := s.T().TempDir()
+			strg := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(root))
+			s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("lreal/a.txt", []byte("a"))))
+			s.Require().NoError(os.Symlink(filepath.Join(root, "lreal"), filepath.Join(root, tc.link)))
+
+			s.Require().NoError(strg.DeleteRecursive(ctx, "l"))
+			for _, name := range []string{tc.link, "lreal"} {
+				_, err := os.Lstat(filepath.Join(root, name))
+				s.ErrorIs(err, fs.ErrNotExist, "%s goes", name)
+			}
+			s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes(tc.link+"/b.txt", []byte("b"))), "the name is free again")
+		})
+	}
+}
+
+// A looping link is left out before paging, so no page ends on it with a cursor that nothing follows (#501).
+func (s *StorageTestSuite) TestLoopingSymlinkLeavesNoEmptyPage() {
+	ctx := context.Background()
+	root := s.T().TempDir()
+	s.Require().NoError(os.WriteFile(filepath.Join(root, "a.txt"), []byte("x"), 0o644))
+	s.Require().NoError(os.Symlink(root, filepath.Join(root, "up")))
+	strg := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, osfs.DirFS(root))
+
+	testCases := []struct {
+		caseName    string
+		opts        s2.ListOptions
+		wantObjects []string
+	}{
+		{caseName: "a page the link would fill", opts: s2.ListOptions{Limit: 1}, wantObjects: []string{"a.txt"}},
+		{caseName: "a page past the last key", opts: s2.ListOptions{Limit: 1, After: "a.txt"}},
+		{caseName: "recursive", opts: s2.ListOptions{Limit: 1, Recursive: true}, wantObjects: []string{"a.txt"}},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			res, err := strg.List(ctx, tc.opts)
+			s.Require().NoError(err)
+			s.ElementsMatch(tc.wantObjects, objectNames(res.Objects))
+			s.Empty(res.CommonPrefixes)
+			s.Empty(res.NextAfter, "no entry follows")
+		})
+	}
+}
+
+// statErrFS is fsys whose Stat of name fails with err.
+type statErrFS struct {
+	fs.FS
+	name string
+	err  error
+}
+
+func (f statErrFS) Stat(name string) (fs.FileInfo, error) {
+	if name == f.name {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: f.err}
+	}
+	return fs.Stat(f.FS, name)
+}
+
+func (f statErrFS) ReadDir(name string) ([]fs.DirEntry, error) { return fs.ReadDir(f.FS, name) }
+
+// A link leading nowhere is left out, but one whose target failed to stat otherwise fails the listing, so no page silently loses its keys (#501).
+func (s *StorageTestSuite) TestSymlinkStatErrorsInAListing() {
+	ctx := context.Background()
+	tmp := s.T().TempDir()
+	root, ext := filepath.Join(tmp, "root"), filepath.Join(tmp, "ext")
+	s.Require().NoError(os.MkdirAll(root, 0o755))
+	s.Require().NoError(os.MkdirAll(ext, 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(root, "top.txt"), []byte("t"), 0o644))
+	s.Require().NoError(os.WriteFile(filepath.Join(ext, "a.txt"), []byte("a"), 0o644))
+	s.Require().NoError(os.Symlink(ext, filepath.Join(root, "ext")))
+
+	testCases := []struct {
+		caseName string
+		err      error
+		wantErr  bool
+	}{
+		{caseName: "missing", err: syscall.ENOENT},
+		{caseName: "a loop", err: syscall.ELOOP},
+		{caseName: "through a file", err: syscall.ENOTDIR},
+		{caseName: "unreadable", err: syscall.EACCES},
+		{caseName: "an I/O error", err: syscall.EIO, wantErr: true},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			strg := NewStorageFS(s2.Config{Type: s2.TypeOSFS}, statErrFS{FS: osfs.DirFS(root), name: "ext", err: tc.err})
+			for _, recursive := range []bool{false, true} {
+				res, err := strg.List(ctx, s2.ListOptions{Recursive: recursive})
+				if tc.wantErr {
+					s.ErrorIs(err, syscall.EIO)
+					continue
+				}
+				s.Require().NoError(err)
+				s.Equal([]string{"top.txt"}, objectNames(res.Objects))
+				s.Empty(res.CommonPrefixes)
+			}
+			got, err := s2.Count(ctx, strg, s2.CountOptions{})
+			if tc.wantErr {
+				s.ErrorIs(err, syscall.EIO)
+				return
+			}
+			s.Require().NoError(err)
+			s.Equal(int64(1), got.Objects)
+		})
+	}
 }
 
 // A root that is not a directory is a misconfiguration, not an empty bucket:

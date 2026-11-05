@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -296,6 +298,29 @@ func (s *BucketsTestSuite) TestBucketSubresource() {
 			}
 		})
 	}
+}
+
+// TestDeleteBucketHoldingASymlinkedDirectory refuses a bucket while its symlinked directory holds an object, and deletes it once that is gone (#501).
+func (s *BucketsTestSuite) TestDeleteBucketHoldingASymlinkedDirectory() {
+	ctx := context.Background()
+	s.createBucket("linked-dir")
+	ext := s.T().TempDir()
+	s.Require().NoError(os.WriteFile(filepath.Join(ext, "a.txt"), []byte("a"), 0o600))
+	s.Require().NoError(os.Symlink(ext, filepath.Join(s.server.Config.Root, "linked-dir", "ext")))
+	deleteBucket := func() int {
+		w := httptest.NewRecorder()
+		s.server.S3Handler().ServeHTTP(w, httptest.NewRequest(http.MethodDelete, "/linked-dir", nil))
+		return w.Code
+	}
+
+	s.Equal(http.StatusConflict, deleteBucket(), "the target's object counts")
+	s.Require().NoError(s.storage("linked-dir").Delete(ctx, "ext/a.txt"))
+	s.Equal(http.StatusNoContent, deleteBucket(), "an emptied link holds nothing")
+	exists, err := s.server.Buckets.Exists(ctx, "linked-dir")
+	s.Require().NoError(err)
+	s.False(exists)
+	_, err = os.Stat(ext)
+	s.NoError(err, "the target directory stays")
 }
 
 // TestDeleteBucketNotEmpty checks that DeleteBucket refuses a bucket holding an object an S3 client can see.

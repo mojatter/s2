@@ -91,7 +91,7 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 		writeError(w, r, "NoSuchBucket", msgNoSuchBucket, http.StatusNotFound)
 		return
 	}
-	// The check and the delete are not atomic; an object put in between goes with the bucket.
+	// The check and the delete are not atomic; an object put in between goes with the bucket, or stays on a symlinked directory's target, which the delete leaves.
 	holds, err := bucketHoldsObjects(ctx, s, bucketName)
 	if err != nil {
 		writeS2Error(w, r, err)
