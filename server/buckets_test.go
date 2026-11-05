@@ -223,6 +223,33 @@ func (s *BucketsTestSuite) TestDelete() {
 	}
 }
 
+// Deleting a bucket that is a symlink empties its target and removes the link, which is the bucket (#499).
+func (s *BucketsTestSuite) TestDeleteASymlinkedBucket() {
+	ctx := context.Background()
+	tmp := s.T().TempDir()
+	root, ext := filepath.Join(tmp, "root"), filepath.Join(tmp, "ext")
+	s.Require().NoError(os.MkdirAll(filepath.Join(ext, "sub"), 0o755))
+	s.Require().NoError(os.WriteFile(filepath.Join(ext, "sub", "a.txt"), []byte("a"), 0o644))
+	s.Require().NoError(os.MkdirAll(root, 0o755))
+	cfg := DefaultConfig()
+	cfg.Type = s2.TypeOSFS
+	cfg.Root = root
+	bs, err := newBuckets(ctx, cfg)
+	s.Require().NoError(err)
+	s.Require().NoError(os.Symlink(ext, filepath.Join(root, "linked")))
+
+	s.Require().NoError(bs.Delete(ctx, "linked"))
+	ok, err := bs.Exists(ctx, "linked")
+	s.Require().NoError(err)
+	s.False(ok)
+	_, err = os.Lstat(filepath.Join(root, "linked"))
+	s.ErrorIs(err, os.ErrNotExist)
+	_, err = os.Stat(filepath.Join(ext, "sub", "a.txt"))
+	s.ErrorIs(err, os.ErrNotExist)
+	_, err = os.Stat(ext)
+	s.NoError(err, "the target directory stays")
+}
+
 func (s *BucketsTestSuite) TestCreateFolder() {
 	ctx := context.Background()
 	s.Require().NoError(s.buckets.Create(ctx, "fb"))

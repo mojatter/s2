@@ -228,14 +228,16 @@ func pruneEmptyParents(fsys fs.FS, name string) {
 	}
 }
 
-// pruneEmptyDir removes dir, with its .meta, and reports whether it did; one still holding anything, even what a concurrent write just made, stays. Callers hold the root exclusively.
+// pruneEmptyDir removes dir, with its .meta, and reports whether it did; one still holding anything, even what a concurrent write just made, stays, and so does a symlink. Callers hold the root exclusively.
 func pruneEmptyDir(fsys fs.FS, dir string) bool {
 	if dir == "." {
 		return false
 	}
+	if info, err := fs.Lstat(fsys, dir); err != nil || !info.IsDir() {
+		return false
+	}
 	pruneEmptyDirs(fsys, path.Join(dir, metaDir), dir)
-	info, err := fs.Stat(fsys, dir)
-	return err == nil && info.IsDir() && wfs.RemoveFile(fsys, dir) == nil
+	return wfs.RemoveFile(fsys, dir) == nil
 }
 
 func quotedMD5(h hash.Hash) string {
