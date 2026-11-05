@@ -28,8 +28,8 @@ github.com/chromedp/chromedp v0.21.0 h1:nVHgS2LHyhZJ1l3BWRbG2eFIFYiJMnvkJbELbd8W
 github.com/chromedp/chromedp v0.21.0/go.mod h1:6z1Y5FdKUxRzxx2qcC5h1xjaBJrSWrZp1mjgITfNZig=
 github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68 h1:KZaTBSyshWX3MP5jukJcNSuXDQTO+rNpt0J564dX/eg=
 github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68/go.mod h1:tphK2c80bpPhMOI4v6bIc2xWywPfbqi1Z06+RcrMkDg=
-github.com/mojatter/wfs v0.8.0 h1:wZpgKl0lVGn10Cq06pvu2dF8CudUKbkKjP8ux758Kww=
-github.com/mojatter/wfs v0.8.0/go.mod h1:PlxShpeTA90XFUWkWWi9DmXG7tgFd4v64hPDqrf1n7c=
+github.com/mojatter/wfs v0.9.0 h1:lzBobg5t7Rh5cYayOtmEvdCyjLaZWfF3FeNiG7yA9U0=
+github.com/mojatter/wfs v0.9.0/go.mod h1:4+QSzI7bL+z5mlNEomp+bgv3oVMktc0HhBSqEwh/nB4=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=

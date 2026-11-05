@@ -23,7 +23,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.7 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.20.7 // indirect
 	github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68 // indirect
-	github.com/mojatter/wfs v0.8.0 // indirect
+	github.com/mojatter/wfs v0.9.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 )
 
