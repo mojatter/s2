@@ -13,6 +13,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mojatter/s2"
@@ -40,6 +41,7 @@ func NewStorage(_ context.Context, cfg s2.Config) (s2.Storage, error) {
 type Option func(*storage)
 
 // NewStorageFS serves fs; an osfs one shares its lock with every storage on the same directory.
+// A looping symlink is left out of listings only when fs's FileInfo is one os.SameFile recognizes, as osfs's is.
 // Writing needs wfs.WriteFileFS plus wfs.RenameFS or wfs.RemoveFileFS; otherwise a write fails with wfs.ErrNotImplemented.
 func NewStorageFS(cfg s2.Config, fs fs.FS, opts ...Option) s2.Storage {
 	s := &storage{
@@ -87,6 +89,15 @@ type storage struct {
 	typ    s2.Type
 	lk     NameLocker
 	prefix string // of this storage under the lock root
+	root   fs.FS  // the lock root, nil when fsys is it
+}
+
+// rootFS is the filesystem the storage was created on, which a Sub's prefix lies under.
+func (s *storage) rootFS() fs.FS {
+	if s.root != nil {
+		return s.root
+	}
+	return s.fsys
 }
 
 func (s *storage) Type() s2.Type {
@@ -129,7 +140,7 @@ func (s *storage) sub(prefix string) (s2.Storage, error) {
 	// io/fs.Sub takes neither.
 	prefix = strings.TrimSuffix(prefix, "/")
 	if prefix == "" {
-		return &storage{cfg: s.cfg, fsys: s.fsys, typ: s.typ, lk: s.lk, prefix: s.prefix}, nil
+		return &storage{cfg: s.cfg, fsys: s.fsys, typ: s.typ, lk: s.lk, prefix: s.prefix, root: s.root}, nil
 	}
 	sub, err := fs.Sub(s.fsys, prefix)
 	if err != nil {
@@ -141,6 +152,7 @@ func (s *storage) sub(prefix string) (s2.Storage, error) {
 		typ:    s.typ,
 		lk:     s.lk,
 		prefix: path.Join(s.prefix, prefix),
+		root:   s.rootFS(),
 	}, nil
 }
 
@@ -206,14 +218,14 @@ func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult,
 	return s.listFlat(opts.Prefix, after, limit)
 }
 
-// keyedEntry is a directory entry under its key: a directory d as "d/".
+// keyedEntry is a directory entry under its key: a directory d as "d/". A symlink's entry describes its target.
 type keyedEntry struct {
 	key   string
 	entry fs.DirEntry
 }
 
-// keyEntries keys dir's entries, minus the metadata directory, and sorts them by key.
-func keyEntries(dir string, entries []fs.DirEntry) []keyedEntry {
+// keyEntries keys dir's entries, minus the metadata directory and symlinks leading nowhere or back on their path, and sorts them by key.
+func (s *storage) keyEntries(dir string, entries []fs.DirEntry) ([]keyedEntry, error) {
 	// ReadDir sorts by name, but "d-x" and "d.txt" sort before the prefix "d/".
 	keyed := make([]keyedEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -224,13 +236,130 @@ func keyEntries(dir string, entries []fs.DirEntry) []keyedEntry {
 		if dir != "." {
 			key = path.Join(dir, key)
 		}
+		if entry.Type()&fs.ModeSymlink != 0 {
+			target, err := resolveLink(s.fsys, key)
+			if err != nil {
+				return nil, err
+			}
+			if target == nil {
+				continue
+			}
+			// A looping link would list the same keys under ever longer prefixes, so it goes before paging, as one leading nowhere does.
+			if info, _ := target.Info(); target.IsDir() && s.loops(key, info) {
+				continue
+			}
+			entry = target
+		}
 		if entry.IsDir() {
 			key += "/"
 		}
 		keyed = append(keyed, keyedEntry{key: key, entry: entry})
 	}
 	slices.SortFunc(keyed, func(a, b keyedEntry) int { return strings.Compare(a.key, b.key) })
-	return keyed
+	return keyed, nil
+}
+
+// resolveLink describes what the symlink name leads to; nil when it leads nowhere or to a directory that cannot be read, and an error when reaching it failed otherwise.
+func resolveLink(fsys fs.FS, name string) (fs.DirEntry, error) {
+	info, err := fs.Stat(fsys, name)
+	if err == nil && info.IsDir() {
+		// Stat passes a directory its mode keeps from being read.
+		var f fs.File
+		if f, err = fsys.Open(name); err == nil {
+			_ = f.Close()
+		}
+	}
+	if err != nil {
+		if leadsNowhere(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to resolve link %q: %w", name, err)
+	}
+	return fs.FileInfoToDirEntry(info), nil
+}
+
+// leadsNowhere reports whether err says a link has no target to list, rather than that reaching one failed, as an I/O error does.
+func leadsNowhere(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) ||
+		errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.ELOOP)
+}
+
+// isLinkedDir reports whether name is a symlink to a directory.
+func isLinkedDir(fsys fs.FS, name string) bool {
+	info, err := fs.Lstat(fsys, name)
+	if err != nil || info.Mode()&fs.ModeSymlink == 0 {
+		return false
+	}
+	info, err = fs.Stat(fsys, name)
+	return err == nil && info.IsDir()
+}
+
+// loops reports whether dir, a symlinked directory leading to target, leads back to a directory on its path from the lock root.
+func (s *storage) loops(dir string, target fs.FileInfo) bool {
+	for d := path.Dir(path.Join(s.prefix, dir)); ; d = path.Dir(d) {
+		if info, err := fs.Stat(s.rootFS(), d); err == nil && os.SameFile(info, target) {
+			return true
+		}
+		if d == "." {
+			return false
+		}
+	}
+}
+
+// walk is fs.WalkDir entering a symlinked directory too when follow is set, unless it loops; fn sees a symlink as what it leads to and never sees one leading nowhere.
+func (s *storage) walk(root string, follow bool, fn fs.WalkDirFunc) error {
+	return fs.WalkDir(s.fsys, root, func(name string, d fs.DirEntry, err error) error {
+		if err != nil || d.Type()&fs.ModeSymlink == 0 {
+			return fn(name, d, err)
+		}
+		target, err := s.linkTarget(name, follow)
+		if err != nil {
+			return fn(name, d, err)
+		}
+		if target == nil {
+			return nil
+		}
+		err = fn(name, target, nil)
+		// fs.WalkDir sees the link as a file, where SkipDir would skip its siblings.
+		if errors.Is(err, fs.SkipDir) || (err == nil && (!target.IsDir() || !follow)) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		// A link's entry holds the target's FileInfo, so Info never fails.
+		info, _ := target.Info()
+		if s.loops(name, info) {
+			return nil
+		}
+		// fs.WalkDir answers nil for SkipAll, so carry it out of the nested walk.
+		skipAll := false
+		err = s.walk(name, follow, func(sub string, d fs.DirEntry, err error) error {
+			if sub == name && err == nil {
+				return nil // fn has seen the link
+			}
+			err = fn(sub, d, err)
+			skipAll = errors.Is(err, fs.SkipAll)
+			return err
+		})
+		if skipAll {
+			return fs.SkipAll
+		}
+		return err
+	})
+}
+
+// linkTarget is what the symlink name leads to; a walk that does not follow needs no readable target, as RemoveAll removes the link alone.
+// Not following, it skips a link whatever keeps it from being stat'd, so no error turns into a delete.
+func (s *storage) linkTarget(name string, follow bool) (fs.DirEntry, error) {
+	if follow {
+		return resolveLink(s.fsys, name)
+	}
+	info, err := fs.Stat(s.fsys, name)
+	if err != nil {
+		return nil, nil
+	}
+	return fs.FileInfoToDirEntry(info), nil
 }
 
 // belowObject reports whether dir is an object or lies under one, which is why
@@ -283,7 +412,10 @@ func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, erro
 		}
 		return s2.ListResult{}, fmt.Errorf("failed to read dir: %w", err)
 	}
-	keyed := keyEntries(dir, entries)
+	keyed, err := s.keyEntries(dir, entries)
+	if err != nil {
+		return s2.ListResult{}, err
+	}
 	res := s2.ListResult{
 		Objects:        make([]s2.Object, 0, min(len(keyed), limit)),
 		CommonPrefixes: make([]string, 0),
@@ -338,11 +470,14 @@ func (s *storage) walkKeys(dir, prefix, after string, n int, objs *[]s2.Object) 
 		}
 		return err
 	}
-	for _, e := range keyEntries(dir, entries) {
+	keyed, err := s.keyEntries(dir, entries)
+	if err != nil {
+		return err
+	}
+	for _, e := range keyed {
 		if len(*objs) == n {
 			return nil
 		}
-		// A symlink below the walk root is no directory here, so it is listed as an object, as Count counts it.
 		if e.entry.IsDir() {
 			// Every key below a directory starts with its key, so skip one the prefix or the cursor rules out.
 			if !strings.HasPrefix(e.key, prefix) {
@@ -385,7 +520,7 @@ func (s *storage) Count(ctx context.Context, opts s2.CountOptions) (s2.CountResu
 	var res s2.CountResult
 	// Every key under prefix lies in its directory.
 	root := path.Dir(prefix)
-	err := fs.WalkDir(s.fsys, root, func(name string, d fs.DirEntry, err error) error {
+	err := s.walk(root, true, func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// A directory deleted since its parent was read, a missing root, or an object in the prefix's path holds nothing to count.
 			if s.noKey(name, err) {
@@ -404,7 +539,7 @@ func (s *storage) Count(ctx context.Context, opts s2.CountOptions) (s2.CountResu
 			return nil
 		}
 		if d.IsDir() {
-			// Enter a directory that matches the prefix; a symlink below the walk root is no directory here, as in walkKeys.
+			// Enter a directory that matches the prefix.
 			if name != root && !strings.HasPrefix(name, prefix) {
 				return fs.SkipDir
 			}
@@ -1046,8 +1181,29 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 	dirName := strings.TrimSuffix(prefix, "/")
 	// Every key under prefix lies in its directory, as in Count.
 	root := path.Dir(prefix)
+	if root == dirName && isLinkedDir(s.fsys, root) {
+		// Named as the prefix, a symlinked directory goes as rm -r takes it: the link alone, its target untouched.
+		removed := false
+		err := s.lockRoot(ctx, func() error {
+			// What replaced the link meanwhile is deleted below as any directory, or left as an object the prefix does not select.
+			if !isLinkedDir(s.fsys, root) {
+				return nil
+			}
+			// A concurrent delete may have removed it already.
+			if err := wfs.RemoveFile(s.fsys, root); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("failed to remove link %q: %w", root, err)
+			}
+			removed = true
+			pruneEmptyParents(s.fsys, dirName)
+			return nil
+		})
+		if err != nil || removed {
+			return err
+		}
+	}
 	var dirs []string
-	err := fs.WalkDir(s.fsys, root, func(name string, d fs.DirEntry, err error) error {
+	// A symlinked directory met on the way is removed as a link, never walked, so a delete reaches no further than its prefix names.
+	err := s.walk(root, false, func(name string, d fs.DirEntry, err error) error {
 		// A nil entry means the root could not be stat'd; a missing one, or one in an object's path, is a no-op.
 		if d == nil {
 			if s.noKey(name, err) {
@@ -1112,6 +1268,13 @@ func (s *storage) pruneEmptied(ctx context.Context, dirs []string, dirName strin
 
 // removeDir removes dir as the walk saw it, which may be gone or an object by now. Callers hold the root exclusively.
 func (s *storage) removeDir(dir, prefix string) error {
+	// A symlink goes as a link whatever its target's state, since a delete of the target first leaves it dangling.
+	if li, err := fs.Lstat(s.fsys, dir); err == nil && li.Mode()&fs.ModeSymlink != 0 && strings.HasPrefix(dir, prefix) {
+		if err := wfs.RemoveFile(s.fsys, dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("failed to remove link %q: %w", dir, err)
+		}
+		return nil
+	}
 	info, err := fs.Stat(s.fsys, dir)
 	switch {
 	case isMissingMeta(err):

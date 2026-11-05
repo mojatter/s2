@@ -223,7 +223,7 @@ func (s *BucketsTestSuite) TestDelete() {
 	}
 }
 
-// Deleting a bucket that is a symlink empties its target and removes the link, which is the bucket (#499).
+// A bucket that is a symlink is listed, and deleting it removes the link, which is the bucket, and leaves the target as rm -r does (#501).
 func (s *BucketsTestSuite) TestDeleteASymlinkedBucket() {
 	ctx := context.Background()
 	tmp := s.T().TempDir()
@@ -237,6 +237,9 @@ func (s *BucketsTestSuite) TestDeleteASymlinkedBucket() {
 	bs, err := newBuckets(ctx, cfg)
 	s.Require().NoError(err)
 	s.Require().NoError(os.Symlink(ext, filepath.Join(root, "linked")))
+	names, err := bs.Names(ctx)
+	s.Require().NoError(err)
+	s.Contains(names, "linked")
 
 	s.Require().NoError(bs.Delete(ctx, "linked"))
 	ok, err := bs.Exists(ctx, "linked")
@@ -245,9 +248,7 @@ func (s *BucketsTestSuite) TestDeleteASymlinkedBucket() {
 	_, err = os.Lstat(filepath.Join(root, "linked"))
 	s.ErrorIs(err, os.ErrNotExist)
 	_, err = os.Stat(filepath.Join(ext, "sub", "a.txt"))
-	s.ErrorIs(err, os.ErrNotExist)
-	_, err = os.Stat(ext)
-	s.NoError(err, "the target directory stays")
+	s.NoError(err, "the target's objects stay")
 }
 
 func (s *BucketsTestSuite) TestCreateFolder() {
