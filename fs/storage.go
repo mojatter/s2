@@ -34,16 +34,30 @@ func NewStorage(_ context.Context, cfg s2.Config) (s2.Storage, error) {
 	if cfg.Root == "" {
 		return nil, s2.ErrRequiredConfigRoot
 	}
-	return NewStorageFS(cfg, osfs.DirFS(cfg.Root)), nil
+	var opts []Option
+	if cfg.OSFS != nil && cfg.OSFS.ConfinedRoot {
+		opts = append(opts, WithConfinedRoot())
+	}
+	s := newStorageFS(cfg, osfs.DirFS(cfg.Root), opts...)
+	// Fails at startup what would otherwise fail every call.
+	if r, ok := s.fsys.(*rootFS); ok && r.err != nil {
+		return nil, r.err
+	}
+	return s, nil
 }
 
 // Option configures a storage.
 type Option func(*storage)
 
 // NewStorageFS serves fs; an osfs one shares its lock with every storage on the same directory.
+// cfg.Root and cfg.OSFS describe fs and are not applied; pass WithConfinedRoot to confine it.
 // A looping symlink is left out of listings only when fs's FileInfo is one os.SameFile recognizes, as osfs's is.
 // Writing needs wfs.WriteFileFS plus wfs.RenameFS or wfs.RemoveFileFS; otherwise a write fails with wfs.ErrNotImplemented.
 func NewStorageFS(cfg s2.Config, fs fs.FS, opts ...Option) s2.Storage {
+	return newStorageFS(cfg, fs, opts...)
+}
+
+func newStorageFS(cfg s2.Config, fs fs.FS, opts ...Option) *storage {
 	s := &storage{
 		cfg:  cfg,
 		fsys: fs,

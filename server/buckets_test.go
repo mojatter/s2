@@ -60,6 +60,17 @@ func (s *BucketsTestSuite) TestNewBuckets() {
 		_, err := newBuckets(ctx, cfg)
 		s.Error(err)
 	})
+
+	// s2-server refuses to start on a confined root it cannot open (#500).
+	s.Run("confined root over a file", func() {
+		file := filepath.Join(s.T().TempDir(), "file")
+		s.Require().NoError(os.WriteFile(file, nil, 0o600))
+		cfg := DefaultConfig()
+		cfg.Root = file
+		cfg.OSFS = &s2.OSFSConfig{ConfinedRoot: true}
+		_, err := newBuckets(ctx, cfg)
+		s.Error(err)
+	})
 }
 
 func (s *BucketsTestSuite) TestHealthPathReservedBucket() {
@@ -911,4 +922,42 @@ func (s *BucketsTestSuite) TestCreateKeepsItsBodyOverALazyGeneration() {
 	s.Require().NoError(err)
 	s.NotZero(obj.Length(), "the lazy write must not leave the body empty")
 	s.Equal(int64(2), hook.putNamed.Load())
+}
+
+// TestBucketsSymlinkedOutside checks a bucket linked outside the root is hidden only when the root is confined (#500).
+func (s *BucketsTestSuite) TestBucketsSymlinkedOutside() {
+	testCases := []struct {
+		caseName  string
+		confined  bool
+		wantNames []string
+	}{
+		{caseName: "not confined", wantNames: []string{"linked"}},
+		{caseName: "confined", confined: true, wantNames: nil},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			tmp := s.T().TempDir()
+			root, ext := filepath.Join(tmp, "root"), filepath.Join(tmp, "ext")
+			s.Require().NoError(os.MkdirAll(root, 0o750))
+			s.Require().NoError(os.MkdirAll(ext, 0o750))
+			s.Require().NoError(os.Symlink(ext, filepath.Join(root, "linked")))
+			cfg := DefaultConfig()
+			cfg.Root = root
+			cfg.OSFS = &s2.OSFSConfig{ConfinedRoot: tc.confined}
+			bs, err := newBuckets(ctx, cfg)
+			s.Require().NoError(err)
+
+			names, err := bs.Names(ctx)
+			s.Require().NoError(err)
+			s.Equal(tc.wantNames, names)
+			_, err = bs.Get(ctx, "linked")
+			if tc.confined {
+				var notFound *ErrBucketNotFound
+				s.ErrorAs(err, &notFound)
+			} else {
+				s.NoError(err)
+			}
+		})
+	}
 }

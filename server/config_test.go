@@ -530,3 +530,12 @@ func TestConfigValidateUsers(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadFileOSFS(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"type": "osfs", "root": "/data", "osfs": {"confined_root": true}}`), 0o600))
+	cfg := DefaultConfig()
+	require.NoError(t, cfg.LoadFile(path))
+	require.NotNil(t, cfg.OSFS)
+	assert.True(t, cfg.OSFS.ConfinedRoot)
+}

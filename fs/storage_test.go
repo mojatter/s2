@@ -4516,3 +4516,218 @@ func TestStorage_MoveAcrossFilesystems(t *testing.T) {
 		})
 	}
 }
+
+// TestConfinedRootConforms runs s2test's checks over a storage confined with os.Root (#500).
+func TestConfinedRootConforms(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		check    func(context.Context, s2.Storage) error
+	}{
+		{caseName: "ListRecursivePrefix", check: s2test.TestStorageListRecursivePrefix},
+		{caseName: "ListPaging", check: s2test.TestStorageListPaging},
+		{caseName: "ListDefaultPage", check: s2test.TestStorageListDefaultPage},
+		{caseName: "Count", check: s2test.TestStorageCount},
+		{caseName: "OpenSinceGet", check: s2test.TestStorageOpenSinceGet},
+		{caseName: "UploadConditions", check: s2test.TestStorageUploadConditions},
+		{caseName: "GetPut", check: func(ctx context.Context, strg s2.Storage) error { return s2test.TestStorageGetPut(ctx, strg) }},
+		{caseName: "GetNotExist", check: s2test.TestStorageGetNotExist},
+		{caseName: "Exists", check: s2test.TestStorageExists},
+		{caseName: "CopyMove", check: s2test.TestStorageCopyMove},
+		{caseName: "Delete", check: s2test.TestStorageDelete},
+		{caseName: "PutMetadata", check: func(ctx context.Context, strg s2.Storage) error { return s2test.TestStoragePutMetadata(ctx, strg) }},
+		{caseName: "NameEscape", check: s2test.TestStorageNameEscape},
+		{caseName: "SubConsistency", check: s2test.TestStorageSubConsistency},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			strg := NewStorageDir(filepath.Join(t.TempDir(), "root"), WithConfinedRoot())
+			require.NoError(t, tc.check(context.Background(), strg))
+		})
+	}
+}
+
+// TestStorage_ConfinedRoot checks a confined storage treats a link leading outside its root, or an absolute one, as leading nowhere (#500).
+func TestStorage_ConfinedRoot(t *testing.T) {
+	testCases := []struct {
+		caseName    string
+		confined    bool
+		wantKeys    []string
+		wantBuckets []string
+	}{
+		{
+			caseName:    "not confined",
+			wantKeys:    []string{"absin/x.txt", "in/x.txt", "inner/x.txt", "out/2024/a.txt", "relout/2024/a.txt", "sib/y.txt", "top.txt"},
+			wantBuckets: []string{"b/", "c/", "linked/"},
+		},
+		{
+			caseName:    "confined",
+			confined:    true,
+			wantKeys:    []string{"in/x.txt", "inner/x.txt", "sib/y.txt", "top.txt"},
+			wantBuckets: []string{"b/", "c/"},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			ctx := context.Background()
+			tmp := t.TempDir()
+			root, ext := filepath.Join(tmp, "root"), filepath.Join(tmp, "ext")
+			bucket := filepath.Join(root, "b")
+			require.NoError(t, os.MkdirAll(filepath.Join(bucket, "inner"), 0o750))
+			require.NoError(t, os.MkdirAll(filepath.Join(ext, "2024"), 0o750))
+			require.NoError(t, os.WriteFile(filepath.Join(ext, "2024", "a.txt"), []byte("e"), 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(bucket, "inner", "x.txt"), []byte("i"), 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(bucket, "top.txt"), []byte("t"), 0o600))
+			require.NoError(t, os.MkdirAll(filepath.Join(root, "c", "dir"), 0o750))
+			require.NoError(t, os.WriteFile(filepath.Join(root, "c", "dir", "y.txt"), []byte("y"), 0o600))
+			for link, target := range map[string]string{
+				filepath.Join(bucket, "out"):    ext,
+				filepath.Join(bucket, "relout"): filepath.Join("..", "..", "ext"),
+				filepath.Join(bucket, "in"):     "inner",
+				filepath.Join(bucket, "absin"):  filepath.Join(bucket, "inner"),
+				filepath.Join(bucket, "sib"):    filepath.Join("..", "c", "dir"),
+				filepath.Join(bucket, "dang"):   filepath.Join("..", "gone"),
+				filepath.Join(root, "linked"):   ext,
+			} {
+				require.NoError(t, os.Symlink(target, link))
+			}
+			strg, err := s2.NewStorage(ctx, s2.Config{Type: s2.TypeOSFS, Root: root, OSFS: &s2.OSFSConfig{ConfinedRoot: tc.confined}})
+			require.NoError(t, err)
+			b, err := strg.Sub(ctx, "b")
+			require.NoError(t, err)
+
+			res, err := b.List(ctx, s2.ListOptions{Recursive: true})
+			require.NoError(t, err)
+			var keys []string
+			for _, o := range res.Objects {
+				keys = append(keys, o.Name())
+			}
+			assert.Equal(t, tc.wantKeys, keys)
+			count, err := b.(s2.Counter).Count(ctx, s2.CountOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, int64(len(tc.wantKeys)), count.Objects)
+			res, err = strg.List(ctx, s2.ListOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantBuckets, res.CommonPrefixes)
+			for _, name := range []string{"out/2024/a.txt", "relout/2024/a.txt", "absin/x.txt"} {
+				_, err = b.Get(ctx, name)
+				if tc.confined {
+					assert.ErrorIs(t, err, s2.ErrNotExist, name)
+				} else {
+					assert.NoError(t, err, name)
+				}
+			}
+			// A write below a link leading nowhere fails and creates nothing, in both modes.
+			assert.Error(t, b.Put(ctx, s2.NewObjectBytes("dang/x.txt", []byte("x"))))
+			assert.NoDirExists(t, filepath.Join(root, "gone"))
+			if !tc.confined {
+				return
+			}
+
+			// Nor does one through a link climbing out past directories it names.
+			require.NoError(t, os.Symlink(filepath.Join("..", "n", "x", "..", "..", "..", "ext"), filepath.Join(bucket, "climb")))
+			assert.Error(t, b.Put(ctx, s2.NewObjectBytes("climb/x.txt", []byte("x"))))
+			assert.NoDirExists(t, filepath.Join(root, "n"))
+
+			// Writes through a link leading outside fail and leave the target alone.
+			assert.Error(t, b.Put(ctx, s2.NewObjectBytes("out/new.txt", []byte("n"))))
+			assert.NoFileExists(t, filepath.Join(ext, "new.txt"))
+			assert.Error(t, s2.Move(ctx, b, "top.txt", "out/top.txt"))
+			assert.FileExists(t, filepath.Join(bucket, "top.txt"))
+			assert.NoError(t, b.Delete(ctx, "out/2024/a.txt"))
+			// A write to the link's own key replaces the link and leaves the target alone, as for a link leading nowhere.
+			require.NoError(t, os.Symlink(ext, filepath.Join(bucket, "out2")))
+			require.NoError(t, b.Put(ctx, s2.NewObjectBytes("out2", []byte("o"))))
+			info, err := os.Lstat(filepath.Join(bucket, "out2"))
+			require.NoError(t, err)
+			assert.True(t, info.Mode().IsRegular())
+			assert.NoFileExists(t, filepath.Join(ext, "out2"))
+			require.NoError(t, os.Symlink(ext, filepath.Join(bucket, "out3")))
+			require.NoError(t, s2.Move(ctx, b, "top.txt", "out3"))
+			info, err = os.Lstat(filepath.Join(bucket, "out3"))
+			require.NoError(t, err)
+			assert.True(t, info.Mode().IsRegular())
+			assert.NoFileExists(t, filepath.Join(ext, "out3"))
+			// No delete naming the link removes it, as for a link leading nowhere.
+			for _, prefix := range []string{"out/", "out", "o"} {
+				assert.NoError(t, b.DeleteRecursive(ctx, prefix))
+				_, err = os.Lstat(filepath.Join(bucket, "out"))
+				assert.NoError(t, err, prefix)
+			}
+			assert.FileExists(t, filepath.Join(ext, "2024", "a.txt"))
+			// A delete of the bucket's whole tree removes the link with it and leaves the target.
+			require.NoError(t, b.DeleteRecursive(ctx, ""))
+			_, err = os.Lstat(filepath.Join(bucket, "out"))
+			assert.ErrorIs(t, err, fs.ErrNotExist)
+			assert.FileExists(t, filepath.Join(ext, "2024", "a.txt"))
+		})
+	}
+}
+
+// TestWithConfinedRoot covers the root failing to open, deleting everything, and a filesystem the option leaves as it is.
+func TestWithConfinedRoot(t *testing.T) {
+	ctx := context.Background()
+	file := filepath.Join(t.TempDir(), "file")
+	require.NoError(t, os.WriteFile(file, nil, 0o600))
+	strg := NewStorageDir(file, WithConfinedRoot())
+	assert.Error(t, strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"))))
+	_, err := strg.List(ctx, s2.ListOptions{})
+	assert.Error(t, err)
+	_, err = s2.NewStorage(ctx, s2.Config{Type: s2.TypeOSFS, Root: file, OSFS: &s2.OSFSConfig{ConfinedRoot: true}})
+	assert.Error(t, err)
+
+	// os.Root cannot remove ".", so deleting everything empties the root and keeps it.
+	root := filepath.Join(t.TempDir(), "root")
+	strg = NewStorageDir(root, WithConfinedRoot())
+	for _, name := range []string{"a.txt", "d/b.txt", "d/e/c.txt"} {
+		require.NoError(t, strg.Put(ctx, s2.NewObjectBytes(name, []byte("x"))))
+	}
+	require.NoError(t, strg.DeleteRecursive(ctx, ""))
+	res, err := strg.List(ctx, s2.ListOptions{Recursive: true})
+	require.NoError(t, err)
+	assert.Empty(t, res.Objects)
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+	require.NoError(t, strg.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"))))
+
+	// A link leading nowhere fails MkdirAll with fs.ErrExist, as os.MkdirAll does, instead of creating its target.
+	require.NoError(t, os.Symlink("gone", filepath.Join(root, "dang")))
+	_, err = wfs.CreateFile(strg.(*storage).fsys, "dang/.meta/x", 0o600)
+	assert.ErrorIs(t, err, fs.ErrExist)
+	assert.NoDirExists(t, filepath.Join(root, "gone"))
+	require.NoError(t, os.Remove(filepath.Join(root, "dang")))
+
+	// A failing entry does not stop the rest, as with os.RemoveAll.
+	if os.Geteuid() != 0 {
+		require.NoError(t, strg.Put(ctx, s2.NewObjectBytes("a/x.txt", []byte("x"))))
+		require.NoError(t, strg.Put(ctx, s2.NewObjectBytes("b/y.txt", []byte("y"))))
+		require.NoError(t, os.Chmod(filepath.Join(root, "a"), 0o555))
+		t.Cleanup(func() { _ = os.Chmod(filepath.Join(root, "a"), 0o755) })
+		require.Error(t, wfs.RemoveAll(strg.(*storage).fsys, "."))
+		assert.NoDirExists(t, filepath.Join(root, "b"))
+	}
+
+	mem := NewStorageMem(s2.Config{}, WithConfinedRoot())
+	require.NoError(t, mem.Put(ctx, s2.NewObjectBytes("a.txt", []byte("a"))))
+	_, err = mem.Get(ctx, "a.txt")
+	assert.NoError(t, err)
+}
+
+func TestInvalidName(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		goos     string
+		name     string
+		want     bool
+	}{
+		{caseName: "windows backslash", goos: "windows", name: `a\b`, want: true},
+		{caseName: "windows colon", goos: "windows", name: "a:b", want: true},
+		{caseName: "linux backslash", goos: "linux", name: `a\b`, want: false},
+		{caseName: "parent", goos: "linux", name: "../a", want: true},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			assert.Equal(t, tc.want, invalidName(tc.goos, tc.name))
+		})
+	}
+}

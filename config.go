@@ -45,6 +45,12 @@ func KnownTypes() []Type {
 	return []Type{TypeOSFS, TypeMemFS, TypeS3, TypeGCS, TypeAzblob}
 }
 
+// OSFSConfig holds OSFS-specific settings.
+type OSFSConfig struct {
+	// ConfinedRoot keeps the storage inside Root: a symlink leading outside it, or an absolute one, leads nowhere.
+	ConfinedRoot bool `json:"confined_root,omitempty"`
+}
+
 // S3Config holds S3-specific configuration.
 // When fields are empty, the AWS SDK defaults (environment variables, shared
 // credentials, IAM role, etc.) are used.
@@ -91,6 +97,8 @@ type Config struct {
 	Root string `json:"root"`
 	// SignedURL is the presign URL of the storage. This is used for TypeOSFS and TypeMemFS.
 	SignedURL string `json:"signed_url,omitempty"`
+	// OSFS holds OSFS-specific settings. Only used when Type is TypeOSFS.
+	OSFS *OSFSConfig `json:"osfs,omitempty"`
 	// S3 holds S3-specific settings. Only used when Type is TypeS3.
 	S3 *S3Config `json:"s3,omitempty"`
 	// GCS holds GCS-specific settings. Only used when Type is TypeGCS.
