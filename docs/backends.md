@@ -12,6 +12,9 @@ Local filesystem storage.
 strg, err := s2.NewStorage(ctx, s2.Config{
     Type: s2.TypeOSFS,
     Root: "/var/data/my-bucket",
+    OSFS: &s2.OSFSConfig{
+        ConfinedRoot: true,
+    },
 })
 ```
 
@@ -20,13 +23,17 @@ As JSON:
 ```json
 {
   "type": "osfs",
-  "root": "/var/data/my-bucket"
+  "root": "/var/data/my-bucket",
+  "osfs": {
+    "confined_root": true
+  }
 }
 ```
 
 | Field | Description |
 |-------|-------------|
 | `root` | Filesystem path under which objects are stored |
+| `osfs.confined_root` | Keep every path inside `root`, as [Confined root](#confined-root) describes (default `false`) |
 
 Access control is governed by filesystem permissions.
 
@@ -263,7 +270,7 @@ A symlinked directory inside a bucket, such as `ln -s /mnt/external-disk "$S2_SE
 
 Take a root, for s2-server a bucket's directory under `$S2_SERVER_ROOT`, holding `ext`, a symlink to a directory that may lie outside the root.
 
-- **Listings:** a listing with prefix `""` shows `ext/` as a common prefix, and a recursive listing or `Count` descends into the target whether it starts above the link or inside it, so the keys agree with what a listing under `ext/` returns. A link leading back to a directory on its path from the root the storage was created on, for s2-server `$S2_SERVER_ROOT`, such as `ln -s . loop` or a link to `$S2_SERVER_ROOT` itself, is left out of listings, as a link leading nowhere is, and no listing or `Count` descends into it from above; a listing that starts inside it, such as one with prefix `loop/`, lists what it leads to. A link to a directory above that root, such as `/`, is descended once, until the listing meets the link again, so its keys repeat; [#500](https://github.com/mojatter/s2/issues/500) tracks confining a storage to its root. A link leading nowhere, to itself or through a file, or to a directory that cannot be read, is not listed, while a link whose target fails to stat for another reason, such as an I/O error, fails the listing, and a directory inside the target that cannot be read fails a listing as one inside the bucket does. A delete whose scope holds the name of a link to a directory that cannot be read removes it as any link, but no delete naming one leading nowhere, to itself or through a file, or one whose target cannot be reached because a directory on the way cannot be searched, removes it; a recursive delete whose prefix is such a link's, `priv/`, fails with the error reaching the target gave, so the console's folder delete answers `500`, unless the link leads to a missing path, where it does nothing. A recursive delete of a folder or bucket above it removes it with that folder. Two links to one target list its objects under both keys, and `Count` counts them twice. `fs.MigrateMeta` does not follow a link.
+- **Listings:** a listing with prefix `""` shows `ext/` as a common prefix, and a recursive listing or `Count` descends into the target whether it starts above the link or inside it, so the keys agree with what a listing under `ext/` returns. A link leading back to a directory on its path from the root the storage was created on, for s2-server `$S2_SERVER_ROOT`, such as `ln -s . loop` or a link to `$S2_SERVER_ROOT` itself, is left out of listings, as a link leading nowhere is, and no listing or `Count` descends into it from above; a listing that starts inside it, such as one with prefix `loop/`, lists what it leads to. A link to a directory above that root, such as `/`, is descended once, until the listing meets the link again, so its keys repeat, unless the storage is [confined to its root](#confined-root). A link leading nowhere, to itself or through a file, or to a directory that cannot be read, is not listed, while a link whose target fails to stat for another reason, such as an I/O error, fails the listing, and a directory inside the target that cannot be read fails a listing as one inside the bucket does. A delete whose scope holds the name of a link to a directory that cannot be read removes it as any link, but no delete naming one leading nowhere, to itself or through a file, or one whose target cannot be reached because a directory on the way cannot be searched, removes it; a recursive delete whose prefix is such a link's, `priv/`, fails with the error reaching the target gave, so the console's folder delete answers `500`, unless the link leads to a missing path, where it does nothing. A recursive delete of a folder or bucket above it removes it with that folder. Two links to one target list its objects under both keys, and `Count` counts them twice. `fs.MigrateMeta` does not follow a link.
 - **Writes and moves:** a PutObject under `ext/` writes into the target. `s2.Move` between the link and the rest of the bucket uses `os.Rename`, and when the target is on another filesystem, where that fails with `EXDEV`, copies the object and then deletes the source under the same locks, as on a filesystem without `Rename`; no s3api request or console action moves an object.
 - **Deletes inside the link keep it:** a delete by key, and a recursive delete whose prefix lies inside the link, such as `ext/2024/`, remove the target's objects and leave the link, even when they empty the target, so a later PutObject under `ext/` writes into the target again. `aws s3 rm --recursive` and the console's folder delete under a user policy delete each key a listing returns, so from above the link they remove the target's objects too, and keep the link. DeleteBucket counts the target's objects, answering `409 BucketNotEmpty` while any is left, and once the link is empty deletes the bucket with it.
 - **A delete whose scope holds the link's name:** a recursive delete whose prefix is the link's or a part of its name, `ext/`, `ext` or `e`, or a folder above it, `dir/` for `dir/ext`, removes the link and leaves the target's objects on disk, where nothing lists them any more; so do the console's folder delete when no user policy applies and its bucket delete. Delete by key first, such as `aws s3 rm --recursive s3://<bucket>/ext/`, when the objects should go too. After the link is gone, a PutObject under `ext/` creates a directory in the bucket.
@@ -271,6 +278,17 @@ Take a root, for s2-server a bucket's directory under `$S2_SERVER_ROOT`, holding
 - **A symlink to a file** (not supported) is listed as an object with the target's size, modification time and ETag, as GetObject and HeadObject answer it. DeleteObject removes only the link, and PutObject to its key replaces the link with a regular file.
 
 To find links under a server root, run `find -H "${S2_SERVER_ROOT:?}" -type l` (`-H` makes `find` descend when the root itself is a link), and remove each with `rm`; to keep what a link serves, then move its target to the link's path.
+
+### Confined root
+
+Setting `osfs.confined_root` (`s2.Config.OSFS.ConfinedRoot`, for s2-server in the `S2_SERVER_CONFIG` file, or `fs.WithConfinedRoot()` on `fs.NewStorageDir` and on `fs.NewStorageFS` over an `osfs` directory) makes `osfs` resolve every path through [`os.Root`](https://pkg.go.dev/os#Root), so no request reaches outside the root the storage was created on, for s2-server `$S2_SERVER_ROOT`, even through a link placed by mistake. It is off by default, since it also stops a symlink from adding a disk.
+
+- **Links that stay inside keep working:** a relative link whose target lies under the root and whose `..` never climbs above it on the way, such as `ln -s inner "$S2_SERVER_ROOT/<bucket>/in"` or `../<other-bucket>/dir`, behaves as described above. `os.Root` reads `..` by name, so one that climbs above the root and comes back, such as `../../root/<bucket>/inner` for a root named `root`, leads nowhere as a link leading outside does. A PutObject below a link whose target is missing fails and creates nothing, as without `confined_root`, rather than creating the target, such as a deleted bucket. `os.Root` follows at most 8 links in one lookup, fewer than the kernel, so a path crossing more is treated as a link to itself: left out of listings, and a request below it fails. Listing a directory stats each of its entries, so a very large directory lists more slowly than without `confined_root`.
+- **Links leading outside, and every absolute link, lead nowhere:** a link whose target lies outside the root, or that is absolute, even when it points inside, is treated as a link leading nowhere. Listings and `Count` leave it out, a GetObject or HeadObject below it answers `404 NoSuchKey`, and a DeleteObject below it succeeds and removes nothing. A PutObject or `s2.Move` below it fails and writes nothing to the target; PutObject answers `500 InternalError`, as it does below a link leading nowhere without `confined_root`. A PutObject or `s2.Move` to the link's own key replaces the link with the object and leaves the target alone, as for a link leading nowhere without `confined_root`. No delete naming the link removes it: a recursive delete whose prefix is the link's, `out/`, or a part of its name does nothing, as for a link leading to a missing path, while a recursive delete of a folder or bucket above it, and DeleteBucket, remove it with that directory and leave the target's objects.
+- **A bucket that is itself such a link** is left out of ListBuckets and answers `404 NoSuchBucket`; a CreateBucket of its name answers `500 InternalError`.
+- Opening the root creates it when it is missing. When opening fails, as when `root` is a file, `s2.NewStorage`, and so s2-server at startup, returns that error, while a storage built with `fs.WithConfinedRoot()` fails every call with it.
+- `os.Root` opens each directory on the way, so one that can be searched but not read, such as mode `0711`, fails every request below it with permission denied (`500 InternalError`) where plain `osfs` serves it; a root directory of that mode fails `s2.NewStorage`, and so s2-server at startup.
+- The storage holds the root directory open, not its path, so the directory must stay in place while the storage is in use. One removed meanwhile makes every write fail, and one renamed away, such as by `mv` before restoring a backup in its place, keeps receiving reads and writes under its new name; either lasts until the storage is created again, for s2-server until a restart. A recursive delete of everything on the root storage empties the directory and keeps it.
 
 ## Content-Type and ETag
 
