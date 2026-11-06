@@ -4420,3 +4420,99 @@ func TestStorage_MoveAliasWithoutRename(t *testing.T) {
 		})
 	}
 }
+
+// Move copies when rename fails with EXDEV, as it does into a symlinked directory on another disk (#503).
+func TestStorage_MoveAcrossFilesystems(t *testing.T) {
+	ctx := context.Background()
+	testCases := []struct {
+		caseName string
+		src, dst string
+		noMeta   bool
+		existing bool
+		fail     string
+	}{
+		{caseName: "into the other filesystem", src: "a.txt", dst: "ext/a.txt"},
+		{caseName: "out of the other filesystem", src: "ext/a.txt", dst: "dir/a.txt"},
+		{caseName: "within the other filesystem", src: "ext/a.txt", dst: "ext/sub/b.txt"},
+		{caseName: "over an existing key", src: "a.txt", dst: "ext/a.txt", existing: true},
+		{caseName: "without a metadata file", src: "ext/a.txt", dst: "a.txt", noMeta: true, existing: true},
+		{caseName: "source fails to open", src: "a.txt", dst: "ext/new/deep/a.txt", fail: "open"},
+		{caseName: "copy fails", src: "a.txt", dst: "ext/new/deep/a.txt", fail: "write"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			mem := memfs.New()
+			d := wfs.DelegateFS(mem)
+			// DelegateFS leaves MkdirAll a no-op.
+			d.MkdirAllFunc = mem.MkdirAll
+			var crossed bool
+			d.RenameFunc = func(oldpath, newpath string) error {
+				if strings.HasPrefix(oldpath, "ext/") != strings.HasPrefix(newpath, "ext/") {
+					crossed = true
+					return &os.LinkError{Op: "rename", Old: oldpath, New: newpath, Err: syscall.EXDEV}
+				}
+				return mem.Rename(oldpath, newpath)
+			}
+			strg := NewStorageFS(s2.Config{Type: s2.TypeMemFS}, d)
+			if tc.existing {
+				require.NoError(t, strg.Put(ctx, s2.NewObjectBytes(tc.dst, []byte("old"), s2.WithContentType("application/octet-stream"))))
+			}
+			if tc.noMeta {
+				require.NoError(t, mem.MkdirAll(path.Dir(tc.src), fs.ModePerm))
+				_, err := mem.WriteFile(tc.src, []byte("a"), fs.ModePerm)
+				require.NoError(t, err)
+			} else {
+				require.NoError(t, strg.Put(ctx, s2.NewObjectBytes(tc.src, []byte("a"), s2.WithContentType("text/plain"))))
+			}
+
+			switch tc.fail {
+			case "open":
+				d.OpenFunc = func(name string) (fs.File, error) {
+					if name == tc.src {
+						return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.EIO}
+					}
+					return mem.Open(name)
+				}
+			case "write":
+				d.CreateFileFunc = func(name string, mode fs.FileMode) (wfs.WriterFile, error) {
+					if strings.HasPrefix(name, path.Dir(tc.dst)+"/") {
+						return nil, &fs.PathError{Op: "create", Path: name, Err: syscall.EIO}
+					}
+					return mem.CreateFile(name, mode)
+				}
+			}
+			if tc.fail != "" {
+				// The source stays and the directories made for dst are pruned.
+				require.Error(t, s2.Move(ctx, strg, tc.src, tc.dst))
+				got, err := strg.Get(ctx, tc.src)
+				require.NoError(t, err)
+				assert.Equal(t, "text/plain", got.ContentType())
+				_, err = fs.Stat(mem, path.Dir(tc.dst))
+				assert.ErrorIs(t, err, fs.ErrNotExist)
+				return
+			}
+
+			require.NoError(t, s2.Move(ctx, strg, tc.src, tc.dst))
+
+			assert.Equal(t, strings.HasPrefix(tc.src, "ext/") != strings.HasPrefix(tc.dst, "ext/"), crossed)
+			got, err := strg.Get(ctx, tc.dst)
+			require.NoError(t, err)
+			rc, err := got.Open()
+			require.NoError(t, err)
+			body, err := io.ReadAll(rc)
+			_ = rc.Close()
+			require.NoError(t, err)
+			assert.Equal(t, "a", string(body))
+			if tc.noMeta {
+				assert.Empty(t, got.ContentType())
+			} else {
+				assert.Equal(t, "text/plain", got.ContentType())
+			}
+			ok, err := strg.Exists(ctx, tc.src)
+			require.NoError(t, err)
+			assert.False(t, ok)
+			_, err = fs.Stat(mem, metaPath(tc.src))
+			assert.ErrorIs(t, err, fs.ErrNotExist)
+		})
+	}
+}

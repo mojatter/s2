@@ -725,7 +725,7 @@ func (s *storage) write(ctx context.Context, reads []string, name string, check 
 	return etag, nil
 }
 
-// uploadDirect stores name through atomicWrite's fallback for a filesystem without rename. Callers hold name's lock.
+// uploadDirect stores name through atomicWrite's fallback for a filesystem without rename or a Move that cannot rename. Callers hold name's lock.
 func (s *storage) uploadDirect(name string, src io.Reader, m meta) (string, error) {
 	// Before checkTree and prepareMeta, which may create directories this filesystem cannot remove.
 	if err := writable(s.fsys, name); err != nil {
@@ -952,7 +952,21 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 	// Prefer a direct rename on filesystems that support it: it's atomic and
 	// avoids reading the object body twice.
 	if _, ok := s.fsys.(wfs.RenameFS); ok {
-		if err := s.lockNames(ctx, []string{src, dst}, func() error { return s.rename(src, dst) }); err != nil {
+		var ran bool
+		err := s.lockNames(ctx, []string{src, dst}, func() error {
+			err := s.rename(src, dst)
+			if errors.Is(err, errCrossDevice) {
+				// rename may have made dst's directories already.
+				ran = true
+				return s.moveDirect(src, dst, &ran)
+			}
+			return err
+		})
+		if err != nil {
+			if ran {
+				s.pruneIfEmpty(ctx, dst)
+				s.pruneIfEmpty(ctx, src)
+			}
 			return err
 		}
 		s.pruneIfEmpty(ctx, src)
@@ -1034,6 +1048,9 @@ func sameStat(info fs.FileInfo, length uint64, modTime time.Time) bool {
 	return s2.MustUint64(info.Size()) == length && info.ModTime().Equal(modTime)
 }
 
+// errCrossDevice is rename's answer when the body cannot be renamed across filesystems.
+var errCrossDevice = errors.New("cross-device rename")
+
 // rename moves src and its metadata file to dst. Callers hold both names' locks.
 func (s *storage) rename(src, dst string) error {
 	if _, err := s.get(src); err != nil {
@@ -1057,6 +1074,10 @@ func (s *storage) rename(src, dst string) error {
 		}
 	}
 	if err := wfs.Rename(s.fsys, src, dst); err != nil {
+		if errors.Is(err, syscall.EXDEV) {
+			// Nothing moved yet, so Move can copy instead, such as into a symlinked directory on another disk (#503).
+			return errCrossDevice
+		}
 		return s.refused(dst, fmt.Errorf("failed to rename %q to %q: %w", src, dst, err))
 	}
 	// Move the sidecar too; a source without one must not inherit dst's.
