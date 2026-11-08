@@ -376,6 +376,67 @@ func TestCopyTo(t *testing.T) {
 	}
 }
 
+// readFromRecorder is a writer whose ReadFrom, which copyPooled must not use, is recorded.
+type readFromRecorder struct {
+	strings.Builder
+	readFrom bool
+	writeErr error
+}
+
+func (w *readFromRecorder) Write(p []byte) (int, error) {
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
+	return w.Builder.Write(p)
+}
+
+func (w *readFromRecorder) ReadFrom(r io.Reader) (int64, error) {
+	w.readFrom = true
+	return io.Copy(&w.Builder, r)
+}
+
+// TestCopyBufCopy checks copy copies src, bypasses dst's ReaderFrom and leaves no dst behind.
+func TestCopyBufCopy(t *testing.T) {
+	body := strings.Repeat("x", 100*1024)
+	errBody := errors.New("body failed")
+	errDst := errors.New("dst failed")
+	testCases := []struct {
+		caseName string
+		src      io.Reader
+		dstErr   error
+		want     string
+		wantErr  error
+	}{
+		{caseName: "tee reader", src: io.TeeReader(strings.NewReader(body), io.Discard), want: body},
+		{caseName: "writer to", src: strings.NewReader(body), want: body},
+		{caseName: "src error", src: iotest.ErrReader(errBody), wantErr: errBody},
+		{caseName: "dst error", src: io.TeeReader(strings.NewReader(body), io.Discard), dstErr: errDst, wantErr: errDst},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			cb := &copyBuf{buf: make([]byte, 4096)}
+			dst := &readFromRecorder{writeErr: tc.dstErr}
+			n, err := cb.copy(dst, tc.src)
+			require.ErrorIs(t, err, tc.wantErr)
+			require.False(t, dst.readFrom)
+			require.Equal(t, int64(len(tc.want)), n)
+			require.Equal(t, tc.want, dst.String())
+			require.Nil(t, cb.w.Writer)
+		})
+	}
+}
+
+// TestCopyPooled checks copyPooled copies through the pool without dst's ReaderFrom.
+func TestCopyPooled(t *testing.T) {
+	body := strings.Repeat("x", 100*1024)
+	dst := &readFromRecorder{}
+	n, err := copyPooled(dst, io.TeeReader(strings.NewReader(body), io.Discard))
+	require.NoError(t, err)
+	require.False(t, dst.readFrom)
+	require.Equal(t, int64(len(body)), n)
+	require.Equal(t, body, dst.String())
+}
+
 // writeRemoveFS is what osfs offers but Rename.
 type writeRemoveFS interface {
 	wfs.WriteFileFS

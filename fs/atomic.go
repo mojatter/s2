@@ -9,6 +9,7 @@ import (
 	iofs "io/fs"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/mojatter/wfs"
 )
@@ -68,7 +69,7 @@ func createTemp(fsys iofs.FS, name string) (*tempFile, error) {
 // write copies src into the temp file, syncs and closes it; it closes on error too.
 func (t *tempFile) write(src io.Reader) error {
 	t.written = true
-	if _, err := io.Copy(t.f, src); err != nil {
+	if _, err := copyPooled(t.f, src); err != nil {
 		_ = t.f.Close()
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
@@ -82,6 +83,31 @@ func (t *tempFile) write(src io.Reader) error {
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
 	return nil
+}
+
+// copyBuf is a pooled copy buffer with a writer that hides its destination's ReaderFrom.
+type copyBuf struct {
+	buf []byte
+	w   struct{ io.Writer }
+}
+
+// copyBufPool holds the copyBufs copyPooled copies through.
+var copyBufPool = sync.Pool{New: func() any { return &copyBuf{buf: make([]byte, 32*1024)} }}
+
+// copyPooled copies src to dst through a pooled buffer, bypassing dst's ReaderFrom, whose *os.File fallback for a wrapped src allocates a buffer per call.
+func copyPooled(dst io.Writer, src io.Reader) (int64, error) {
+	cb := copyBufPool.Get().(*copyBuf)
+	defer copyBufPool.Put(cb)
+
+	return cb.copy(dst, src)
+}
+
+// copy copies src to dst through cb's buffer and leaves no dst behind.
+func (cb *copyBuf) copy(dst io.Writer, src io.Reader) (int64, error) {
+	cb.w.Writer = dst
+	defer func() { cb.w.Writer = nil }()
+
+	return io.CopyBuffer(&cb.w, src, cb.buf)
 }
 
 // publish renames the temp file over name. Callers hold name's lock.
