@@ -1,7 +1,6 @@
 package buckets
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -113,12 +112,7 @@ func writeObjectsFragment(r *http.Request, w http.ResponseWriter, s *server.Serv
 		server.WriteConsoleStorageError(w, r, err)
 		return
 	}
-	var buf bytes.Buffer
-	if err := s.Template.ExecuteTemplate(&buf, "console/buckets/objects.html", data); err != nil {
-		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
-		return
-	}
-	_, _ = buf.WriteTo(w)
+	s.WriteConsoleTemplate(w, r, "console/buckets/objects.html", data)
 }
 
 func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {

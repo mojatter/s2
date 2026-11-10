@@ -42,8 +42,20 @@ func (s *Server) RenderConsoleIndex(ctx context.Context, w http.ResponseWriter, 
 		data = map[string]any{}
 	}
 	data["Buckets"] = names
+	return s.executeTemplate(w, "console/index.html", data)
+}
+
+// WriteConsoleTemplate writes the template name run on data, or a 500 if it fails.
+func (s *Server) WriteConsoleTemplate(w http.ResponseWriter, r *http.Request, name string, data any) {
+	if err := s.executeTemplate(w, name, data); err != nil {
+		WriteConsoleError(w, r, http.StatusInternalServerError, err)
+	}
+}
+
+// executeTemplate runs the template name into a buffer first, so a failure leaves w untouched.
+func (s *Server) executeTemplate(w http.ResponseWriter, name string, data any) error {
 	var buf bytes.Buffer
-	if err := s.Template.ExecuteTemplate(&buf, "console/index.html", data); err != nil {
+	if err := s.Template.ExecuteTemplate(&buf, name, data); err != nil {
 		return err
 	}
 	_, _ = buf.WriteTo(w)

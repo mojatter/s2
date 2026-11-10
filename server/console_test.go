@@ -239,3 +239,28 @@ func TestWantsFragment(t *testing.T) {
 		})
 	}
 }
+
+func TestWriteConsoleTemplate(t *testing.T) {
+	testCases := []struct {
+		caseName     string
+		name         string
+		wantStatus   int
+		wantContains string
+	}{
+		{caseName: "a template", name: "console/buckets/list.html", wantStatus: http.StatusOK, wantContains: "bucket-list"},
+		{caseName: "an unknown template", name: "console/missing.html", wantStatus: http.StatusInternalServerError, wantContains: "Internal Server Error"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Root = t.TempDir()
+			srv, err := NewServer(context.Background(), cfg)
+			require.NoError(t, err)
+
+			w := httptest.NewRecorder()
+			srv.WriteConsoleTemplate(w, httptest.NewRequest(http.MethodGet, "/", nil), tc.name, struct{ Buckets []string }{})
+			assert.Equal(t, tc.wantStatus, w.Code)
+			assert.Contains(t, w.Body.String(), tc.wantContains)
+		})
+	}
+}

@@ -1,7 +1,6 @@
 package console
 
 import (
-	"bytes"
 	"net/http"
 
 	"github.com/mojatter/s2/server"
@@ -10,12 +9,7 @@ import (
 
 func handleIndex(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	if server.WantsFragment(w, r) {
-		var buf bytes.Buffer
-		if err := s.Template.ExecuteTemplate(&buf, "console/empty.html", nil); err != nil {
-			server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
-			return
-		}
-		_, _ = buf.WriteTo(w)
+		s.WriteConsoleTemplate(w, r, "console/empty.html", nil)
 		return
 	}
 	if err := s.RenderConsoleIndex(r.Context(), w, nil); err != nil {
@@ -70,15 +64,7 @@ func renderBucketList(r *http.Request, s *server.Server, w http.ResponseWriter) 
 	}
 	names = server.FilterBucketNames(server.UserFromContext(ctx), names)
 
-	data := struct{ Buckets []string }{Buckets: names}
-
-	var buf bytes.Buffer
-	if err := s.Template.ExecuteTemplate(&buf, "console/buckets/list.html", data); err != nil {
-		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
-		return
-	}
-
-	_, _ = buf.WriteTo(w)
+	s.WriteConsoleTemplate(w, r, "console/buckets/list.html", struct{ Buckets []string }{Buckets: names})
 }
 
 func init() {
