@@ -2164,6 +2164,7 @@ func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
 		pattern   string
 		act       string
 		backTo    string
+		unhold    bool
 		meanwhile string
 		until     string
 		wantState string
@@ -2204,6 +2205,16 @@ func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
 			meanwhile: `document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/b"]').click()`,
 			until:     `!document.querySelector('.bucket-item[title="b"]')`,
 			wantState: "/ Storage Overview open=false [a]",
+		},
+		{
+			// b's delete leaves the reset a's delete sent, held here, to land.
+			caseName:  "the open bucket deleted, then another as its reset is held",
+			pattern:   "*/",
+			act:       `window.confirm = () => true; document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/a"]').click()`,
+			unhold:    true,
+			meanwhile: `document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/b"]').click()`,
+			until:     `!document.querySelector('.bucket-item[title="b"]')`,
+			wantState: "/ Storage Overview open=false []",
 		},
 		{
 			// The live list shows the new bucket, which is not opened over the Back.
@@ -2254,6 +2265,14 @@ func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
 			held, err, ok := next()
 			s.Require().True(ok, "the request must pause")
 			s.Require().NoError(err)
+			if tc.unhold {
+				// Later requests pass while the held one stays paused.
+				_, err = cdp.Call(browserCtx, target, fetch.Enable, fetch.EnableParams{Patterns: []*fetch.RequestPattern{{URLPattern: "*/never-requested"}}})
+				s.Require().NoError(err)
+				// The list the delete answered is wired once it settles.
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`!document.querySelector('.htmx-swapping, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "settle the list")
+			}
 			if tc.meanwhile != "" {
 				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](tc.meanwhile)))
 				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](tc.until+` || null`, chromedp.WithPollingTimeout(5*time.Second)))
@@ -2265,7 +2284,10 @@ func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
 			}
 
 			_, err = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: held.RequestID})
-			s.Require().NoError(err)
+			// A held request aborted meanwhile may be gone already.
+			if !tc.unhold {
+				s.Require().NoError(err)
+			}
 			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`window.heldDone || null`, chromedp.WithPollingTimeout(5*time.Second)))
 			s.Require().NoError(err, "the held request must end")
 			// Outlasts the settle and a click a create would make on its new entry, and the overview a delete opens.
@@ -2489,11 +2511,12 @@ func (s *ObjectsTestSuite) TestBrowserOrdersARestoreAgainstANavigation() {
 // TestBrowserCancelsAHeldNavigation holds a bucket's GET in Chrome, checks the pending entry shows it, and moves on meanwhile, so the held response never lands over the later view (#422).
 func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
 	testCases := []struct {
-		caseName string
-		move     func(ctx context.Context) error
-		wantURL  string
-		wantMark string
-		after    func(ctx context.Context) error
+		caseName  string
+		move      func(ctx context.Context) error
+		wantLands bool
+		wantURL   string
+		wantMark  string
+		after     func(ctx context.Context) error
 	}{
 		{
 			caseName: "another bucket clicked",
@@ -2525,7 +2548,7 @@ func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
 			wantMark: "zz",
 		},
 		{
-			// The delete aborts the held request itself, and leaves a's view and URL since c is not shown.
+			// The delete leaves the held request alone and a's view too since c is not shown, so b lands once released.
 			caseName: "another bucket deleted",
 			move: func(ctx context.Context) error {
 				if err := chromedp.Do(ctx,
@@ -2539,11 +2562,12 @@ func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
 				_, err := chromedp.Run(ctx, chromedp.Poll[bool](`!document.querySelector('.bucket-item[title="c"]') || null`, chromedp.WithPollingTimeout(5*time.Second)))
 				return err
 			},
-			wantURL:  "/buckets/a",
-			wantMark: "a",
+			wantLands: true,
+			wantURL:   "/buckets/b",
+			wantMark:  "b",
 		},
 		{
-			// The delete aborts the held request, and the view showing a opens the overview.
+			// The overview the delete opens for the view showing a replaces the held request.
 			caseName: "the open bucket deleted",
 			move: func(ctx context.Context) error {
 				return chromedp.Do(ctx,
@@ -2619,20 +2643,30 @@ func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
 
 			s.Require().NoError(tc.move(browserCtx))
 			landed := `location.pathname + location.search === '` + tc.wantURL + `' && (document.querySelector('.bucket-item.active')?.title ?? '') === '` + tc.wantMark + `'`
-			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](landed+` || null`, chromedp.WithPollingTimeout(5*time.Second)))
-			s.Require().NoError(err, "move on while b is held")
-			aborted, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`window.bAborted`))
-			s.Require().NoError(err)
-			s.True(aborted, "the held request must be aborted")
+			if tc.wantLands {
+				aborted, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`window.bAborted`))
+				s.Require().NoError(err)
+				s.False(aborted, "the held request must not be aborted")
+				_, err = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: paused.RequestID})
+				s.Require().NoError(err)
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](landed+` || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "b must land")
+			} else {
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](landed+` || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "move on while b is held")
+				aborted, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`window.bAborted`))
+				s.Require().NoError(err)
+				s.True(aborted, "the held request must be aborted")
 
-			// An aborted request is gone from the fetch domain, so its error is not the point.
-			_, _ = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: paused.RequestID})
-			// loadend follows the swap and push of a response that got through, so checking after it catches one.
-			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`window.bDone || null`, chromedp.WithPollingTimeout(5*time.Second)))
-			s.Require().NoError(err, "b's xhr must end")
-			stayed, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](landed+` && !document.querySelector('.bucket-item.htmx-request')`))
-			s.Require().NoError(err)
-			s.True(stayed, "b must not land over the later view")
+				// An aborted request is gone from the fetch domain, so its error is not the point.
+				_, _ = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: paused.RequestID})
+				// loadend follows the swap and push of a response that got through, so checking after it catches one.
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`window.bDone || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "b's xhr must end")
+				stayed, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](landed+` && !document.querySelector('.bucket-item.htmx-request')`))
+				s.Require().NoError(err)
+				s.True(stayed, "b must not land over the later view")
+			}
 
 			if tc.after != nil {
 				s.Require().NoError(tc.after(browserCtx))
