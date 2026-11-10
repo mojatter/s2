@@ -110,12 +110,13 @@
       if (collapsed) {
         layout.classList.add('layout--sidebar-collapsed');
       }
-      // The bucket a path names, decoded; '' for none, null if it does not decode.
+      // The bucket a path names, decoded; '' for none, and as escaped if it does not decode, so two such names never match.
       const bucketOf = function(path) {
+        const raw = path.match(/^\/buckets\/([^/]+)/)?.[1] ?? '';
         try {
-          return decodeURIComponent(path.match(/^\/buckets\/([^/]+)/)?.[1] ?? '');
+          return decodeURIComponent(raw);
         } catch (e) {
-          return null;
+          return raw;
         }
       };
       // Mark the entry of the bucket the URL shows. htmx pushes the URL before it swaps, so the afterSwap listener reads the new one, and a failed open swaps nothing.
