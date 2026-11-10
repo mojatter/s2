@@ -1955,6 +1955,14 @@ func (s *ObjectsTestSuite) TestBrowserMarksABucketOnceItOpens() {
 	}
 }
 
+// clickDeleteBucket clicks the sidebar delete button for path, accepting hx-confirm, which headless Chrome would leave open.
+func clickDeleteBucket(ctx context.Context, path string) error {
+	return chromedp.Do(ctx,
+		chromedp.Evaluate[chromedp.Void](`window.confirm = () => true`),
+		chromedp.Evaluate[chromedp.Void](`document.querySelector('button[title="Delete Bucket"][hx-delete="`+path+`"]').click()`),
+	)
+}
+
 // TestBrowserListsTheBucketsAsTheyAreAfterBack checks in Chrome that Back shows the bucket list as it is now, not as htmx cached it with the page.
 func (s *ObjectsTestSuite) TestBrowserListsTheBucketsAsTheyAreAfterBack() {
 	testCases := []struct {
@@ -1974,11 +1982,7 @@ func (s *ObjectsTestSuite) TestBrowserListsTheBucketsAsTheyAreAfterBack() {
 				if _, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second))); err != nil {
 					return err
 				}
-				if err := chromedp.Do(ctx,
-					// hx-confirm asks window.confirm, which headless Chrome would leave open.
-					chromedp.Evaluate[chromedp.Void](`window.confirm = () => true`),
-					chromedp.Evaluate[chromedp.Void](`document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/b"]').click()`),
-				); err != nil {
+				if err := clickDeleteBucket(ctx, "/buckets/b"); err != nil {
 					return err
 				}
 				_, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/' && !document.querySelector('.bucket-item[title="b"]') || null`, chromedp.WithPollingTimeout(5*time.Second)))
@@ -2006,10 +2010,7 @@ func (s *ObjectsTestSuite) TestBrowserListsTheBucketsAsTheyAreAfterBack() {
 				if _, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === "/buckets/it's" && document.querySelector('#main-content h1')?.textContent === "it's" || null`, chromedp.WithPollingTimeout(5*time.Second))); err != nil {
 					return err
 				}
-				if err := chromedp.Do(ctx,
-					chromedp.Evaluate[chromedp.Void](`window.confirm = () => true`),
-					chromedp.Evaluate[chromedp.Void](`document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/it%27s"]').click()`),
-				); err != nil {
+				if err := clickDeleteBucket(ctx, "/buckets/it%27s"); err != nil {
 					return err
 				}
 				_, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/' && !document.querySelector('.bucket-item[title="it\'s"]') || null`, chromedp.WithPollingTimeout(5*time.Second)))
@@ -2029,10 +2030,7 @@ func (s *ObjectsTestSuite) TestBrowserListsTheBucketsAsTheyAreAfterBack() {
 				if _, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second))); err != nil {
 					return err
 				}
-				if err := chromedp.Do(ctx,
-					chromedp.Evaluate[chromedp.Void](`window.confirm = () => true`),
-					chromedp.Evaluate[chromedp.Void](`document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/a"]').click()`),
-				); err != nil {
+				if err := clickDeleteBucket(ctx, "/buckets/a"); err != nil {
 					return err
 				}
 				_, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && !document.querySelector('.bucket-item[title="a"]') || null`, chromedp.WithPollingTimeout(5*time.Second)))
@@ -2401,10 +2399,7 @@ func (s *ObjectsTestSuite) TestBrowserOrdersARestoreAgainstANavigation() {
 			// A delete of a bucket not shown pushes no URL, so the restore still lands.
 			caseName: "another bucket deleted",
 			move: func(ctx context.Context) error {
-				if err := chromedp.Do(ctx,
-					chromedp.Evaluate[chromedp.Void](`window.confirm = () => true`),
-					chromedp.Evaluate[chromedp.Void](`document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/c"]').click()`),
-				); err != nil {
+				if err := clickDeleteBucket(ctx, "/buckets/c"); err != nil {
 					return err
 				}
 				_, err := chromedp.Run(ctx, chromedp.Poll[bool](`!document.querySelector('.bucket-item[title="c"]') || null`, chromedp.WithPollingTimeout(5*time.Second)))
@@ -2546,11 +2541,7 @@ func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
 			// The delete leaves the held request alone and a's view too since c is not shown, so b lands once released.
 			caseName: "another bucket deleted",
 			move: func(ctx context.Context) error {
-				if err := chromedp.Do(ctx,
-					// hx-confirm asks window.confirm, which headless Chrome would leave open.
-					chromedp.Evaluate[chromedp.Void](`window.confirm = () => true`),
-					chromedp.Evaluate[chromedp.Void](`document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/c"]').click()`),
-				); err != nil {
+				if err := clickDeleteBucket(ctx, "/buckets/c"); err != nil {
 					return err
 				}
 				// The view and URL are a's before the answer too, so wait for it.
@@ -2565,10 +2556,7 @@ func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
 			// The overview the delete opens for the view showing a replaces the held request.
 			caseName: "the open bucket deleted",
 			move: func(ctx context.Context) error {
-				return chromedp.Do(ctx,
-					chromedp.Evaluate[chromedp.Void](`window.confirm = () => true`),
-					chromedp.Evaluate[chromedp.Void](`document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/a"]').click()`),
-				)
+				return clickDeleteBucket(ctx, "/buckets/a")
 			},
 			wantURL: "/",
 		},
