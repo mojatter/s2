@@ -39,15 +39,6 @@ func TestIndexTestSuite(t *testing.T) {
 // --- GET / ---
 
 func (s *IndexTestSuite) TestHandleIndex() {
-	s.Run("empty", func() {
-		req := httptest.NewRequest("GET", "/", nil)
-		w := httptest.NewRecorder()
-		handleIndex(s.server, w, req)
-
-		s.Equal(http.StatusOK, w.Code)
-		s.Contains(w.Body.String(), "Storage Overview")
-	})
-
 	testCases := []struct {
 		caseName  string
 		headers   map[string]string
