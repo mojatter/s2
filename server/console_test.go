@@ -216,3 +216,26 @@ func TestWriteConsoleError(t *testing.T) {
 		})
 	}
 }
+
+func TestWantsFragment(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		headers  map[string]string
+		want     bool
+	}{
+		{caseName: "a page load", want: false},
+		{caseName: "an htmx request", headers: map[string]string{"HX-Request": "true"}, want: true},
+		{caseName: "a restore past the history cache", headers: map[string]string{"HX-Request": "true", "HX-History-Restore-Request": "true"}, want: false},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			for k, v := range tc.headers {
+				r.Header.Set(k, v)
+			}
+			w := httptest.NewRecorder()
+			assert.Equal(t, tc.want, WantsFragment(w, r))
+			assert.Equal(t, "HX-Request, HX-History-Restore-Request", w.Header().Get("Vary"))
+		})
+	}
+}

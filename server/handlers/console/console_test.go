@@ -48,6 +48,31 @@ func (s *IndexTestSuite) TestHandleIndex() {
 		s.Contains(w.Body.String(), "Storage Overview")
 	})
 
+	testCases := []struct {
+		caseName  string
+		headers   map[string]string
+		wantWhole bool
+	}{
+		{caseName: "a page load gets the whole page", wantWhole: true},
+		{caseName: "an htmx request gets the overview alone", headers: map[string]string{"HX-Request": "true"}},
+		{caseName: "a restore past the history cache gets the whole page", headers: map[string]string{"HX-Request": "true", "HX-History-Restore-Request": "true"}, wantWhole: true},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			req := httptest.NewRequest("GET", "/", nil)
+			for k, v := range tc.headers {
+				req.Header.Set(k, v)
+			}
+			w := httptest.NewRecorder()
+			handleIndex(s.server, w, req)
+
+			s.Equal(http.StatusOK, w.Code)
+			s.Equal("HX-Request, HX-History-Restore-Request", w.Header().Get("Vary"))
+			s.Contains(w.Body.String(), "Storage Overview")
+			s.Equal(tc.wantWhole, strings.Contains(w.Body.String(), `class="sidebar"`))
+		})
+	}
+
 	s.Run("with buckets", func() {
 		s.createBucket("alpha")
 		s.createBucket("beta")
@@ -206,8 +231,9 @@ func (s *IndexTestSuite) TestHandleDeleteBucket() {
 		handleDeleteBucket(s.server, w, req)
 
 		s.Equal(http.StatusOK, w.Code)
-		s.Equal("/", w.Header().Get("HX-Push-Url"))
+		s.Empty(w.Header().Get("HX-Push-Url"))
 		s.Contains(w.Body.String(), "bucket-list")
+		s.NotContains(w.Body.String(), "main-content")
 
 		exists, err := s.server.Buckets.Exists(req.Context(), "to-delete")
 		s.Require().NoError(err)

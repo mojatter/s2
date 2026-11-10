@@ -9,6 +9,15 @@ import (
 )
 
 func handleIndex(s *server.Server, w http.ResponseWriter, r *http.Request) {
+	if server.WantsFragment(w, r) {
+		var buf bytes.Buffer
+		if err := s.Template.ExecuteTemplate(&buf, "console/empty.html", nil); err != nil {
+			server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
+			return
+		}
+		_, _ = buf.WriteTo(w)
+		return
+	}
 	if err := s.RenderConsoleIndex(r.Context(), w, nil); err != nil {
 		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
 	}
@@ -47,33 +56,8 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	names, err := s.Buckets.Names(r.Context())
-	if err != nil {
-		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
-		return
-	}
-	names = server.FilterBucketNames(server.UserFromContext(r.Context()), names)
-
-	data := struct{ Buckets []string }{Buckets: names}
-
-	var buf bytes.Buffer
-	if err := s.Template.ExecuteTemplate(&buf, "console/buckets/list.html", data); err != nil {
-		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
-		return
-	}
-
-	// OOB swap to reset main content to empty state
-	buf.WriteString(`<div id="main-content" hx-swap-oob="innerHTML">`)
-
-	if err := s.Template.ExecuteTemplate(&buf, "console/empty.html", nil); err != nil {
-		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
-		return
-	}
-
-	buf.WriteString(`</div>`)
-
-	w.Header().Set("HX-Push-Url", "/")
-	_, _ = buf.WriteTo(w)
+	// The client resets the main view itself if it shows the bucket deleted.
+	renderBucketList(r, s, w)
 }
 
 // renderBucketList renders the sidebar bucket list fragment.

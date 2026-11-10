@@ -127,9 +127,7 @@ func handleObjects(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	prefix := strings.TrimRight(r.URL.Query().Get("prefix"), "/")
 	search := r.URL.Query().Get("search")
 
-	w.Header().Add("Vary", "HX-Request, HX-History-Restore-Request")
-	// A restore past htmx's history cache takes its main view out of the response, so it gets the whole page.
-	if r.Header.Get("HX-Request") == "true" && r.Header.Get("HX-History-Restore-Request") != "true" {
+	if server.WantsFragment(w, r) {
 		writeObjectsFragment(r, w, s, name, prefix, search)
 		return
 	}

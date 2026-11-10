@@ -50,6 +50,13 @@ func (s *Server) RenderConsoleIndex(ctx context.Context, w http.ResponseWriter, 
 	return nil
 }
 
+// WantsFragment reports whether r asks for a console page's main view alone, and adds the Vary header that answer depends on.
+// A restore past htmx's history cache takes its main view out of the response, so it gets the whole page.
+func WantsFragment(w http.ResponseWriter, r *http.Request) bool {
+	w.Header().Add("Vary", "HX-Request, HX-History-Restore-Request")
+	return r.Header.Get("HX-Request") == "true" && r.Header.Get("HX-History-Restore-Request") != "true"
+}
+
 // WriteConsoleError answers err with status and a body naming no server detail, which it logs instead.
 func WriteConsoleError(w http.ResponseWriter, r *http.Request, status int, err error) {
 	level := slog.LevelDebug
