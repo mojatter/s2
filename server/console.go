@@ -42,12 +42,31 @@ func (s *Server) RenderConsoleIndex(ctx context.Context, w http.ResponseWriter, 
 		data = map[string]any{}
 	}
 	data["Buckets"] = names
+	return s.executeTemplate(w, "console/index.html", data)
+}
+
+// WriteConsoleTemplate writes the template name run on data, or a 500 if it fails.
+func (s *Server) WriteConsoleTemplate(w http.ResponseWriter, r *http.Request, name string, data any) {
+	if err := s.executeTemplate(w, name, data); err != nil {
+		WriteConsoleError(w, r, http.StatusInternalServerError, err)
+	}
+}
+
+// executeTemplate runs the template name into a buffer first, so a failure leaves w untouched.
+func (s *Server) executeTemplate(w http.ResponseWriter, name string, data any) error {
 	var buf bytes.Buffer
-	if err := s.Template.ExecuteTemplate(&buf, "console/index.html", data); err != nil {
+	if err := s.Template.ExecuteTemplate(&buf, name, data); err != nil {
 		return err
 	}
 	_, _ = buf.WriteTo(w)
 	return nil
+}
+
+// WantsFragment reports whether r asks for a console page's main view alone, and adds the Vary header that answer depends on.
+// A restore past htmx's history cache takes its main view out of the response, so it gets the whole page.
+func WantsFragment(w http.ResponseWriter, r *http.Request) bool {
+	w.Header().Add("Vary", "HX-Request, HX-History-Restore-Request")
+	return r.Header.Get("HX-Request") == "true" && r.Header.Get("HX-History-Restore-Request") != "true"
 }
 
 // WriteConsoleError answers err with status and a body naming no server detail, which it logs instead.

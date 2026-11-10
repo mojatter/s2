@@ -216,3 +216,51 @@ func TestWriteConsoleError(t *testing.T) {
 		})
 	}
 }
+
+func TestWantsFragment(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		headers  map[string]string
+		want     bool
+	}{
+		{caseName: "a page load", want: false},
+		{caseName: "an htmx request", headers: map[string]string{"HX-Request": "true"}, want: true},
+		{caseName: "a restore past the history cache", headers: map[string]string{"HX-Request": "true", "HX-History-Restore-Request": "true"}, want: false},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			for k, v := range tc.headers {
+				r.Header.Set(k, v)
+			}
+			w := httptest.NewRecorder()
+			assert.Equal(t, tc.want, WantsFragment(w, r))
+			assert.Equal(t, "HX-Request, HX-History-Restore-Request", w.Header().Get("Vary"))
+		})
+	}
+}
+
+func TestWriteConsoleTemplate(t *testing.T) {
+	testCases := []struct {
+		caseName     string
+		name         string
+		wantStatus   int
+		wantContains string
+	}{
+		{caseName: "a template", name: "console/buckets/list.html", wantStatus: http.StatusOK, wantContains: "bucket-list"},
+		{caseName: "an unknown template", name: "console/missing.html", wantStatus: http.StatusInternalServerError, wantContains: "Internal Server Error"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Root = t.TempDir()
+			srv, err := NewServer(context.Background(), cfg)
+			require.NoError(t, err)
+
+			w := httptest.NewRecorder()
+			srv.WriteConsoleTemplate(w, httptest.NewRequest(http.MethodGet, "/", nil), tc.name, struct{ Buckets []string }{})
+			assert.Equal(t, tc.wantStatus, w.Code)
+			assert.Contains(t, w.Body.String(), tc.wantContains)
+		})
+	}
+}

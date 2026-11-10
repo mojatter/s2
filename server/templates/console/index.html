@@ -86,6 +86,8 @@
       <div id="main-content" hx-history-elt>
         {{if .BucketName}}{{template "console/buckets/objects.html" .}}{{else}}{{template "console/empty.html" .}}{{end}}
       </div>
+      <!-- Opens the overview as a bucket entry opens its bucket, for a delete of the bucket shown. -->
+      <div id="overview-reset" hidden hx-get="/" hx-target="#main-content" hx-push-url="true" hx-sync="#main-content:replace" hx-trigger="s2:reset"></div>
 
       <div id="loading" class="htmx-indicator">
         <div class="spinner"></div>
@@ -108,13 +110,19 @@
       if (collapsed) {
         layout.classList.add('layout--sidebar-collapsed');
       }
+      // The bucket a path names, decoded; '' for none, and as escaped if it does not decode, so two such names never match.
+      const bucketOf = function(path) {
+        const raw = path.match(/^\/buckets\/([^/]+)/)?.[1] ?? '';
+        try {
+          return decodeURIComponent(raw);
+        } catch (e) {
+          return raw;
+        }
+      };
       // Mark the entry of the bucket the URL shows. htmx pushes the URL before it swaps, so the afterSwap listener reads the new one, and a failed open swaps nothing.
       // scroll is 'always', 'new' (only to an entry not marked before) or 'none'.
       const markOpenBucket = function(scroll) {
-        let name = null;
-        try {
-          name = decodeURIComponent(location.pathname.match(/^\/buckets\/([^/]+)/)?.[1] ?? '');
-        } catch (e) {}
+        const name = bucketOf(location.pathname);
         document.querySelectorAll('.bucket-item').forEach(function(el) {
           const open = el.title === name;
           if (open && (scroll === 'always' || (scroll === 'new' && !el.classList.contains('active')))) el.scrollIntoView({block: 'nearest'});
@@ -123,12 +131,19 @@
       };
       // A page load builds the sidebar anew, scrolled to the top.
       markOpenBucket('always');
-      // e.target, not detail.target: a delete's out-of-band reset of the main view reports the replaced list as detail.target.
       document.addEventListener('htmx:afterSwap', function(e) {
         // Moving within a bucket leaves the sidebar where the user put it.
         if (e.target.id === 'main-content') markOpenBucket('new');
         // A create or delete answers the list unmarked; mark it again without moving it.
         else if (e.target.matches?.('.bucket-list')) markOpenBucket('none');
+      });
+      // A delete answers only the list, so the view still showing the bucket deleted is reset here; its xhr is watched, since the list that sent it can be replaced meanwhile and then no htmx event reaches document.
+      document.addEventListener('htmx:beforeRequest', function(e) {
+        const cfg = e.detail.requestConfig;
+        if (cfg?.verb !== 'delete' || !cfg.target?.matches?.('.bucket-list')) return;
+        e.detail.xhr.addEventListener('loadend', function() {
+          if (this.status >= 200 && this.status < 300 && bucketOf(location.pathname) === bucketOf(cfg.path)) htmx.trigger('#overview-reset', 's2:reset');
+        });
       });
       window.toggleSidebar = function() {
         const isCollapsed = layout.classList.toggle('layout--sidebar-collapsed');
@@ -147,7 +162,7 @@
         const name = form.elements.name.value;
         form.reset();
         form.classList.remove('active');
-        // Open it as a click on its new entry does, which also pushes its URL (htmx.ajax takes no pushUrl); htmx wires the entry once the new list settles.
+        // Open it as a click on its new entry does, which also pushes its URL and gets the entry's hx-sync; htmx wires the entry once the new list settles.
         document.querySelector('.bucket-list').addEventListener('htmx:afterSettle', function() {
           // The live list shows the new bucket; opening it would undo a Back pressed meanwhile.
           if (event.detail.requestConfig.headers['HX-Current-URL'] !== location.href) return;

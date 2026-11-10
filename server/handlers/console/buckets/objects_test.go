@@ -1955,6 +1955,14 @@ func (s *ObjectsTestSuite) TestBrowserMarksABucketOnceItOpens() {
 	}
 }
 
+// clickDeleteBucket clicks the sidebar delete button for path, accepting hx-confirm, which headless Chrome would leave open.
+func clickDeleteBucket(ctx context.Context, path string) error {
+	return chromedp.Do(ctx,
+		chromedp.Evaluate[chromedp.Void](`window.confirm = () => true`),
+		chromedp.Evaluate[chromedp.Void](`document.querySelector('button[title="Delete Bucket"][hx-delete="`+path+`"]').click()`),
+	)
+}
+
 // TestBrowserListsTheBucketsAsTheyAreAfterBack checks in Chrome that Back shows the bucket list as it is now, not as htmx cached it with the page.
 func (s *ObjectsTestSuite) TestBrowserListsTheBucketsAsTheyAreAfterBack() {
 	testCases := []struct {
@@ -1965,22 +1973,71 @@ func (s *ObjectsTestSuite) TestBrowserListsTheBucketsAsTheyAreAfterBack() {
 		wantMark string
 	}{
 		{
-			// The delete pushes / once the page with b listed is cached.
+			// Deleting the open b pushes / once the pages with b listed are cached.
 			caseName: "a bucket deleted, then back",
 			act: func(ctx context.Context) error {
-				if err := chromedp.Do(ctx,
-					// hx-confirm asks window.confirm, which headless Chrome would leave open.
-					chromedp.Evaluate[chromedp.Void](`window.confirm = () => true`),
-					chromedp.Evaluate[chromedp.Void](`document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/b"]').click()`),
-				); err != nil {
+				if err := chromedp.Do(ctx, chromedp.Click(chromedp.CSS(`.bucket-item[title="b"]`))); err != nil {
+					return err
+				}
+				if _, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second))); err != nil {
+					return err
+				}
+				if err := clickDeleteBucket(ctx, "/buckets/b"); err != nil {
 					return err
 				}
 				_, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/' && !document.querySelector('.bucket-item[title="b"]') || null`, chromedp.WithPollingTimeout(5*time.Second)))
 				return err
 			},
-			back:     1,
+			back:     2,
 			want:     "a",
 			wantMark: "a",
+		},
+		{
+			// The URL typed keeps ' that the delete's path escapes, which is still the bucket shown.
+			caseName: "a bucket opened by a typed URL deleted, then back",
+			act: func(ctx context.Context) error {
+				// Created from the console, so the sidebar lists it.
+				if err := chromedp.Do(ctx, chromedp.Evaluate[chromedp.Void](`(() => { const f = document.querySelector('.new-bucket-form'); f.elements.name.value = "it's"; f.requestSubmit(); })()`)); err != nil {
+					return err
+				}
+				if _, err := chromedp.Run(ctx, chromedp.Poll[bool](`document.querySelector('#main-content h1')?.textContent === "it's" && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second))); err != nil {
+					return err
+				}
+				// Pushed as typed, which the sidebar's escaped link would not give.
+				if err := chromedp.Do(ctx, chromedp.Evaluate[chromedp.Void](`htmx.ajax('GET', "/buckets/it's", {target: '#main-content', swap: 'innerHTML', push: "/buckets/it's"})`)); err != nil {
+					return err
+				}
+				if _, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === "/buckets/it's" && document.querySelector('#main-content h1')?.textContent === "it's" || null`, chromedp.WithPollingTimeout(5*time.Second))); err != nil {
+					return err
+				}
+				if err := clickDeleteBucket(ctx, "/buckets/it%27s"); err != nil {
+					return err
+				}
+				_, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/' && !document.querySelector('.bucket-item[title="it\'s"]') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				return err
+			},
+			back:     3,
+			want:     "a b",
+			wantMark: "a",
+		},
+		{
+			// Deleting a while b is shown pushes nothing, so one Back returns to a.
+			caseName: "another bucket deleted, then back",
+			act: func(ctx context.Context) error {
+				if err := chromedp.Do(ctx, chromedp.Click(chromedp.CSS(`.bucket-item[title="b"]`))); err != nil {
+					return err
+				}
+				if _, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second))); err != nil {
+					return err
+				}
+				if err := clickDeleteBucket(ctx, "/buckets/a"); err != nil {
+					return err
+				}
+				_, err := chromedp.Run(ctx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && !document.querySelector('.bucket-item[title="a"]') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				return err
+			},
+			back: 1,
+			want: "b",
 		},
 		{
 			// a's page was cached before zz existed, when b was opened.
@@ -2045,7 +2102,7 @@ func (s *ObjectsTestSuite) TestBrowserListsTheBucketsAsTheyAreAfterBack() {
 			if tc.back > 0 {
 				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](fmt.Sprintf(`history.go(-%d)`, tc.back))))
 			}
-			landed := `location.pathname === '/buckets/a' && [...document.querySelectorAll('.bucket-item')].map(a => a.title).join(' ') === '` + tc.want + `' && document.querySelector('.bucket-item.active')?.title === '` + tc.wantMark + `'`
+			landed := `location.pathname === '/buckets/a' && [...document.querySelectorAll('.bucket-item')].map(a => a.title).join(' ') === '` + tc.want + `' && (document.querySelector('.bucket-item.active')?.title ?? '') === '` + tc.wantMark + `'`
 			_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](landed+` || null`, chromedp.WithPollingTimeout(5*time.Second)))
 			got, _ := chromedp.Run(browserCtx, chromedp.Evaluate[string](`location.pathname + ' [' + [...document.querySelectorAll('.bucket-item')].map(a => a.title).join(' ') + '] ' + (document.querySelector('.bucket-item.active')?.title ?? '')`))
 			s.Require().NoError(err, "back must show the buckets as they are, got "+got)
@@ -2096,13 +2153,17 @@ func (s *ObjectsTestSuite) TestBrowserClosesTheDrawerOnBack() {
 	}
 }
 
-// TestBrowserDropsAStaleAnswerAfterBack holds a request of a's view in Chrome, presses Back to b and releases it, so its answer does not cover b (#433).
+// TestBrowserDropsAStaleAnswerAfterBack holds a request of a's view in Chrome, presses Back to b (or acts meanwhile) and releases it, so its answer neither covers b nor pushes a URL (#433).
 func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
 	const state = `location.pathname + ' ' + (document.querySelector('#main-content h1')?.textContent ?? '') + ' open=' + document.getElementById('preview-dialog').open + ' [' + [...document.querySelectorAll('.bucket-item')].map(a => a.title).join(' ') + ']'`
 	testCases := []struct {
 		caseName  string
+		inFolder  bool
 		pattern   string
 		act       string
+		backTo    string
+		meanwhile string
+		until     string
 		wantState string
 	}{
 		{
@@ -2118,6 +2179,40 @@ func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
 			wantState: "/buckets/b b open=false [a b]",
 		},
 		{
+			// The live list drops a, but neither its reset of the main view nor its URL lands over the Back.
+			caseName:  "the open bucket deleted",
+			pattern:   "*/buckets/a",
+			act:       `window.confirm = () => true; document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/a"]').click()`,
+			wantState: "/buckets/b b open=false [b]",
+		},
+		{
+			// Back to a's own view is still the deleted bucket's, which the delete resets.
+			caseName:  "a folder of the deleted bucket left",
+			inFolder:  true,
+			pattern:   "*/buckets/a",
+			act:       `window.confirm = () => true; document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/a"]').click()`,
+			backTo:    "a",
+			wantState: "/ Storage Overview open=false [b]",
+		},
+		{
+			// b's delete replaces the list a's delete answers, which still resets the view showing a.
+			caseName:  "the open bucket deleted as the list is replaced",
+			pattern:   "*/buckets/a",
+			act:       `window.confirm = () => true; document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/a"]').click()`,
+			meanwhile: `document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/b"]').click()`,
+			until:     `!document.querySelector('.bucket-item[title="b"]')`,
+			wantState: "/ Storage Overview open=false [a]",
+		},
+		{
+			// b's delete leaves the reset a's delete sent, held here, to land.
+			caseName:  "the open bucket deleted, then another as its reset is held",
+			pattern:   "*/",
+			act:       `window.confirm = () => true; document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/a"]').click()`,
+			meanwhile: `document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/b"]').click()`,
+			until:     `!document.querySelector('.bucket-item[title="b"]')`,
+			wantState: "/ Storage Overview open=false []",
+		},
+		{
 			// The live list shows the new bucket, which is not opened over the Back.
 			caseName:  "a bucket created",
 			pattern:   "*/buckets",
@@ -2130,6 +2225,7 @@ func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
 			s.createBucket("a")
 			s.createBucket("b")
 			s.putObject("a", "x.txt", "x")
+			s.putObject("a", "f/y.txt", "y")
 			browserCtx, consoleURL := s.newBrowser()
 			s.Require().NoError(chromedp.Do(browserCtx,
 				chromedp.EmulateViewport(1280, 800),
@@ -2139,6 +2235,12 @@ func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
 			))
 			_, err := chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/a' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second)))
 			s.Require().NoError(err, "open a")
+			if tc.inFolder {
+				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Click(chromedp.CSS(`#main-content a[title="f/"]`))))
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`location.search === '?prefix=f/' && !document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "open f/")
+			}
+			backTo := cmp.Or(tc.backTo, "b")
 			var target *chromedp.Target
 			s.Require().NoError(chromedp.Do(browserCtx,
 				chromedp.Func(func(ctx context.Context, t *chromedp.Target) error {
@@ -2146,10 +2248,12 @@ func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
 					_, err := cdp.Call(ctx, t, fetch.Enable, fetch.EnableParams{Patterns: []*fetch.RequestPattern{{URLPattern: tc.pattern}}})
 					return err
 				}),
-				// Watches the held request's own xhr: the element that sent it can be gone once b is restored.
-				chromedp.Evaluate[chromedp.Void](`window.heldDone = false; document.addEventListener('htmx:beforeRequest', e => {
-					e.detail.xhr.addEventListener('loadend', () => { window.heldDone = true; });
-				}, {once: true})`),
+				// Watches each request's own xhr: the element that sent it can be gone once b is restored.
+				chromedp.Evaluate[chromedp.Void](`window.ended = []; document.addEventListener('htmx:beforeRequest', e => {
+					const c = e.detail.requestConfig, x = {verb: c.verb, path: c.path, done: false};
+					e.detail.xhr.addEventListener('loadend', () => { x.done = true; });
+					window.ended.push(x);
+				})`),
 			))
 			// Subscribed before the request, so the pause cannot be missed.
 			next, stop := iter.Pull2(cdp.Events(browserCtx, target, fetch.RequestPaused))
@@ -2159,16 +2263,30 @@ func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
 			held, err, ok := next()
 			s.Require().True(ok, "the request must pause")
 			s.Require().NoError(err)
-			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`history.back()`)))
-			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname === '/buckets/b' && document.querySelector('#main-content h1')?.textContent === 'b' || null`, chromedp.WithPollingTimeout(5*time.Second)))
-			s.Require().NoError(err, "back to b")
+			heldURL, err := url.Parse(held.Request.URL)
+			s.Require().NoError(err)
+			heldEnded := `window.ended.some(x => x.done && x.verb === '` + strings.ToLower(held.Request.Method) + `' && x.path === '` + heldURL.Path + `')`
+			if tc.meanwhile != "" {
+				// A list a delete answered before the hold is wired once it settles.
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`!document.querySelector('.htmx-swapping, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "settle the list")
+				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](tc.meanwhile)))
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](tc.until+` || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "act meanwhile")
+			} else {
+				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](`history.back()`)))
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`location.pathname + location.search === '/buckets/`+backTo+`' && document.querySelector('#main-content h1')?.textContent === '`+backTo+`' || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "back to "+backTo)
+			}
 
 			_, err = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: held.RequestID})
 			s.Require().NoError(err)
-			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`window.heldDone || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](heldEnded+` || null`, chromedp.WithPollingTimeout(5*time.Second)))
 			s.Require().NoError(err, "the held request must end")
-			// Outlasts the settle and a click a create would make on its new entry.
+			// Outlasts the settle and a click a create would make on its new entry, and the overview a delete opens.
 			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Sleep(500*time.Millisecond)))
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`!document.querySelector('.htmx-request, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err)
 			got, err := chromedp.Run(browserCtx, chromedp.Evaluate[string](state))
 			s.Require().NoError(err)
 			s.Equal(tc.wantState, got, "URL, heading, preview and buckets")
@@ -2278,6 +2396,18 @@ func (s *ObjectsTestSuite) TestBrowserOrdersARestoreAgainstANavigation() {
 			wantState: "/buckets/a a a 1",
 		},
 		{
+			// A delete of a bucket not shown pushes no URL, so the restore still lands.
+			caseName: "another bucket deleted",
+			move: func(ctx context.Context) error {
+				if err := clickDeleteBucket(ctx, "/buckets/c"); err != nil {
+					return err
+				}
+				_, err := chromedp.Run(ctx, chromedp.Poll[bool](`!document.querySelector('.bucket-item[title="c"]') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				return err
+			},
+			wantState: "/buckets/a a a 1",
+		},
+		{
 			// A folder created pushes no URL, so the restore still lands over b's refreshed view.
 			caseName: "a folder created",
 			move: func(ctx context.Context) error {
@@ -2371,11 +2501,12 @@ func (s *ObjectsTestSuite) TestBrowserOrdersARestoreAgainstANavigation() {
 // TestBrowserCancelsAHeldNavigation holds a bucket's GET in Chrome, checks the pending entry shows it, and moves on meanwhile, so the held response never lands over the later view (#422).
 func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
 	testCases := []struct {
-		caseName string
-		move     func(ctx context.Context) error
-		wantURL  string
-		wantMark string
-		after    func(ctx context.Context) error
+		caseName  string
+		move      func(ctx context.Context) error
+		wantLands bool
+		wantURL   string
+		wantMark  string
+		after     func(ctx context.Context) error
 	}{
 		{
 			caseName: "another bucket clicked",
@@ -2407,14 +2538,25 @@ func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
 			wantMark: "zz",
 		},
 		{
-			// The delete resets the main view out of band, so it aborts the held request itself.
+			// The delete leaves the held request alone and a's view too since c is not shown, so b lands once released.
 			caseName: "another bucket deleted",
 			move: func(ctx context.Context) error {
-				return chromedp.Do(ctx,
-					// hx-confirm asks window.confirm, which headless Chrome would leave open.
-					chromedp.Evaluate[chromedp.Void](`window.confirm = () => true`),
-					chromedp.Evaluate[chromedp.Void](`document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/c"]').click()`),
-				)
+				if err := clickDeleteBucket(ctx, "/buckets/c"); err != nil {
+					return err
+				}
+				// The view and URL are a's before the answer too, so wait for it.
+				_, err := chromedp.Run(ctx, chromedp.Poll[bool](`!document.querySelector('.bucket-item[title="c"]') || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				return err
+			},
+			wantLands: true,
+			wantURL:   "/buckets/b",
+			wantMark:  "b",
+		},
+		{
+			// The overview the delete opens for the view showing a replaces the held request.
+			caseName: "the open bucket deleted",
+			move: func(ctx context.Context) error {
+				return clickDeleteBucket(ctx, "/buckets/a")
 			},
 			wantURL: "/",
 		},
@@ -2484,20 +2626,30 @@ func (s *ObjectsTestSuite) TestBrowserCancelsAHeldNavigation() {
 
 			s.Require().NoError(tc.move(browserCtx))
 			landed := `location.pathname + location.search === '` + tc.wantURL + `' && (document.querySelector('.bucket-item.active')?.title ?? '') === '` + tc.wantMark + `'`
-			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](landed+` || null`, chromedp.WithPollingTimeout(5*time.Second)))
-			s.Require().NoError(err, "move on while b is held")
-			aborted, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`window.bAborted`))
-			s.Require().NoError(err)
-			s.True(aborted, "the held request must be aborted")
+			if tc.wantLands {
+				aborted, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`window.bAborted`))
+				s.Require().NoError(err)
+				s.False(aborted, "the held request must not be aborted")
+				_, err = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: paused.RequestID})
+				s.Require().NoError(err)
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](landed+` || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "b must land")
+			} else {
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](landed+` || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "move on while b is held")
+				aborted, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](`window.bAborted`))
+				s.Require().NoError(err)
+				s.True(aborted, "the held request must be aborted")
 
-			// An aborted request is gone from the fetch domain, so its error is not the point.
-			_, _ = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: paused.RequestID})
-			// loadend follows the swap and push of a response that got through, so checking after it catches one.
-			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`window.bDone || null`, chromedp.WithPollingTimeout(5*time.Second)))
-			s.Require().NoError(err, "b's xhr must end")
-			stayed, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](landed+` && !document.querySelector('.bucket-item.htmx-request')`))
-			s.Require().NoError(err)
-			s.True(stayed, "b must not land over the later view")
+				// An aborted request is gone from the fetch domain, so its error is not the point.
+				_, _ = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: paused.RequestID})
+				// loadend follows the swap and push of a response that got through, so checking after it catches one.
+				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`window.bDone || null`, chromedp.WithPollingTimeout(5*time.Second)))
+				s.Require().NoError(err, "b's xhr must end")
+				stayed, err := chromedp.Run(browserCtx, chromedp.Evaluate[bool](landed+` && !document.querySelector('.bucket-item.htmx-request')`))
+				s.Require().NoError(err)
+				s.True(stayed, "b must not land over the later view")
+			}
 
 			if tc.after != nil {
 				s.Require().NoError(tc.after(browserCtx))

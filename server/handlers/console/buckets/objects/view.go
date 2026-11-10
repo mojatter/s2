@@ -1,7 +1,6 @@
 package objects
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -149,14 +148,9 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		data.Metadata = md
 	}
 
-	var buf bytes.Buffer
-	if err := s.Template.ExecuteTemplate(&buf, "console/buckets/preview.html", data); err != nil {
-		server.WriteConsoleError(w, r, http.StatusInternalServerError, err)
-		return
-	}
-
+	// http.Error replaces the type if the template fails.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = buf.WriteTo(w)
+	s.WriteConsoleTemplate(w, r, "console/buckets/preview.html", data)
 }
 
 func init() {
