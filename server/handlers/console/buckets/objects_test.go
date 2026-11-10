@@ -2164,7 +2164,6 @@ func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
 		pattern   string
 		act       string
 		backTo    string
-		unhold    bool
 		meanwhile string
 		until     string
 		wantState string
@@ -2211,7 +2210,6 @@ func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
 			caseName:  "the open bucket deleted, then another as its reset is held",
 			pattern:   "*/",
 			act:       `window.confirm = () => true; document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/a"]').click()`,
-			unhold:    true,
 			meanwhile: `document.querySelector('button[title="Delete Bucket"][hx-delete="/buckets/b"]').click()`,
 			until:     `!document.querySelector('.bucket-item[title="b"]')`,
 			wantState: "/ Storage Overview open=false []",
@@ -2252,10 +2250,12 @@ func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
 					_, err := cdp.Call(ctx, t, fetch.Enable, fetch.EnableParams{Patterns: []*fetch.RequestPattern{{URLPattern: tc.pattern}}})
 					return err
 				}),
-				// Watches the held request's own xhr: the element that sent it can be gone once b is restored.
-				chromedp.Evaluate[chromedp.Void](`window.heldDone = false; document.addEventListener('htmx:beforeRequest', e => {
-					e.detail.xhr.addEventListener('loadend', () => { window.heldDone = true; });
-				}, {once: true})`),
+				// Watches each request's own xhr: the element that sent it can be gone once b is restored.
+				chromedp.Evaluate[chromedp.Void](`window.ended = []; document.addEventListener('htmx:beforeRequest', e => {
+					const c = e.detail.requestConfig, x = {verb: c.verb, path: c.path, done: false};
+					e.detail.xhr.addEventListener('loadend', () => { x.done = true; });
+					window.ended.push(x);
+				})`),
 			))
 			// Subscribed before the request, so the pause cannot be missed.
 			next, stop := iter.Pull2(cdp.Events(browserCtx, target, fetch.RequestPaused))
@@ -2265,15 +2265,13 @@ func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
 			held, err, ok := next()
 			s.Require().True(ok, "the request must pause")
 			s.Require().NoError(err)
-			if tc.unhold {
-				// Later requests pass while the held one stays paused.
-				_, err = cdp.Call(browserCtx, target, fetch.Enable, fetch.EnableParams{Patterns: []*fetch.RequestPattern{{URLPattern: "*/never-requested"}}})
-				s.Require().NoError(err)
-				// The list the delete answered is wired once it settles.
+			heldURL, err := url.Parse(held.Request.URL)
+			s.Require().NoError(err)
+			heldEnded := `window.ended.some(x => x.done && x.verb === '` + strings.ToLower(held.Request.Method) + `' && x.path === '` + heldURL.Path + `')`
+			if tc.meanwhile != "" {
+				// A list a delete answered before the hold is wired once it settles.
 				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`!document.querySelector('.htmx-swapping, .htmx-settling') || null`, chromedp.WithPollingTimeout(5*time.Second)))
 				s.Require().NoError(err, "settle the list")
-			}
-			if tc.meanwhile != "" {
 				s.Require().NoError(chromedp.Do(browserCtx, chromedp.Evaluate[chromedp.Void](tc.meanwhile)))
 				_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](tc.until+` || null`, chromedp.WithPollingTimeout(5*time.Second)))
 				s.Require().NoError(err, "act meanwhile")
@@ -2284,11 +2282,8 @@ func (s *ObjectsTestSuite) TestBrowserDropsAStaleAnswerAfterBack() {
 			}
 
 			_, err = cdp.Call(browserCtx, target, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: held.RequestID})
-			// A held request aborted meanwhile may be gone already.
-			if !tc.unhold {
-				s.Require().NoError(err)
-			}
-			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](`window.heldDone || null`, chromedp.WithPollingTimeout(5*time.Second)))
+			s.Require().NoError(err)
+			_, err = chromedp.Run(browserCtx, chromedp.Poll[bool](heldEnded+` || null`, chromedp.WithPollingTimeout(5*time.Second)))
 			s.Require().NoError(err, "the held request must end")
 			// Outlasts the settle and a click a create would make on its new entry, and the overview a delete opens.
 			s.Require().NoError(chromedp.Do(browserCtx, chromedp.Sleep(500*time.Millisecond)))
