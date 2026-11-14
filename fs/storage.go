@@ -765,6 +765,9 @@ func (s *storage) uploadDirect(name string, src io.Reader, m meta) (string, erro
 		s.dropMeta(name)
 		return "", err
 	}
+	if err := syncObject(s.fsys, name); err != nil {
+		return "", err
+	}
 	return m.ETag, nil
 }
 
@@ -785,10 +788,11 @@ func (s *storage) begin(name string) (*pending, error) {
 	if err := s.checkTree(name); err != nil {
 		return nil, err
 	}
-	if err := s.prepareMeta(name); err != nil {
-		return nil, s.refused(name, err)
-	}
 	p := &pending{name: name}
+	// prepareMeta may have made directories before failing, which abandon prunes.
+	if err := s.prepareMeta(name); err != nil {
+		return p, s.refused(name, err)
+	}
 	var err error
 	if p.body, err = createTemp(s.fsys, name); err != nil {
 		return p, s.refused(name, err)
@@ -819,7 +823,7 @@ func (p *pending) stream(src io.Reader, m meta) (string, error) {
 	return m.ETag, p.meta.write(bytes.NewReader(data))
 }
 
-// commit publishes the body, then its metadata file. Callers hold name's lock.
+// commit publishes the body, then its metadata file, and syncs their directories. Callers hold name's lock.
 func (s *storage) commit(p *pending) error {
 	// A directory may have taken the name since begin.
 	if err := s.checkTree(p.name); err != nil {
@@ -834,7 +838,7 @@ func (s *storage) commit(p *pending) error {
 		return err
 	}
 	removeLegacyMeta(s.fsys, p.name)
-	return nil
+	return syncObject(s.fsys, p.name)
 }
 
 // abandon removes what p left unpublished in a section of its own; a cancelled ctx may be why the write failed.
@@ -915,7 +919,10 @@ func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Meta
 		}
 		m := obj.m
 		m.Metadata = metadata
-		return saveMeta(s.fsys, name, m)
+		if err := saveMeta(s.fsys, name, m); err != nil {
+			return err
+		}
+		return syncObject(s.fsys, name)
 	})
 }
 
@@ -968,10 +975,8 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 	if _, ok := s.fsys.(wfs.RenameFS); ok {
 		var ran bool
 		err := s.lockNames(ctx, []string{src, dst}, func() error {
-			err := s.rename(src, dst)
+			err := s.rename(src, dst, &ran)
 			if errors.Is(err, errCrossDevice) {
-				// rename may have made dst's directories already.
-				ran = true
 				return s.moveDirect(src, dst, &ran)
 			}
 			return err
@@ -1065,8 +1070,8 @@ func sameStat(info fs.FileInfo, length uint64, modTime time.Time) bool {
 // errCrossDevice is rename's answer when the body cannot be renamed across filesystems.
 var errCrossDevice = errors.New("cross-device rename")
 
-// rename moves src and its metadata file to dst. Callers hold both names' locks.
-func (s *storage) rename(src, dst string) error {
+// rename moves src and its metadata file to dst, setting ran once it may have made directories or moved src. Callers hold both names' locks.
+func (s *storage) rename(src, dst string, ran *bool) error {
 	if _, err := s.get(src); err != nil {
 		return err
 	}
@@ -1078,6 +1083,7 @@ func (s *storage) rename(src, dst string) error {
 		return err
 	}
 	dstMeta := metaPath(dst)
+	*ran = true
 	// Create the parents first so a missing or blocked one fails before anything moves.
 	if err := s.mkdirParent(dst); err != nil {
 		return s.refused(dst, err)
@@ -1095,6 +1101,7 @@ func (s *storage) rename(src, dst string) error {
 		return s.refused(dst, fmt.Errorf("failed to rename %q to %q: %w", src, dst, err))
 	}
 	// Move the sidecar too; a source without one must not inherit dst's.
+	metaChanged := hasMeta
 	if hasMeta {
 		if err := wfs.Rename(s.fsys, srcMeta, dstMeta); err != nil {
 			// dst's metadata file would describe its previous body.
@@ -1109,10 +1116,18 @@ func (s *storage) rename(src, dst string) error {
 		if err := wfs.RemoveFile(s.fsys, dstMeta); err != nil && !isMissingMeta(err) {
 			return fmt.Errorf("failed to remove metadata for %q: %w", dst, err)
 		}
+		metaChanged = true
 	}
 	removeLegacyMeta(s.fsys, src)
 	removeLegacyMeta(s.fsys, dst)
-	return nil
+	// Only dst's: should src's removal not last a crash, src comes back beside a complete dst, perhaps without its metadata file.
+	if err := syncDir(s.fsys, path.Dir(dst)); err != nil {
+		return err
+	}
+	if !metaChanged {
+		return nil
+	}
+	return syncDir(s.fsys, path.Dir(dstMeta))
 }
 
 // prepareMeta makes room for name's metadata file before its body is written, so a blocked one leaves the object untouched. Callers hold name's lock.
@@ -1167,15 +1182,37 @@ func (s *storage) findMeta(name string) (string, bool, error) {
 	return p, true, nil
 }
 
-// mkdirParent creates name's parent directory, which Rename does not. Callers hold name's lock.
+// mkdirParent creates name's parent directory for a write, syncing the directories it created as makeParent does. Callers hold name's lock.
 func (s *storage) mkdirParent(name string) error {
+	return s.makeParent(name, true)
+}
+
+// makeParent creates name's parent directory, which Rename does not; with sync, it syncs the parent of each directory it created, up to the root the storage was created on.
+// A writer finding a directory another is creating, or left unsynced when killed or failing to sync, syncs nothing for it, so its write may be acknowledged before that directory lasts a crash.
+func (s *storage) makeParent(name string, sync bool) error {
 	dir := path.Dir(name)
 	// Skip MkdirAll when the parent exists so a RenameFS without WriteFileFS still moves.
 	if info, err := fs.Stat(s.fsys, dir); err == nil && info.IsDir() {
 		return nil
 	}
+	// Walked on the root, so a Sub's own directory, such as a new bucket's, lasts too.
+	root := s.rootFS()
+	var missing []string
+	if sync {
+		for d := path.Join(s.prefix, dir); d != "."; d = path.Dir(d) {
+			if _, err := fs.Stat(root, d); err == nil {
+				break
+			}
+			missing = append(missing, d)
+		}
+	}
 	if err := wfs.MkdirAll(s.fsys, dir, fs.ModePerm); err != nil {
 		return fmt.Errorf("failed to create directory for %q: %w", name, err)
+	}
+	for _, d := range missing {
+		if err := syncDir(root, path.Dir(d)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
