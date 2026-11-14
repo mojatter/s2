@@ -20,6 +20,7 @@ const tmpPrefix = ".s2tmp-"
 // atomicWrite writes src into name using a temp-file + Sync + Rename pattern
 // when the filesystem implements wfs.RenameFS. Otherwise it falls back to
 // directWrite, which is not crash-safe and needs wfs.RemoveFileFS.
+// sync false skips the Sync, which WithoutSync asks for.
 //
 // The temp file lives in the .meta of name's directory, so the rename stays in one filesystem.
 //
@@ -28,11 +29,11 @@ const tmpPrefix = ".s2tmp-"
 // until Close, so Rename must run after Close.
 //
 // Callers hold name's lock, except MigrateMeta, which runs without writers.
-func atomicWrite(fsys iofs.FS, name string, src io.Reader) error {
+func atomicWrite(fsys iofs.FS, name string, src io.Reader, sync bool) error {
 	if _, ok := fsys.(wfs.RenameFS); !ok {
-		return directWrite(fsys, name, src)
+		return directWrite(fsys, name, src, sync)
 	}
-	t, err := createTemp(fsys, name)
+	t, err := createTemp(fsys, name, sync)
 	if err != nil {
 		return err
 	}
@@ -44,17 +45,21 @@ func atomicWrite(fsys iofs.FS, name string, src io.Reader) error {
 	return t.publish()
 }
 
+// fsyncFile syncs a written temp file; tests replace it to count file syncs.
+var fsyncFile = func(f wfs.SyncWriterFile) error { return f.Sync() }
+
 // tempFile is an in-flight write: created and published under the lock, filled outside it.
 type tempFile struct {
 	fsys      iofs.FS
 	name, tmp string
 	f         wfs.WriterFile
+	sync      bool // syncs before closing
 	written   bool // write ran, and closed f
 	published bool
 }
 
 // createTemp creates the temp file that will replace name. Callers hold name's lock.
-func createTemp(fsys iofs.FS, name string) (*tempFile, error) {
+func createTemp(fsys iofs.FS, name string, sync bool) (*tempFile, error) {
 	tmp, err := tempName(name)
 	if err != nil {
 		return nil, err
@@ -63,18 +68,18 @@ func createTemp(fsys iofs.FS, name string) (*tempFile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
-	return &tempFile{fsys: fsys, name: name, tmp: tmp, f: f}, nil
+	return &tempFile{fsys: fsys, name: name, tmp: tmp, f: f, sync: sync}, nil
 }
 
-// write copies src into the temp file, syncs and closes it; it closes on error too.
+// write copies src into the temp file, syncs it if asked and closes it; it closes on error too.
 func (t *tempFile) write(src io.Reader) error {
 	t.written = true
 	if _, err := copyPooled(t.f, src); err != nil {
 		_ = t.f.Close()
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
-	if sf, ok := t.f.(wfs.SyncWriterFile); ok {
-		if err := sf.Sync(); err != nil {
+	if sf, ok := t.f.(wfs.SyncWriterFile); ok && t.sync {
+		if err := fsyncFile(sf); err != nil {
 			_ = t.f.Close()
 			return fmt.Errorf("failed to sync temp file: %w", err)
 		}
@@ -141,11 +146,11 @@ func writable(fsys iofs.FS, name string) error {
 }
 
 // directWrite copies src over name once read in full into a temp file, so a failed src leaves name as it was.
-func directWrite(fsys iofs.FS, name string, src io.Reader) error {
+func directWrite(fsys iofs.FS, name string, src io.Reader, sync bool) error {
 	if err := writable(fsys, name); err != nil {
 		return err
 	}
-	t, err := createTemp(fsys, name)
+	t, err := createTemp(fsys, name, sync)
 	if err != nil {
 		return err
 	}

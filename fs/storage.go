@@ -38,6 +38,9 @@ func NewStorage(_ context.Context, cfg s2.Config) (s2.Storage, error) {
 	if cfg.OSFS != nil && cfg.OSFS.ConfinedRoot {
 		opts = append(opts, WithConfinedRoot())
 	}
+	if cfg.OSFS != nil && cfg.OSFS.NoSync {
+		opts = append(opts, WithoutSync())
+	}
 	s := newStorageFS(cfg, osfs.DirFS(cfg.Root), opts...)
 	// Fails at startup what would otherwise fail every call.
 	if r, ok := s.fsys.(*rootFS); ok && r.err != nil {
@@ -50,7 +53,7 @@ func NewStorage(_ context.Context, cfg s2.Config) (s2.Storage, error) {
 type Option func(*storage)
 
 // NewStorageFS serves fs; an osfs one shares its lock with every storage on the same directory.
-// cfg.Root and cfg.OSFS describe fs and are not applied; pass WithConfinedRoot to confine it.
+// cfg.Root and cfg.OSFS describe fs and are not applied; pass WithConfinedRoot or WithoutSync for those settings.
 // A looping symlink is left out of listings only when fs's FileInfo is one os.SameFile recognizes, as osfs's is.
 // Writing needs wfs.WriteFileFS plus wfs.RenameFS or wfs.RemoveFileFS; otherwise a write fails with wfs.ErrNotImplemented.
 func NewStorageFS(cfg s2.Config, fs fs.FS, opts ...Option) s2.Storage {
@@ -104,6 +107,7 @@ type storage struct {
 	lk     NameLocker
 	prefix string // of this storage under the lock root
 	root   fs.FS  // the lock root, nil when fsys is it
+	noSync bool   // set by WithoutSync
 }
 
 // rootFS is the filesystem the storage was created on, which a Sub's prefix lies under.
@@ -154,7 +158,7 @@ func (s *storage) sub(prefix string) (s2.Storage, error) {
 	// io/fs.Sub takes neither.
 	prefix = strings.TrimSuffix(prefix, "/")
 	if prefix == "" {
-		return &storage{cfg: s.cfg, fsys: s.fsys, typ: s.typ, lk: s.lk, prefix: s.prefix, root: s.root}, nil
+		return &storage{cfg: s.cfg, fsys: s.fsys, typ: s.typ, lk: s.lk, prefix: s.prefix, root: s.root, noSync: s.noSync}, nil
 	}
 	sub, err := fs.Sub(s.fsys, prefix)
 	if err != nil {
@@ -167,6 +171,7 @@ func (s *storage) sub(prefix string) (s2.Storage, error) {
 		lk:     s.lk,
 		prefix: path.Join(s.prefix, prefix),
 		root:   s.rootFS(),
+		noSync: s.noSync,
 	}, nil
 }
 
@@ -752,7 +757,7 @@ func (s *storage) uploadDirect(name string, src io.Reader, m meta) (string, erro
 		return "", err
 	}
 	h := md5.New() // #nosec G401 -- MD5 is required for S3-compatible ETag
-	if err := atomicWrite(s.fsys, name, io.TeeReader(src, h)); err != nil {
+	if err := atomicWrite(s.fsys, name, io.TeeReader(src, h), !s.noSync); err != nil {
 		if errors.Is(err, errTruncated) {
 			// The body is gone, so a stale metadata file must not describe it.
 			s.dropMeta(name)
@@ -760,12 +765,12 @@ func (s *storage) uploadDirect(name string, src io.Reader, m meta) (string, erro
 		return "", err
 	}
 	m.ETag = quotedMD5(h)
-	if err := saveMeta(s.fsys, name, m); err != nil {
+	if err := saveMeta(s.fsys, name, m, !s.noSync); err != nil {
 		// A stale metadata file would describe the previous body; without one the ETag falls back to the synthetic form.
 		s.dropMeta(name)
 		return "", err
 	}
-	if err := syncObject(s.fsys, name); err != nil {
+	if err := s.syncObject(name); err != nil {
 		return "", err
 	}
 	return m.ETag, nil
@@ -794,10 +799,10 @@ func (s *storage) begin(name string) (*pending, error) {
 		return p, s.refused(name, err)
 	}
 	var err error
-	if p.body, err = createTemp(s.fsys, name); err != nil {
+	if p.body, err = createTemp(s.fsys, name, !s.noSync); err != nil {
 		return p, s.refused(name, err)
 	}
-	p.meta, err = createTemp(s.fsys, metaPath(name))
+	p.meta, err = createTemp(s.fsys, metaPath(name), !s.noSync)
 	return p, err
 }
 
@@ -838,7 +843,7 @@ func (s *storage) commit(p *pending) error {
 		return err
 	}
 	removeLegacyMeta(s.fsys, p.name)
-	return syncObject(s.fsys, p.name)
+	return s.syncObject(p.name)
 }
 
 // abandon removes what p left unpublished in a section of its own; a cancelled ctx may be why the write failed.
@@ -870,7 +875,7 @@ func (s *storage) pruneIfEmpty(ctx context.Context, name string) {
 		return nil
 	})
 	// Outside the lock, so writers never wait on a sync; ignored as a failed removal is, since an empty directory that comes back holds no key.
-	if left != "" {
+	if left != "" && !s.noSync {
 		_ = syncDir(s.fsys, left)
 	}
 }
@@ -924,10 +929,10 @@ func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Meta
 		}
 		m := obj.m
 		m.Metadata = metadata
-		if err := saveMeta(s.fsys, name, m); err != nil {
+		if err := saveMeta(s.fsys, name, m, !s.noSync); err != nil {
 			return err
 		}
-		return syncObject(s.fsys, name)
+		return s.syncObject(name)
 	})
 }
 
@@ -1065,7 +1070,7 @@ func (s *storage) moveDirect(src, dst string, ran *bool) error {
 	}
 	s.dropMeta(src)
 	// src may have had no .meta directory, for which syncDirs climbs to src's, already synced.
-	return syncDirs(s.fsys, objectDirs(src))
+	return s.syncDirs(objectDirs(src))
 }
 
 // sameStat reports whether info has the given length and modification time.
@@ -1136,7 +1141,7 @@ func (s *storage) rename(src, dst string, ran *bool) error {
 	if hasMeta && srcMeta == metaPath(src) {
 		dirs = append(dirs, path.Dir(srcMeta))
 	}
-	return syncDirs(s.fsys, dirs)
+	return s.syncDirs(dirs)
 }
 
 // prepareMeta makes room for name's metadata file before its body is written, so a blocked one leaves the object untouched. Callers hold name's lock.
@@ -1197,7 +1202,7 @@ func (s *storage) mkdirParent(name string) error {
 }
 
 // makeParent creates name's parent directory, which Rename does not; with sync, it syncs the parent of each directory it created, up to the root the storage was created on.
-// A writer finding a directory another is creating, or left unsynced when killed or failing to sync, syncs nothing for it, so its write may be acknowledged before that directory lasts a crash.
+// A writer finding a directory another is creating, or left unsynced when killed, failing to sync or created by a WithoutSync storage, syncs nothing for it, so its write may be acknowledged before that directory lasts a crash.
 func (s *storage) makeParent(name string, sync bool) error {
 	dir := path.Dir(name)
 	// Skip MkdirAll when the parent exists so a RenameFS without WriteFileFS still moves.
@@ -1207,7 +1212,7 @@ func (s *storage) makeParent(name string, sync bool) error {
 	// Walked on the root, so a Sub's own directory, such as a new bucket's, lasts too.
 	root := s.rootFS()
 	var missing []string
-	if sync {
+	if sync && !s.noSync {
 		for d := path.Join(s.prefix, dir); d != "."; d = path.Dir(d) {
 			if _, err := fs.Stat(root, d); err == nil {
 				break
@@ -1237,7 +1242,7 @@ func (s *storage) Delete(ctx context.Context, name string) error {
 			return err
 		}
 		deleted = true
-		return syncDirs(s.fsys, changed)
+		return s.syncDirs(changed)
 	})
 	// A failed sync leaves name deleted, which may have emptied its directory; a failed delete, or a lock never taken, changed nothing.
 	if deleted {
@@ -1368,6 +1373,9 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 
 // syncChanged syncs dirs on the root, so a Sub whose own directory a run removed syncs what held it.
 func (s *storage) syncChanged(dirs []string) error {
+	if s.noSync {
+		return nil
+	}
 	root := make([]string, len(dirs))
 	for i, dir := range dirs {
 		root[i] = path.Join(s.prefix, dir)

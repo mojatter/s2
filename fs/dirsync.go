@@ -48,6 +48,27 @@ func syncDir(fsys iofs.FS, dir string) error {
 	return fmt.Errorf("failed to sync directory %q: %w", dir, err)
 }
 
+// WithoutSync skips every fsync of the storage, files and directories alike, so an OS crash or power loss can roll back recently acknowledged writes and deletes.
+func WithoutSync() Option {
+	return func(s *storage) { s.noSync = true }
+}
+
+// syncObject is syncObject on the storage's filesystem, unless WithoutSync skips it.
+func (s *storage) syncObject(name string) error {
+	if s.noSync {
+		return nil
+	}
+	return syncObject(s.fsys, name)
+}
+
+// syncDirs is syncDirs on the storage's filesystem, unless WithoutSync skips it.
+func (s *storage) syncDirs(dirs []string) error {
+	if s.noSync {
+		return nil
+	}
+	return syncDirs(s.fsys, dirs)
+}
+
 // objectDirs lists the directories holding name and its metadata file.
 func objectDirs(name string) []string {
 	return []string{path.Dir(name), path.Dir(metaPath(name))}

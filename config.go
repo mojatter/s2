@@ -49,6 +49,8 @@ func KnownTypes() []Type {
 type OSFSConfig struct {
 	// ConfinedRoot keeps the storage inside Root: a symlink leading outside it, or an absolute one, leads nowhere.
 	ConfinedRoot bool `json:"confined_root,omitempty"`
+	// NoSync skips every fsync, so an OS crash or power loss can roll back recently acknowledged writes and deletes.
+	NoSync bool `json:"no_sync,omitempty"`
 }
 
 // S3Config holds S3-specific configuration.

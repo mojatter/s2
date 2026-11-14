@@ -317,12 +317,12 @@ func parseMeta(data []byte) (meta, error) {
 }
 
 // saveMeta writes name's metadata file and drops a legacy one. Callers hold name's lock.
-func saveMeta(fsys fs.FS, name string, m meta) error {
+func saveMeta(fsys fs.FS, name string, m meta, sync bool) error {
 	data, err := encodeMeta(m)
 	if err != nil {
 		return err
 	}
-	if err := atomicWrite(fsys, metaPath(name), bytes.NewReader(data)); err != nil {
+	if err := atomicWrite(fsys, metaPath(name), bytes.NewReader(data), sync); err != nil {
 		return err
 	}
 	removeLegacyMeta(fsys, name)
