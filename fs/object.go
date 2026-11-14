@@ -219,13 +219,17 @@ func pruneEmptyDirs(fsys fs.FS, dir, stop string) {
 	}
 }
 
-// pruneEmptyParents removes the directories, with their .meta, that deleting name left empty, up to the storage root. Callers hold the root exclusively.
-func pruneEmptyParents(fsys fs.FS, name string) {
-	for dir := path.Dir(name); ; dir = path.Dir(dir) {
-		if !pruneEmptyDir(fsys, dir) {
-			return
-		}
+// pruneEmptyParents removes the directories, with their .meta, that deleting name left empty, up to the storage root.
+// It returns the directory left holding the last one removed, for the caller to sync after the lock, or "" when it removed none. Callers hold the root exclusively.
+func pruneEmptyParents(fsys fs.FS, name string) string {
+	dir := path.Dir(name)
+	for pruneEmptyDir(fsys, dir) {
+		dir = path.Dir(dir)
 	}
+	if dir == path.Dir(name) {
+		return ""
+	}
+	return dir
 }
 
 // pruneEmptyDir removes dir, with its .meta, and reports whether it did; one still holding anything, even what a concurrent write just made, stays, and so does a symlink. Callers hold the root exclusively.
