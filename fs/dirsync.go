@@ -48,10 +48,37 @@ func syncDir(fsys iofs.FS, dir string) error {
 	return fmt.Errorf("failed to sync directory %q: %w", dir, err)
 }
 
-// syncObject syncs the directories holding name and its metadata file.
+// objectDirs lists the directories holding name and its metadata file.
+func objectDirs(name string) []string {
+	return []string{path.Dir(name), path.Dir(metaPath(name))}
+}
+
+// syncObject syncs the directories holding name and its metadata file, which a write has just made sure exist.
 func syncObject(fsys iofs.FS, name string) error {
-	if err := syncDir(fsys, path.Dir(name)); err != nil {
-		return err
+	for _, dir := range objectDirs(name) {
+		if err := syncDir(fsys, dir); err != nil {
+			return err
+		}
 	}
-	return syncDir(fsys, path.Dir(metaPath(name)))
+	return nil
+}
+
+// syncDirs syncs each of dirs once; one gone since gives way to its nearest existing parent, whose sync makes the removal last.
+func syncDirs(fsys iofs.FS, dirs []string) error {
+	seen := make(map[string]bool, len(dirs))
+	for _, dir := range dirs {
+		for !seen[dir] {
+			seen[dir] = true
+			err := syncDir(fsys, dir)
+			// One under what is now a file is skipped: the write that put the file there synced its directory.
+			if err == nil || errors.Is(err, syscall.ENOTDIR) {
+				break
+			}
+			if !errors.Is(err, iofs.ErrNotExist) {
+				return err
+			}
+			dir = path.Dir(dir)
+		}
+	}
+	return nil
 }
