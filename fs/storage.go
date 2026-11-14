@@ -864,10 +864,15 @@ func (s *storage) pruneIfEmpty(ctx context.Context, name string) {
 	if !emptied(s.fsys, path.Dir(name)) {
 		return
 	}
+	var left string
 	_ = s.lockRoot(context.WithoutCancel(ctx), func() error {
-		pruneEmptyParents(s.fsys, name)
+		left = pruneEmptyParents(s.fsys, name)
 		return nil
 	})
+	// Outside the lock, so writers never wait on a sync; ignored as a failed removal is, since an empty directory that comes back holds no key.
+	if left != "" {
+		_ = syncDir(s.fsys, left)
+	}
 }
 
 // emptied reports whether dir holds nothing but perhaps its .meta, without reading it whole.
@@ -1059,7 +1064,8 @@ func (s *storage) moveDirect(src, dst string, ran *bool) error {
 		return fmt.Errorf("failed to delete %q: %w", src, err)
 	}
 	s.dropMeta(src)
-	return nil
+	// src may have had no .meta directory, for which syncDirs climbs to src's, already synced.
+	return syncDirs(s.fsys, objectDirs(src))
 }
 
 // sameStat reports whether info has the given length and modification time.
@@ -1120,14 +1126,17 @@ func (s *storage) rename(src, dst string, ran *bool) error {
 	}
 	removeLegacyMeta(s.fsys, src)
 	removeLegacyMeta(s.fsys, dst)
-	// Only dst's: should src's removal not last a crash, src comes back beside a complete dst, perhaps without its metadata file.
-	if err := syncDir(s.fsys, path.Dir(dst)); err != nil {
-		return err
+	// dst's first: should src's removal not last a crash, src comes back beside a complete dst rather than neither lasting.
+	dirs := []string{path.Dir(dst)}
+	if metaChanged {
+		dirs = append(dirs, path.Dir(dstMeta))
 	}
-	if !metaChanged {
-		return nil
+	dirs = append(dirs, path.Dir(src))
+	// A legacy metadata file's removal is not synced, as in every write.
+	if hasMeta && srcMeta == metaPath(src) {
+		dirs = append(dirs, path.Dir(srcMeta))
 	}
-	return syncDir(s.fsys, path.Dir(dstMeta))
+	return syncDirs(s.fsys, dirs)
 }
 
 // prepareMeta makes room for name's metadata file before its body is written, so a blocked one leaves the object untouched. Callers hold name's lock.
@@ -1221,15 +1230,24 @@ func (s *storage) Delete(ctx context.Context, name string) error {
 	if err := validateName(name); err != nil {
 		return err
 	}
-	if err := s.lockNames(ctx, []string{name}, func() error { return s.delete(name) }); err != nil {
-		return err
+	var deleted bool
+	err := s.lockNames(ctx, []string{name}, func() error {
+		var changed []string
+		if err := s.delete(name, &changed); err != nil {
+			return err
+		}
+		deleted = true
+		return syncDirs(s.fsys, changed)
+	})
+	// A failed sync leaves name deleted, which may have emptied its directory; a failed delete, or a lock never taken, changed nothing.
+	if deleted {
+		s.pruneIfEmpty(ctx, name)
 	}
-	s.pruneIfEmpty(ctx, name)
-	return nil
+	return err
 }
 
-// delete removes name's metadata files, then its body; a directory is a prefix, not a key, and stays. Callers hold name's lock.
-func (s *storage) delete(name string) error {
+// delete removes name's metadata files, then its body, adding the directories it changed to changed; a directory is a prefix, not a key, and stays. Callers hold name's lock.
+func (s *storage) delete(name string, changed *[]string) error {
 	s.dropMeta(name)
 	info, err := fs.Stat(s.fsys, name)
 	switch {
@@ -1242,6 +1260,11 @@ func (s *storage) delete(name string) error {
 	}
 	if err := wfs.RemoveFile(s.fsys, name); err != nil {
 		return fmt.Errorf("failed to delete %q: %w", name, err)
+	}
+	// Skipped after a key of the same directory, so a walk adds each directory about once, not each key.
+	dirs := objectDirs(name)
+	if n := len(*changed); n < 2 || (*changed)[n-2] != dirs[0] || (*changed)[n-1] != dirs[1] {
+		*changed = append(*changed, dirs...)
 	}
 	return nil
 }
@@ -1256,6 +1279,7 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 	if root == dirName && isLinkedDir(s.fsys, root) {
 		// Named as the prefix, a symlinked directory goes as rm -r takes it: the link alone, its target untouched.
 		removed := false
+		var left string
 		err := s.lockRoot(ctx, func() error {
 			// What replaced the link meanwhile is deleted below as any directory, or left as an object the prefix does not select.
 			if !isLinkedDir(s.fsys, root) {
@@ -1266,14 +1290,21 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 				return fmt.Errorf("failed to remove link %q: %w", root, err)
 			}
 			removed = true
-			pruneEmptyParents(s.fsys, dirName)
+			left = pruneEmptyParents(s.fsys, dirName)
 			return nil
 		})
-		if err != nil || removed {
+		if err != nil {
 			return err
 		}
+		if removed {
+			dirs := []string{path.Dir(root)}
+			if left != "" {
+				dirs = append(dirs, left)
+			}
+			return syncDirs(s.fsys, dirs)
+		}
 	}
-	var dirs []string
+	var dirs, changed []string
 	// A symlinked directory met on the way is removed as a link, never walked, so a delete reaches no further than its prefix names.
 	err := s.walk(root, false, func(name string, d fs.DirEntry, err error) error {
 		// A nil entry means the root could not be stat'd; a missing one, or one in an object's path, is a no-op.
@@ -1304,23 +1335,35 @@ func (s *storage) DeleteRecursive(ctx context.Context, prefix string) error {
 		}
 		// These names came from the walk, so they are whatever the filesystem
 		// already holds; validating them here would leave the rest behind.
-		return s.lockNames(ctx, []string{name}, func() error { return s.delete(name) })
+		return s.lockNames(ctx, []string{name}, func() error { return s.delete(name, &changed) })
 	})
-	if err != nil {
+	// A failed run still syncs what it deleted, before pruning leaves no directory there to sync.
+	fail := func(err error) error {
+		_ = syncDirs(s.fsys, changed)
 		s.pruneEmptied(ctx, dirs, dirName)
 		return err
 	}
+	if err != nil {
+		return fail(err)
+	}
 	// Deepest first, one exclusive section each, so writers are never held for the whole run.
 	for _, dir := range slices.Backward(dirs) {
-		if err := s.lockRoot(ctx, func() error { return s.removeDir(dir, prefix) }); err != nil {
-			s.pruneEmptied(ctx, dirs, dirName)
-			return err
+		if err := s.lockRoot(ctx, func() error { return s.removeDir(dir, prefix, &changed) }); err != nil {
+			return fail(err)
 		}
 	}
-	return s.lockRoot(ctx, func() error {
-		pruneEmptyParents(s.fsys, dirName)
+	err = s.lockRoot(ctx, func() error {
+		if left := pruneEmptyParents(s.fsys, dirName); left != "" {
+			// Counted, unlike pruneIfEmpty's: the keys' own directories are gone by now, so this sync is what makes their deletion last.
+			changed = append(changed, left)
+		}
 		return nil
 	})
+	if err != nil {
+		return fail(err)
+	}
+	// Once at the end, so a directory is synced once however many keys it held.
+	return syncDirs(s.fsys, changed)
 }
 
 // pruneEmptied removes the directories left empty inside a failed run's prefix; the prefix's own stays until a run succeeds.
@@ -1338,13 +1381,14 @@ func (s *storage) pruneEmptied(ctx context.Context, dirs []string, dirName strin
 	})
 }
 
-// removeDir removes dir as the walk saw it, which may be gone or an object by now. Callers hold the root exclusively.
-func (s *storage) removeDir(dir, prefix string) error {
+// removeDir removes dir as the walk saw it, which may be gone or an object by now, adding the directories it changed to changed. Callers hold the root exclusively.
+func (s *storage) removeDir(dir, prefix string, changed *[]string) error {
 	// A symlink goes as a link whatever its target's state, since a delete of the target first leaves it dangling.
 	if li, err := fs.Lstat(s.fsys, dir); err == nil && li.Mode()&fs.ModeSymlink != 0 && strings.HasPrefix(dir, prefix) {
 		if err := wfs.RemoveFile(s.fsys, dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("failed to remove link %q: %w", dir, err)
 		}
+		*changed = append(*changed, path.Dir(dir))
 		return nil
 	}
 	info, err := fs.Stat(s.fsys, dir)
@@ -1357,11 +1401,12 @@ func (s *storage) removeDir(dir, prefix string) error {
 		if !strings.HasPrefix(dir, prefix) {
 			return nil // the prefix's own name, now an object, which a prefix ending in "/" does not select
 		}
-		return s.delete(dir)
+		return s.delete(dir, changed)
 	}
 	if err := wfs.RemoveAll(s.fsys, dir); err != nil {
 		return fmt.Errorf("failed to remove dir %q: %w", dir, err)
 	}
+	*changed = append(*changed, path.Dir(dir))
 	return nil
 }
 
