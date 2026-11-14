@@ -298,3 +298,20 @@ func readAllFiles(t *testing.T, fsys fs.FS) map[string]string {
 	}))
 	return got
 }
+
+// TestMigrateMetaSyncsNothing checks MigrateMeta syncs no directory it creates, as a rerun repeats what a crash undid.
+func TestMigrateMetaSyncsNothing(t *testing.T) {
+	root := t.TempDir()
+	fsys := osfs.DirFS(root)
+	for _, f := range []seedFile{{"a/b/x.txt", "body"}, {".meta/a/b/x.txt", `{"metadata":{}}`}} {
+		_, err := wfs.WriteFile(fsys, f.name, []byte(f.body), fs.ModePerm)
+		require.NoError(t, err)
+	}
+	synced := recordDirSyncs(t, root)
+
+	ok, err := MigrateMeta(context.Background(), NewStorageFS(s2.Config{}, fsys))
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, map[string]string{"a/b/x.txt": "body", "a/b/.meta/x.txt": `{"metadata":{}}`}, readAllFiles(t, fsys))
+	assert.Empty(t, *synced)
+}

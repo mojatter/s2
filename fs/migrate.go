@@ -161,7 +161,8 @@ var errBlocked = errors.New("metadata directory blocked")
 
 // moveMetaFile renames src to dst, keeping its mtime; where rename is unavailable it copies, and dst gets a fresh one.
 func (s *storage) moveMetaFile(src, dst string) error {
-	if err := s.mkdirParent(dst); err != nil {
+	// Unsynced: a rerun repeats what a crash undid.
+	if err := s.makeParent(dst, false); err != nil {
 		if info, serr := fs.Stat(s.fsys, path.Dir(dst)); serr == nil && !info.IsDir() {
 			return errBlocked
 		}
