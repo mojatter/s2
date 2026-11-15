@@ -647,6 +647,23 @@ func (s *storage) Put(ctx context.Context, obj s2.Object) error {
 // Upload implements s2.Uploader. The ETag is the body MD5 this call computes.
 func (s *storage) Upload(ctx context.Context, obj s2.Object, opts s2.UploadOptions) (s2.UploadResult, error) {
 	name := obj.Name()
+	if strings.HasSuffix(name, "/") {
+		// S3 directory marker (e.g. "work/run-1/"): create the directory
+		// and succeed, bypassing the canonical-name validation that
+		// rejects trailing slashes. A non-empty ETag avoids the
+		// post-upload read-back, which would hit the same validation.
+		dir := strings.TrimSuffix(name, "/")
+		if dir != "" {
+			if err := validateName(dir); err != nil {
+				return s2.UploadResult{}, err
+			}
+			if err := wfs.MkdirAll(s.fsys, dir, 0o755); err != nil {
+				return s2.UploadResult{}, err
+			}
+		}
+		return s2.UploadResult{ETag: "D41D8CD98F00B204E9800998ECF8427E"}, nil // Return MD5 of null string
+	}
+
 	if err := validateName(name); err != nil {
 		return s2.UploadResult{}, err
 	}
