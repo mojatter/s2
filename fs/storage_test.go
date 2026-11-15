@@ -2438,11 +2438,11 @@ func (s *StorageTestSuite) TestSignedURL() {
 // 1 KiB payload. PUT rotates the key across a small alphabet so each
 // iteration writes to a distinct path (stressing directory creation
 // and rename); GET repeatedly reads a single pre-populated key
-// (stressing open/stat/read). Note that s2's atomicWrite always fsyncs
-// the payload before rename, so PUT here pays the durability cost on
-// every iteration — when comparing against benchmarks from other S3
-// implementations, verify that they are also running with fsync on
-// before drawing conclusions.
+// (stressing open/stat/read). Note that osfs fsyncs each Put by
+// default, so PUT here pays the durability cost on every iteration —
+// when comparing against benchmarks from other S3 implementations,
+// verify that they are also running with fsync on before drawing
+// conclusions.
 
 // newBenchStorage creates an empty Storage for the given backend type.
 // osfs is rooted at b.TempDir() so iteration state is isolated from
@@ -2462,9 +2462,8 @@ func newBenchStorage(b *testing.B, typ s2.Type) s2.Storage {
 	return strg
 }
 
-func benchPutObject(b *testing.B, typ s2.Type) {
+func benchPutObject(b *testing.B, strg s2.Storage) {
 	ctx := context.Background()
-	strg := newBenchStorage(b, typ)
 	content := bytes.Repeat([]byte("a"), 1024) // 1 KiB
 
 	b.ReportAllocs()
@@ -2503,24 +2502,18 @@ func benchGetObject(b *testing.B, typ s2.Type) {
 	}
 }
 
-// noSyncFS is an osfs whose files cannot Sync, so a benchmark seeds its objects without fsyncs it does not measure.
-type noSyncFS struct{ *osfs.OSFS }
-
-func (f noSyncFS) CreateFile(name string, mode fs.FileMode) (wfs.WriterFile, error) {
-	w, err := f.OSFS.CreateFile(name, mode)
-	if err != nil {
-		return nil, err
+// benchSeed returns a storage on strg's osfs root that skips fsync, so a benchmark seeds its objects without fsyncs it does not measure.
+func benchSeed(strg s2.Storage) s2.Storage {
+	if o, ok := strg.(*storage).fsys.(*osfs.OSFS); ok {
+		return NewStorageFS(s2.Config{Type: s2.TypeOSFS}, o, WithoutSync())
 	}
-	return struct{ wfs.WriterFile }{w}, nil
+	return strg
 }
 
 func benchList(b *testing.B, typ s2.Type, readETag, prefetch bool) {
 	ctx := context.Background()
 	strg := newBenchStorage(b, typ)
-	seed := strg
-	if typ == s2.TypeOSFS {
-		seed = NewStorageFS(s2.Config{Type: typ}, noSyncFS{strg.(*storage).fsys.(*osfs.OSFS)})
-	}
+	seed := benchSeed(strg)
 	for i := range 1000 {
 		if err := seed.Put(ctx, s2.NewObjectBytes(fmt.Sprintf("obj-%04d.txt", i), []byte("a"))); err != nil {
 			b.Fatal(err)
@@ -2555,9 +2548,10 @@ func BenchmarkListETagMemFS(b *testing.B)    { benchList(b, s2.TypeMemFS, true, 
 func benchListRecursive(b *testing.B, typ s2.Type, prefix string) {
 	ctx := context.Background()
 	strg := newBenchStorage(b, typ)
+	seed := benchSeed(strg)
 	for i := range 100 {
 		for j := range 100 {
-			if err := strg.Put(ctx, s2.NewObjectBytes(fmt.Sprintf("d%02d/obj-%02d.txt", i, j), []byte("a"))); err != nil {
+			if err := seed.Put(ctx, s2.NewObjectBytes(fmt.Sprintf("d%02d/obj-%02d.txt", i, j), []byte("a"))); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -2578,13 +2572,13 @@ func BenchmarkListRecursivePrefix(b *testing.B)      { benchListRecursive(b, s2.
 func BenchmarkListRecursiveMemFS(b *testing.B)       { benchListRecursive(b, s2.TypeMemFS, "") }
 func BenchmarkListRecursivePrefixMemFS(b *testing.B) { benchListRecursive(b, s2.TypeMemFS, "d50/") }
 
-// BenchmarkPutObject covers the osfs backend with a 1 KiB payload and
-// rotating-key writes. s2's atomicWrite always fsyncs before rename;
-// see BenchmarkPutObjectMemFS for numbers that exclude the durability
-// cost.
-func BenchmarkPutObject(b *testing.B)      { benchPutObject(b, s2.TypeOSFS) }
+// BenchmarkPutObject fsyncs on every Put; BenchmarkPutObjectNoSync and BenchmarkPutObjectMemFS exclude that cost.
+func BenchmarkPutObject(b *testing.B) { benchPutObject(b, newBenchStorage(b, s2.TypeOSFS)) }
+func BenchmarkPutObjectNoSync(b *testing.B) {
+	benchPutObject(b, NewStorageDir(b.TempDir(), WithoutSync()))
+}
 func BenchmarkGetObject(b *testing.B)      { benchGetObject(b, s2.TypeOSFS) }
-func BenchmarkPutObjectMemFS(b *testing.B) { benchPutObject(b, s2.TypeMemFS) }
+func BenchmarkPutObjectMemFS(b *testing.B) { benchPutObject(b, newBenchStorage(b, s2.TypeMemFS)) }
 func BenchmarkGetObjectMemFS(b *testing.B) { benchGetObject(b, s2.TypeMemFS) }
 
 func (s *StorageTestSuite) TestListCursorDoesNotReachSidecars() {

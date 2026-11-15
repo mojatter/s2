@@ -414,3 +414,75 @@ func TestSyncDirs(t *testing.T) {
 		})
 	}
 }
+
+func TestWithoutSync(t *testing.T) {
+	ctx := context.Background()
+	put := func(name string) func(s2.Storage) error {
+		return func(strg s2.Storage) error {
+			return strg.Put(ctx, s2.NewObjectBytes(name, []byte("v")))
+		}
+	}
+	moveDirect := func(strg s2.Storage) error {
+		var ran bool
+		return strg.(*storage).moveDirect("k/x", "c/z", &ran)
+	}
+	testCases := []struct {
+		caseName  string
+		noSync    bool
+		config    bool // through s2.Config.OSFS.NoSync rather than the option
+		sub       string
+		emptySub  bool // Sub(ctx, ""), which must still carry noSync
+		op        func(s2.Storage) error
+		wantFiles int
+		wantDirs  bool
+	}{
+		{caseName: "put syncs by default", op: put("a/b/x"), wantFiles: 2, wantDirs: true},
+		{caseName: "put", noSync: true, op: put("a/b/x")},
+		{caseName: "put configured", noSync: true, config: true, op: put("a/b/x")},
+		{caseName: "put into a new sub", noSync: true, sub: "b/u1", op: put("x")},
+		{caseName: "put into an empty sub", noSync: true, emptySub: true, op: put("a/b/x")},
+		{caseName: "move direct syncs by default", op: moveDirect, wantFiles: 2, wantDirs: true},
+		{caseName: "move direct", noSync: true, op: moveDirect},
+		{caseName: "put metadata syncs by default", op: func(strg s2.Storage) error {
+			return strg.PutMetadata(ctx, "k/x", s2.Metadata{"a": "b"})
+		}, wantFiles: 1, wantDirs: true},
+		{caseName: "put metadata", noSync: true, op: func(strg s2.Storage) error {
+			return strg.PutMetadata(ctx, "k/x", s2.Metadata{"a": "b"})
+		}},
+		{caseName: "move", noSync: true, op: func(strg s2.Storage) error { return s2.Move(ctx, strg, "k/x", "c/z") }},
+		{caseName: "delete", noSync: true, op: func(strg s2.Storage) error { return strg.Delete(ctx, "k/x") }},
+		{caseName: "delete recursive", noSync: true, op: func(strg s2.Storage) error { return strg.DeleteRecursive(ctx, "k/") }},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			root := t.TempDir()
+			var strg s2.Storage
+			if tc.config {
+				var err error
+				strg, err = s2.NewStorage(ctx, s2.Config{Type: s2.TypeOSFS, Root: root, OSFS: &s2.OSFSConfig{NoSync: tc.noSync}})
+				require.NoError(t, err)
+			} else {
+				var opts []Option
+				if tc.noSync {
+					opts = append(opts, WithoutSync())
+				}
+				strg = NewStorageDir(root, opts...)
+			}
+			require.NoError(t, put("k/x")(strg))
+			if tc.sub != "" || tc.emptySub {
+				var err error
+				strg, err = strg.Sub(ctx, tc.sub)
+				require.NoError(t, err)
+			}
+			dirs := recordDirSyncs(t, root)
+			files := 0
+			orig := fsyncFile
+			fsyncFile = func(f wfs.SyncWriterFile) error { files++; return orig(f) }
+			t.Cleanup(func() { fsyncFile = orig })
+
+			require.NoError(t, tc.op(strg))
+			require.Equal(t, tc.wantFiles, files)
+			require.Equal(t, tc.wantDirs, len(*dirs) > 0)
+		})
+	}
+}

@@ -454,7 +454,7 @@ func TestWrittenFileMode(t *testing.T) {
 		write    func(fsys iofs.FS, name string) error
 	}{
 		{caseName: "temp file then rename", write: func(fsys iofs.FS, name string) error {
-			tf, err := createTemp(fsys, name)
+			tf, err := createTemp(fsys, name, true)
 			if err != nil {
 				return err
 			}
@@ -466,7 +466,7 @@ func TestWrittenFileMode(t *testing.T) {
 			return tf.publish()
 		}},
 		{caseName: "direct write", write: func(fsys iofs.FS, name string) error {
-			return directWrite(fsys, name, strings.NewReader("v"))
+			return directWrite(fsys, name, strings.NewReader("v"), true)
 		}},
 		{caseName: "Storage.Put", write: func(fsys iofs.FS, name string) error {
 			return NewStorageFS(s2.Config{}, fsys).Put(context.Background(), s2.NewObjectBytes(name, []byte("v")))
@@ -514,7 +514,7 @@ func TestTempFile(t *testing.T) {
 			require.NoError(t, os.MkdirAll(filepath.Join(dir, "d"), 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "d", "x"), []byte("old"), 0o644))
 
-			tf, err := createTemp(fsys, "d/x")
+			tf, err := createTemp(fsys, "d/x", true)
 			require.NoError(t, err)
 			err = tf.write(tc.src)
 			if tc.wantWrite != "" {

@@ -178,7 +178,7 @@ func (s *storage) moveMetaFile(src, dst string) error {
 	if err != nil {
 		return fmt.Errorf("failed to read metadata file %q: %w", src, err)
 	}
-	if err := atomicWrite(s.fsys, dst, bytes.NewReader(data)); err != nil {
+	if err := atomicWrite(s.fsys, dst, bytes.NewReader(data), !s.noSync); err != nil {
 		return err
 	}
 	return s.removeMetaFile(src)

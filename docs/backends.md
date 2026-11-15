@@ -34,8 +34,15 @@ As JSON:
 |-------|-------------|
 | `root` | Filesystem path under which objects are stored |
 | `osfs.confined_root` | Keep every path inside `root`, as [Confined root](#confined-root) describes (default `false`) |
+| `osfs.no_sync` | Skip every fsync, as [Skipping fsync](#skipping-fsync) describes (default `false`) |
 
 Access control is governed by filesystem permissions.
+
+### Skipping fsync
+
+On `osfs`, a write fsyncs the object and its metadata file before renaming each into place, then the directories holding them and the parent of each directory it created, and a delete or `s2.Move` fsyncs the directories it changed, so an acknowledged change survives a power loss or kernel crash. Setting `osfs.no_sync` (`s2.Config.OSFS.NoSync`, for s2-server in the `S2_SERVER_CONFIG` file, or `fs.WithoutSync()` on `fs.NewStorageDir` and `fs.NewStorageFS`) skips every one of them; on macOS a 1 KiB `Put` then takes about 0.4 ms instead of 17.7 ms ([Benchmarks](../README.md#benchmarks)).
+
+A write still goes through a temp file and a rename, so a failed write leaves the previous object, and a crash of the s2-server process alone loses nothing the kernel has accepted. An OS crash or power loss, however, can undo recently acknowledged writes and deletes, and an object written shortly before may be left empty or truncated. So may its metadata file, and reading the object then fails (`500 InternalError` over S3) until it is written again or deleted. s2-server keeps each bucket's state under `.buckets/` in the same storage, so the same can happen to it: multipart requests on that bucket then fail with `500 InternalError` until the bucket is deleted and created again, or `.buckets/.meta/<bucket>` under the root is removed by hand. A storage on the same root without the setting syncs only what it writes itself, not a directory a `no_sync` storage created earlier. Use it for data that can be regenerated, such as a cache or a bulk import whose source is kept elsewhere, and for test or development runs.
 
 ## MEMFS
 

@@ -552,16 +552,17 @@ Numbers below are local runs on an Apple M4 (`darwin/arm64`, single process). Tr
 
 | Benchmark | ns/op | B/op | allocs/op |
 |---|---:|---:|---:|
-| `BenchmarkPutObject` (osfs) | 9,444,800 | 40,499 | 91 |
+| `BenchmarkPutObject` (osfs) | 17,692,497 | 9,137 | 106 |
+| `BenchmarkPutObjectNoSync` (osfs, `no_sync`) | 398,124 | 7,856 | 87 |
 | `BenchmarkGetObject` (osfs) | 82,947 | 3,034 | 33 |
 | `BenchmarkPutObjectMemFS` | 7,781 | 39,772 | 128 |
 | `BenchmarkGetObjectMemFS` | 1,375 | 2,192 | 35 |
-| `BenchmarkHTTPPutObject` (osfs) | 9,862,317 | 52,248 | 221 |
+| `BenchmarkHTTPPutObject` (osfs) | 16,826,663 | 20,415 | 231 |
 | `BenchmarkHTTPGetObject` (osfs) | 140,662 | 15,212 | 182 |
 | `BenchmarkHTTPPutObjectMemFS` | 103,358 | 48,527 | 215 |
 | `BenchmarkHTTPGetObjectMemFS` | 55,263 | 14,332 | 170 |
 
-The `osfs` PUT path always fsyncs the object and its metadata file before renaming each into place — those two fsyncs are roughly **7 to 8 ms of the 9.4 ms per storage-layer PUT** on this machine, where one fsync of a 1 KiB file takes 3.4 to 4 ms. For apples-to-apples comparisons against benchmarks from other S3-compatible servers, make sure they are running with fsync enabled as well. Many default to write-through-page-cache and will look proportionally faster until you flip the fsync switch on.
+An `osfs` PUT into an existing directory fsyncs four times: the object and its metadata file before renaming each into place, then the two directories holding them; one that creates directories also syncs the parent of each. The four are roughly **17.3 ms of the 17.7 ms per storage-layer PUT** on this machine (macOS, where Go's `Sync` is `F_FULLFSYNC`). Setting `osfs.no_sync` (`fs.WithoutSync()`) skips them all, as `BenchmarkPutObjectNoSync` shows, at the cost described in [docs/backends.md](docs/backends.md#skipping-fsync). For apples-to-apples comparisons against benchmarks from other S3-compatible servers, make sure they are running with fsync enabled as well. Many default to write-through-page-cache and will look proportionally faster until you flip the fsync switch on.
 
 The `memfs` columns exist because S2 ships an in-memory backend specifically for tests. Running on `memfs` makes `GetObject` about **60x faster** and `PutObject` over **1000x faster** than `osfs` on the same hardware. That speedup is what makes `memfs` worth reaching for in unit tests that need an S3-compatible target without Docker or a temp directory.
 
