@@ -29,8 +29,9 @@ type bucketState struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// isKeepFile reports a .keep file; a marker ".keep/" is a folder, which path.Base would read as one.
 func isKeepFile(name string) bool {
-	return path.Base(name) == keepFile
+	return !strings.HasSuffix(name, "/") && path.Base(name) == keepFile
 }
 
 // FilterKeep removes .keep marker files from a list of objects.
@@ -331,11 +332,11 @@ func (bs *Buckets) Delete(ctx context.Context, name string) error {
 	return meta.Delete(ctx, name)
 }
 
-// FolderMarker is the object a folder actually consists of. Authorize it, not
-// the folder's own name: a Deny on "<bucket>/private/*" does not match
-// "private", but the marker lands inside it.
+// FolderMarker is the directory marker a folder consists of, as the AWS console writes one. Authorize it, not
+// the folder's own name: a Deny on "<bucket>/private/*" does not match "private", but matches "private/".
+// A folder made before v0.33.0 is a .keep object instead, which listings still hide.
 func FolderMarker(key string) string {
-	return key + "/" + keepFile
+	return key + "/"
 }
 
 // CreateFolder writes a folder marker into an existing bucket; it never creates the bucket.

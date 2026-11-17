@@ -230,6 +230,42 @@ run_test "ListOmitsEmptiedPrefix" sh -c '
   ! echo "$out" | grep -q "PRE FOLDER/"
 '
 
+# A directory marker, a zero-byte key ending in "/", is an object of its own, as on S3 (#531)
+run_test "DirMarker_PutAndHead" sh -c '
+  EP="'"$ENDPOINT"'"
+  aws s3api --endpoint-url "$EP" put-object --bucket test-bucket --key marked/ &&
+  out=$(aws s3api --endpoint-url "$EP" head-object --bucket test-bucket --key marked/ --query ContentLength --output text) &&
+  [ "$out" = "0" ]
+'
+
+run_test "DirMarker_ListedBeforeItsKeys" sh -c '
+  EP="'"$ENDPOINT"'"
+  echo -n "a" | aws s3 --endpoint-url "$EP" cp - s3://test-bucket/marked/a.txt &&
+  out=$(aws s3api --endpoint-url "$EP" list-objects-v2 --bucket test-bucket --prefix marked/ --query "Contents[].Key" --output text) &&
+  [ "$out" = "$(printf "marked/\tmarked/a.txt")" ]
+'
+
+run_test "DirMarker_FoldsIntoItsPrefix" sh -c '
+  EP="'"$ENDPOINT"'"
+  out=$(aws s3api --endpoint-url "$EP" list-objects-v2 --bucket test-bucket --delimiter / --query "CommonPrefixes[].Prefix" --output text) &&
+  echo "$out" | grep -qw "marked/"
+'
+
+# fs keeps no body under a marker; S3 would store one.
+run_test "DirMarker_BodyRefusedOnFS" sh -c '
+  EP="'"$ENDPOINT"'"
+  printf x > /tmp/marker-body &&
+  ! aws s3api --endpoint-url "$EP" put-object --bucket test-bucket --key with-body/ --body /tmp/marker-body
+'
+
+run_test "DirMarker_DeleteLeavesItsKeys" sh -c '
+  EP="'"$ENDPOINT"'"
+  aws s3api --endpoint-url "$EP" delete-object --bucket test-bucket --key marked/ &&
+  ! aws s3api --endpoint-url "$EP" head-object --bucket test-bucket --key marked/ &&
+  aws s3api --endpoint-url "$EP" head-object --bucket test-bucket --key marked/a.txt &&
+  aws s3 --endpoint-url "$EP" rm s3://test-bucket/marked/ --recursive
+'
+
 # Metadata operations
 run_test "PutObjectWithMetadata" sh -c '
   EP="'"$ENDPOINT"'"
@@ -327,6 +363,15 @@ run_test "Memfs_MultipartUploadStreams" sh -c '
   src=$(sha256sum /tmp/mp.bin | cut -d" " -f1)
   dst=$(sha256sum /tmp/mp.out | cut -d" " -f1)
   [ "$src" = "$dst" ]
+'
+
+run_test "Memfs_DirMarker" sh -c '
+  EP="'"$ENDPOINT_MEM"'"
+  aws s3api --endpoint-url "$EP" put-object --bucket mem-bucket --key marked/ &&
+  out=$(aws s3api --endpoint-url "$EP" list-objects-v2 --bucket mem-bucket --prefix marked/ --query "Contents[].Key" --output text) &&
+  [ "$out" = "marked/" ] &&
+  aws s3api --endpoint-url "$EP" delete-object --bucket mem-bucket --key marked/ &&
+  ! aws s3api --endpoint-url "$EP" head-object --bucket mem-bucket --key marked/
 '
 
 # === Multi-user auth + IAM policy (s2-users) ===

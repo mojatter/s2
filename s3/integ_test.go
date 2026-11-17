@@ -158,3 +158,8 @@ func (s *S3IntegrationSuite) TestDelete() {
 func (s *S3IntegrationSuite) TestPutMetadata() {
 	s.Require().NoError(s2test.TestStoragePutMetadata(context.Background(), s.strg))
 }
+
+// TestDirMarker leaves out TestStorageDirMarkerBesideObject: the e2e endpoint is s2-server on fs, which cannot hold "x" beside "x/".
+func (s *S3IntegrationSuite) TestDirMarker() {
+	s.Require().NoError(s2test.TestStorageDirMarker(context.Background(), s.strg))
+}
