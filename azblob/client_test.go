@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 )
@@ -95,6 +96,44 @@ func TestCopyBlobSource(t *testing.T) {
 			}
 			if u.RawQuery != "" || u.Fragment != "" || u.Path != "/acct/ctr/"+tc.key {
 				t.Errorf("x-ms-copy-source %q names path %q (query %q, fragment %q), want %q", got, u.Path, u.RawQuery, u.Fragment, "/acct/ctr/"+tc.key)
+			}
+		})
+	}
+}
+
+func TestSignedURLEscape(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		key      string
+		wantPath string
+	}{
+		{caseName: "plain", key: "dir/plain.txt", wantPath: "/ctr/dir/plain.txt"},
+		{caseName: "space", key: "sp ace.txt", wantPath: "/ctr/sp%20ace.txt"},
+		{caseName: "hash", key: "hash#.txt", wantPath: "/ctr/hash%23.txt"},
+		{caseName: "question mark", key: "q?x.txt", wantPath: "/ctr/q%3Fx.txt"},
+		{caseName: "bare percent", key: "pct%zz.txt", wantPath: "/ctr/pct%25zz.txt"},
+		{caseName: "percent escape", key: "pct%41.txt", wantPath: "/ctr/pct%2541.txt"},
+		{caseName: "plus", key: "plus+.txt", wantPath: "/ctr/plus+.txt"},
+		{caseName: "reserved under a directory", key: "dir/q?x.txt", wantPath: "/ctr/dir/q%3Fx.txt"},
+		{caseName: "non-ASCII", key: "dir/日本語.txt", wantPath: "/ctr/dir/%E6%97%A5%E6%9C%AC%E8%AA%9E.txt"},
+		{caseName: "directory marker", key: "d+ir/", wantPath: "/ctr/d+ir/"},
+	}
+	c, err := newSDKClient(&AzblobConfig{AccountName: "acct", AccountKey: "a2V5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			got, err := c.signedURL("ctr", tc.key, "GET", time.Now().Add(time.Hour))
+			if err != nil {
+				t.Fatal(err)
+			}
+			u, err := url.Parse(got)
+			if err != nil {
+				t.Fatalf("signed URL %q: %v", got, err)
+			}
+			if u.Path != "/ctr/"+tc.key || u.EscapedPath() != tc.wantPath || u.Fragment != "" || u.Query().Get("sig") == "" {
+				t.Errorf("signed URL %q names path %q (escaped %q, fragment %q, sig %q), want %q as %q", got, u.Path, u.EscapedPath(), u.Fragment, u.Query().Get("sig"), "/ctr/"+tc.key, tc.wantPath)
 			}
 		})
 	}
