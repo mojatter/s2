@@ -2,8 +2,12 @@ package azblob
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5" // #nosec G501 -- checks Content-MD5
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"testing"
 	"testing/iotest"
 
@@ -48,6 +52,49 @@ func TestMD5Reader(t *testing.T) {
 			want := md5.Sum(tc.body) // #nosec G401 -- checks Content-MD5
 			if !bytes.Equal(headers.BlobContentMD5, want[:]) {
 				t.Fatalf("BlobContentMD5 = %x, want %x", headers.BlobContentMD5, want)
+			}
+		})
+	}
+}
+
+func TestCopyBlobSource(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		key      string
+	}{
+		{caseName: "plain", key: "dir/plain.txt"},
+		{caseName: "space", key: "sp ace.txt"},
+		{caseName: "hash", key: "hash#.txt"},
+		{caseName: "question mark", key: "q?x.txt"},
+		{caseName: "bare percent", key: "pct%zz.txt"},
+		{caseName: "percent escape", key: "pct%41.txt"},
+		{caseName: "plus", key: "plus+.txt"},
+		{caseName: "non-ASCII", key: "dir/日本語.txt"},
+		{caseName: "directory marker", key: "d+ir/"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			var got string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get("x-ms-copy-source")
+				w.Header().Set("x-ms-copy-status", "success")
+				w.WriteHeader(http.StatusAccepted)
+			}))
+			defer srv.Close()
+
+			c, err := newSDKClient(&AzblobConfig{ConnectionString: "DefaultEndpointsProtocol=http;AccountName=acct;AccountKey=a2V5;BlobEndpoint=" + srv.URL + "/acct;"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.copyBlob(context.Background(), "ctr", tc.key, "dst"); err != nil {
+				t.Fatal(err)
+			}
+			u, err := url.Parse(got)
+			if err != nil {
+				t.Fatalf("x-ms-copy-source %q: %v", got, err)
+			}
+			if u.RawQuery != "" || u.Fragment != "" || u.Path != "/acct/ctr/"+tc.key {
+				t.Errorf("x-ms-copy-source %q names path %q (query %q, fragment %q), want %q", got, u.Path, u.RawQuery, u.Fragment, "/acct/ctr/"+tc.key)
 			}
 		})
 	}

@@ -166,7 +166,7 @@ func (c *sdkClient) setMetadata(ctx context.Context, ctr, blobName string, metad
 }
 
 func (c *sdkClient) copyBlob(ctx context.Context, ctr, src, dst string) error {
-	srcURL := fmt.Sprintf("%s%s/%s", c.client.URL(), ctr, src)
+	srcURL := c.blobClient(ctr, src).URL()
 	_, err := c.blobClient(ctr, dst).CopyFromURL(ctx, srcURL, nil)
 	return err
 }
