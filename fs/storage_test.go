@@ -2397,6 +2397,7 @@ func (s *StorageTestSuite) TestSignedURL() {
 		strg     s2.Storage
 		ctx      context.Context
 		name     string
+		put      bool
 		ttl      time.Duration
 		want     string
 		wantErr  string
@@ -2426,6 +2427,84 @@ func (s *StorageTestSuite) TestSignedURL() {
 			want: "http://localhost/a.txt",
 		},
 		{
+			caseName: "percent escape",
+			strg: &storage{
+				lk:   newNameLocker(),
+				cfg:  s2.Config{SignedURL: "http://localhost"},
+				fsys: s.testMemFS(),
+			},
+			ctx:  context.Background(),
+			name: "pct%41.txt",
+			put:  true,
+			ttl:  time.Hour,
+			want: "http://localhost/pct%2541.txt",
+		},
+		{
+			caseName: "bare percent",
+			strg: &storage{
+				lk:   newNameLocker(),
+				cfg:  s2.Config{SignedURL: "http://localhost"},
+				fsys: s.testMemFS(),
+			},
+			ctx:  context.Background(),
+			name: "pct%zz.txt",
+			put:  true,
+			ttl:  time.Hour,
+			want: "http://localhost/pct%25zz.txt",
+		},
+		{
+			caseName: "space",
+			strg: &storage{
+				lk:   newNameLocker(),
+				cfg:  s2.Config{SignedURL: "http://localhost"},
+				fsys: s.testMemFS(),
+			},
+			ctx:  context.Background(),
+			name: "sp ace.txt",
+			put:  true,
+			ttl:  time.Hour,
+			want: "http://localhost/sp%20ace.txt",
+		},
+		{
+			caseName: "hash",
+			strg: &storage{
+				lk:   newNameLocker(),
+				cfg:  s2.Config{SignedURL: "http://localhost"},
+				fsys: s.testMemFS(),
+			},
+			ctx:  context.Background(),
+			name: "hash#.txt",
+			put:  true,
+			ttl:  time.Hour,
+			want: "http://localhost/hash%23.txt",
+		},
+		{
+			caseName: "question mark",
+			strg: &storage{
+				lk:   newNameLocker(),
+				cfg:  s2.Config{SignedURL: "http://localhost"},
+				fsys: s.testMemFS(),
+			},
+			ctx:  context.Background(),
+			name: "q?x.txt",
+			put:  true,
+			ttl:  time.Hour,
+			want: "http://localhost/q%3Fx.txt",
+		},
+		{
+			caseName: "non-ASCII in a directory",
+			strg: &storage{
+				lk:   newNameLocker(),
+				cfg:  s2.Config{SignedURL: "http://localhost"},
+				fsys: s.testMemFS(),
+			},
+			ctx:  context.Background(),
+			name: "dir/日本語.txt",
+			put:  true,
+			ttl:  time.Hour,
+			want: "http://localhost/dir/%E6%97%A5%E6%9C%AC%E8%AA%9E.txt",
+		},
+		{
 			caseName: "not found",
 			strg: &storage{
 				lk:   newNameLocker(),
@@ -2440,6 +2519,9 @@ func (s *StorageTestSuite) TestSignedURL() {
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
+			if tc.put {
+				s.Require().NoError(tc.strg.Put(tc.ctx, s2.NewObjectBytes(tc.name, []byte("x"))))
+			}
 			got, err := tc.strg.SignedURL(tc.ctx, s2.SignedURLOptions{Name: tc.name, TTL: tc.ttl})
 			if tc.wantErr != "" {
 				s.ErrorContains(err, tc.wantErr)
