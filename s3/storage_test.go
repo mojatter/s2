@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -382,7 +383,11 @@ func (m *mockS3Client) PresignPutObject(ctx context.Context, params *s3.PutObjec
 }
 
 func (m *mockS3Client) CopyObject(ctx context.Context, params *s3.CopyObjectInput, optFns ...func(*s3.Options)) (*s3.CopyObjectOutput, error) {
-	copySource := aws.ToString(params.CopySource)
+	// S3 decodes the copy source as a query value, "+" included.
+	copySource, err := url.QueryUnescape(aws.ToString(params.CopySource))
+	if err != nil {
+		return nil, &smithy.GenericAPIError{Code: "InvalidArgument"}
+	}
 	// format: bucket/key
 	parts := strings.SplitN(copySource, "/", 2)
 	srcBucket := parts[0]
@@ -933,6 +938,53 @@ func (s *StorageTestSuite) TestS2TestSubConsistency() {
 func (s *StorageTestSuite) TestS2TestPutMetadata() {
 	_, strg := s.testMockClient()
 	s.Require().NoError(s2test.TestStoragePutMetadata(context.Background(), strg))
+}
+
+func (s *StorageTestSuite) TestCopySourceEscape() {
+	testCases := []struct {
+		caseName string
+		key      string
+		decoy    string
+	}{
+		{caseName: "space", key: "sp ace.txt"},
+		{caseName: "hash", key: "hash#.txt"},
+		{caseName: "ampersand and equals", key: "amp&eq=.txt"},
+		{caseName: "question mark", key: "q?x.txt"},
+		{caseName: "bare percent", key: "pct%zz.txt"},
+		{caseName: "percent escape", key: "pct%41.txt", decoy: "pctA.txt"},
+		{caseName: "plus", key: "plus+.txt", decoy: "plus .txt"},
+		{caseName: "non-ASCII", key: "dir/日本語.txt"},
+		{caseName: "directory marker", key: "d+ir/"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx := context.Background()
+			_, strg := s.testMockClient()
+			s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes(tc.key, []byte(tc.key))))
+			if tc.decoy != "" {
+				s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes(tc.decoy, []byte("decoy"))))
+			}
+
+			s.Require().NoError(strg.Copy(ctx, tc.key, "copy/"+tc.key))
+			s.Require().NoError(strg.PutMetadata(ctx, tc.key, s2.Metadata{"k": "v"}))
+
+			for _, name := range []string{"copy/" + tc.key, tc.key} {
+				obj, err := strg.Get(ctx, name)
+				s.Require().NoError(err)
+				s.Equal(uint64(len(tc.key)), obj.Length(), name)
+			}
+			obj, err := strg.Get(ctx, tc.key)
+			s.Require().NoError(err)
+			v, _ := obj.Metadata().Get("k")
+			s.Equal("v", v)
+			if tc.decoy != "" {
+				obj, err := strg.Get(ctx, tc.decoy)
+				s.Require().NoError(err)
+				_, ok := obj.Metadata().Get("k")
+				s.False(ok, "PutMetadata reached the decoy")
+			}
+		})
+	}
 }
 
 func (s *StorageTestSuite) TestNewStorageError() {

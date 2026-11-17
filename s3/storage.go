@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"path"
 	"strings"
 	"sync"
@@ -475,7 +476,7 @@ func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Meta
 	_, err = s.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:            aws.String(s.bucket),
 		Key:               aws.String(key),
-		CopySource:        aws.String(s.bucket + "/" + key),
+		CopySource:        aws.String(copySource(s.bucket, key)),
 		Metadata:          metadata,
 		MetadataDirective: s3types.MetadataDirectiveReplace,
 		ContentType:       contentType,
@@ -492,9 +493,18 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:     aws.String(s.bucket),
 		Key:        aws.String(s.key(dst)),
-		CopySource: aws.String(s.bucket + "/" + s.key(src)),
+		CopySource: aws.String(copySource(s.bucket, s.key(src))),
 	})
 	return mapNotExist(err, src)
+}
+
+// copySource URL-encodes each segment of key, since S3 decodes x-amz-copy-source and reads "+" as a space.
+func copySource(bucket, key string) string {
+	segs := strings.Split(key, "/")
+	for i, seg := range segs {
+		segs[i] = strings.ReplaceAll(url.QueryEscape(seg), "+", "%20")
+	}
+	return bucket + "/" + strings.Join(segs, "/")
 }
 
 func (s *storage) Delete(ctx context.Context, name string) error {

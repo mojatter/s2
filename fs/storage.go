@@ -1480,5 +1480,10 @@ func (s *storage) SignedURL(_ context.Context, opts s2.SignedURLOptions) (string
 	if _, err := s.get(opts.Name); err != nil {
 		return "", err
 	}
-	return url.JoinPath(s.cfg.SignedURL, opts.Name)
+	// JoinPath reads its elements as escaped, so a "%" in the name must be escaped first.
+	segs := strings.Split(opts.Name, "/")
+	for i, seg := range segs {
+		segs[i] = url.PathEscape(seg)
+	}
+	return url.JoinPath(s.cfg.SignedURL, strings.Join(segs, "/"))
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -166,7 +167,7 @@ func (c *sdkClient) setMetadata(ctx context.Context, ctr, blobName string, metad
 }
 
 func (c *sdkClient) copyBlob(ctx context.Context, ctr, src, dst string) error {
-	srcURL := fmt.Sprintf("%s%s/%s", c.client.URL(), ctr, src)
+	srcURL := c.blobClient(ctr, src).URL()
 	_, err := c.blobClient(ctr, dst).CopyFromURL(ctx, srcURL, nil)
 	return err
 }
@@ -273,7 +274,12 @@ func (c *sdkClient) signedURL(ctr, blobName string, method string, expiry time.T
 		return "", fmt.Errorf("azblob: sign SAS: %w", err)
 	}
 
-	return fmt.Sprintf("%s%s/%s?%s", c.client.URL(), ctr, blobName, qp.Encode()), nil
+	// Escape each segment, keeping "/" as the other backends' signed URLs do; the SDK's own URL writes it as %2F.
+	segs := strings.Split(blobName, "/")
+	for i, seg := range segs {
+		segs[i] = url.PathEscape(seg)
+	}
+	return c.containerClient(ctr).URL() + "/" + strings.Join(segs, "/") + "?" + qp.Encode(), nil
 }
 
 // --- helpers ---
