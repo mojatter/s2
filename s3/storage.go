@@ -215,7 +215,7 @@ func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult,
 			out.CommonPrefixes = append(out.CommonPrefixes, s2.RelName(s.prefix, aws.ToString(p.Prefix)))
 		}
 		for _, c := range res.Contents {
-			if isDirMarker(aws.ToString(c.Key), aws.ToInt64(c.Size)) {
+			if s.isRootMarker(aws.ToString(c.Key)) {
 				continue
 			}
 			key := s2.RelName(s.prefix, aws.ToString(c.Key))
@@ -233,7 +233,7 @@ func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult,
 		if aws.ToBool(res.IsTruncated) {
 			out.NextAfter = aws.ToString(res.NextContinuationToken)
 		}
-		// A page the hidden markers emptied is refilled: an empty page must not carry NextAfter.
+		// A page the hidden root marker emptied is refilled: an empty page must not carry NextAfter.
 		if len(out.Objects) > 0 || len(out.CommonPrefixes) > 0 || out.NextAfter == "" {
 			return out, nil
 		}
@@ -263,7 +263,7 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 	}
 	params, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(path.Join(s.prefix, name)),
+		Key:    aws.String(s.key(name)),
 	})
 	if err != nil {
 		if isNotFoundErr(err) {
@@ -316,7 +316,7 @@ func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
 	if err := s2.ValidateName(name); err != nil {
 		return false, err
 	}
-	key := path.Join(s.prefix, name)
+	key := s.key(name)
 
 	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -327,6 +327,10 @@ func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
 	}
 	if !isNotFoundErr(err) {
 		return false, err
+	}
+	// A marker is an object like any other, so only HEAD answers for it.
+	if strings.HasSuffix(name, "/") {
+		return false, nil
 	}
 
 	// Fallback: probe for any object under "<name>/" so that prefixes
@@ -417,7 +421,7 @@ func (s *storage) Upload(ctx context.Context, obj s2.Object, opts s2.UploadOptio
 
 	input := &transfermanager.UploadObjectInput{
 		Bucket:        aws.String(s.bucket),
-		Key:           aws.String(path.Join(s.prefix, obj.Name())),
+		Key:           aws.String(s.key(obj.Name())),
 		Body:          rc,
 		ContentLength: aws.Int64(s2.MustInt64(obj.Length())),
 		Metadata:      obj.Metadata(),
@@ -456,7 +460,7 @@ func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Meta
 	if err := s2.ValidateName(name); err != nil {
 		return err
 	}
-	key := path.Join(s.prefix, name)
+	key := s.key(name)
 	head, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
@@ -471,7 +475,7 @@ func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Meta
 	_, err = s.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:            aws.String(s.bucket),
 		Key:               aws.String(key),
-		CopySource:        aws.String(path.Join(s.bucket, key)),
+		CopySource:        aws.String(s.bucket + "/" + key),
 		Metadata:          metadata,
 		MetadataDirective: s3types.MetadataDirectiveReplace,
 		ContentType:       contentType,
@@ -487,8 +491,8 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 	}
 	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:     aws.String(s.bucket),
-		Key:        aws.String(path.Join(s.prefix, dst)),
-		CopySource: aws.String(path.Join(s.bucket, s.prefix, src)),
+		Key:        aws.String(s.key(dst)),
+		CopySource: aws.String(s.bucket + "/" + s.key(src)),
 	})
 	return mapNotExist(err, src)
 }
@@ -499,7 +503,7 @@ func (s *storage) Delete(ctx context.Context, name string) error {
 	}
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(path.Join(s.prefix, name)),
+		Key:    aws.String(s.key(name)),
 	})
 	return err
 }
@@ -564,7 +568,7 @@ func (s *storage) SignedURL(ctx context.Context, opts s2.SignedURLOptions) (stri
 		}
 		s.presignClient = s3.NewPresignClient(s3Client)
 	}
-	key := aws.String(path.Join(s.prefix, opts.Name))
+	key := aws.String(s.key(opts.Name))
 	switch method {
 	case s2.SignedURLPut:
 		req, err := s.presignClient.PresignPutObject(ctx, &s3.PutObjectInput{
@@ -591,9 +595,14 @@ func (s *storage) SignedURL(ctx context.Context, opts s2.SignedURLOptions) (stri
 	}
 }
 
-// isDirMarker reports a zero-byte key ending in "/", a directory marker another tool wrote: s2 cannot name it, so List hides it (#275).
-func isDirMarker(key string, size int64) bool {
-	return size == 0 && strings.HasSuffix(key, "/")
+// key is name's full key; not path.Join, which drops a marker's trailing "/" and so names its neighbour.
+func (s *storage) key(name string) string {
+	return s2.Key(s.prefix, name)
+}
+
+// isRootMarker reports the marker of the storage's own prefix, which List hides as its name would be "".
+func (s *storage) isRootMarker(key string) bool {
+	return s.prefix != "" && key == s.prefix+"/"
 }
 
 // joinKeepSlash is path.Join that keeps the trailing slash confining a listing

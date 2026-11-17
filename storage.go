@@ -54,7 +54,6 @@ type ListResult struct {
 	CommonPrefixes []string
 	// NextAfter is an opaque continuation token, set only when an entry
 	// followed the page as it was read. When empty, the listing is exhausted.
-	// On s3, gcs and azblob, hidden directory markers ending a listing can leave the page after it empty.
 	NextAfter string
 }
 
@@ -105,7 +104,7 @@ type Storage interface {
 	// expose a directory hierarchy (osfs, memfs) treat both regular
 	// files and directories as "present"; flat key-value backends (s3)
 	// only resolve to leaf objects since they have no directory
-	// primitive of their own.
+	// primitive of their own. A name ending in "/" reports only a stored directory marker, on every backend.
 	Exists(ctx context.Context, name string) (bool, error)
 	// Put writes obj to the storage atomically per object. Any metadata on
 	// obj is persisted as part of the same call.

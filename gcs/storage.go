@@ -134,14 +134,14 @@ func (s *gcsStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResu
 			return s2.ListResult{}, fmt.Errorf("gcs: list objects: %w", err)
 		}
 
-		// A common prefix is a directory marker in a non-recursive listing.
+		// A common prefix stands for a directory in a non-recursive listing.
 		// StartOffset is inclusive, so objects skip the match itself, and a
 		// prefix not past it is dropped, as S3 drops one not past start-after.
 		if attrs.Prefix != "" {
 			if q.StartOffset == "" || attrs.Prefix > q.StartOffset {
 				out.CommonPrefixes = append(out.CommonPrefixes, s2.RelName(s.prefix, attrs.Prefix))
 			}
-		} else if name := s2.RelName(s.prefix, attrs.Name); (q.StartOffset == "" || name != opts.StartAfter) && !isDirMarker(attrs.Name, attrs.Size) {
+		} else if name := s2.RelName(s.prefix, attrs.Name); (q.StartOffset == "" || name != opts.StartAfter) && !s.isRootMarker(attrs.Name) {
 			md, contentType := objectMetadata(attrs)
 			out.Objects = append(out.Objects, &object{
 				client:       s.client,
@@ -217,6 +217,11 @@ func (s *gcsStorage) Exists(ctx context.Context, name string) (bool, error) {
 	}
 	if !errors.Is(err, storage.ErrObjectNotExist) {
 		return false, err
+	}
+
+	// A marker is an object like any other, so only its own lookup answers for it.
+	if strings.HasSuffix(name, "/") {
+		return false, nil
 	}
 
 	// Fallback: probe for any object under "<name>/".
@@ -417,11 +422,9 @@ func (s *gcsStorage) SignedURL(_ context.Context, opts s2.SignedURLOptions) (str
 
 // --- helpers ---
 
+// key is name's full key; not path.Join, which drops a marker's trailing "/" and so names its neighbour.
 func (s *gcsStorage) key(name string) string {
-	if s.prefix == "" {
-		return name
-	}
-	return path.Join(s.prefix, name)
+	return s2.Key(s.prefix, name)
 }
 
 // listPrefix is the query prefix for a listing; only a delimited one treats the caller's prefix as a directory.
@@ -479,9 +482,9 @@ func emulatorEndpoint(host string) (string, error) {
 	return u.String(), nil
 }
 
-// isDirMarker reports a zero-byte key ending in "/", a directory marker another tool wrote: s2 cannot name it, so List hides it (#275).
-func isDirMarker(key string, size int64) bool {
-	return size == 0 && strings.HasSuffix(key, "/")
+// isRootMarker reports the marker of the storage's own prefix, which List hides as its name would be "".
+func (s *gcsStorage) isRootMarker(key string) bool {
+	return s.prefix != "" && key == s.prefix+"/"
 }
 
 // joinKeepSlash is path.Join that keeps the trailing slash confining a listing

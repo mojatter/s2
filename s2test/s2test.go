@@ -1335,9 +1335,7 @@ func TestStorageNameEscape(ctx context.Context, strg s2.Storage) error {
 		}
 	}
 
-	// A trailing "/" names nothing either: it folds to the object beside it,
-	// and a backend that joins before it validates takes that object's
-	// sidecar with it.
+	// A trailing "/" names a marker, never the object beside it; a backend joining with path.Join lands on that object and takes its metadata file with it.
 	for _, name := range decoys {
 		_ = sub.Delete(ctx, name+"/")
 		_ = sub.PutMetadata(ctx, name+"/", s2.Metadata{"escaped": "yes"})
@@ -1543,6 +1541,290 @@ func checkDecoy(obj s2.Object, body string) error {
 	}
 	if v := obj.Metadata()["decoy"]; v != "yes" {
 		return fmt.Errorf("metadata decoy=%q, want %q", v, "yes")
+	}
+	return nil
+}
+
+// TestStorageDirMarker validates a zero-byte directory marker, a name ending in "/", against what AWS S3 and GCS do with one.
+// It stores it as its own object, lists it before the keys under it, and deletes it alone.
+func TestStorageDirMarker(ctx context.Context, strg s2.Storage) error {
+	var errs []string
+	errorf := func(format string, args ...any) {
+		errs = append(errs, fmt.Sprintf(format, args...))
+	}
+	const base = "s2test-marker/"
+	marker := base + "d/"
+	emptyETag := `"d41d8cd98f00b204e9800998ecf8427e"`
+	defer func() { _ = strg.DeleteRecursive(context.WithoutCancel(ctx), base) }()
+
+	put := func(name string, body []byte, opts ...s2.ObjectOption) error {
+		if err := strg.Put(ctx, s2.NewObjectBytes(name, body, opts...)); err != nil {
+			return fmt.Errorf("Put(%q) failed: %w", name, err)
+		}
+		return nil
+	}
+	if err := put(marker, nil, s2.WithContentType("application/x-directory"), s2.WithMetadata(s2.Metadata{"k": "v"})); err != nil {
+		return err
+	}
+	for _, name := range []string{base + "d-1", base + "d/!a", base + "d/a", base + "d0"} {
+		if err := put(name, []byte("x")); err != nil {
+			return err
+		}
+	}
+
+	got, err := strg.Get(ctx, marker)
+	if err != nil {
+		return fmt.Errorf("Get(%q) failed: %w", marker, err)
+	}
+	if got.Name() != marker || got.Length() != 0 || got.ETag() != emptyETag {
+		errorf("Get(%q) = name %q, length %d, ETag %s; want %q, 0, %s", marker, got.Name(), got.Length(), got.ETag(), marker, emptyETag)
+	}
+	if got.ContentType() != "application/x-directory" || got.Metadata()["k"] != "v" {
+		errorf("Get(%q) = Content-Type %q, metadata %v; want the ones written", marker, got.ContentType(), got.Metadata())
+	}
+	if rc, err := got.Open(); err != nil {
+		errorf("Get(%q).Open() failed: %v", marker, err)
+	} else {
+		if b, err := io.ReadAll(rc); err != nil || len(b) != 0 {
+			errorf("Get(%q).Open() read %q, %v; want an empty body", marker, b, err)
+		}
+		_ = rc.Close()
+	}
+	if ok, err := strg.Exists(ctx, marker); err != nil || !ok {
+		errorf("Exists(%q) = %v, %v; want true", marker, ok, err)
+	}
+	// A prefix holding keys has no marker unless one was written.
+	if ok, err := strg.Exists(ctx, base); err != nil || ok {
+		errorf("Exists(%q) = %v, %v; want false", base, ok, err)
+	}
+	if _, err := strg.Get(ctx, base); !errors.Is(err, s2.ErrNotExist) {
+		errorf("Get(%q) = %v, want ErrNotExist", base, err)
+	}
+	if _, err := s2.Upload(ctx, strg, s2.NewObjectBytes(marker, nil), s2.UploadOptions{IfNoneMatch: "*"}); !errors.Is(err, s2.ErrPreconditionFailed) {
+		errorf("Upload(%q, IfNoneMatch *) over the marker = %v, want ErrPreconditionFailed", marker, err)
+	}
+
+	names := func(objs []s2.Object) []string {
+		out := make([]string, len(objs))
+		for i, o := range objs {
+			out[i] = o.Name()
+		}
+		return out
+	}
+	// Byte order, as S3 lists: "d-1" < "d/" < "d/!a" < "d0".
+	wantAll := []string{base + "d-1", marker, base + "d/!a", base + "d/a", base + "d0"}
+	res, err := strg.List(ctx, s2.ListOptions{Prefix: base, Recursive: true})
+	if err != nil {
+		return fmt.Errorf("List(%q, recursive) failed: %w", base, err)
+	}
+	if got := names(res.Objects); !slices.Equal(got, wantAll) {
+		errorf("List(%q, recursive) = %v, want %v", base, got, wantAll)
+	}
+	res, err = strg.List(ctx, s2.ListOptions{Prefix: marker})
+	if err != nil {
+		return fmt.Errorf("List(%q) failed: %w", marker, err)
+	}
+	if got, want := names(res.Objects), []string{marker, base + "d/!a", base + "d/a"}; !slices.Equal(got, want) {
+		errorf("List(%q) = %v, want %v", marker, got, want)
+	}
+	// A non-recursive listing reads its prefix as a directory, with or without the "/".
+	res, err = strg.List(ctx, s2.ListOptions{Prefix: base + "d"})
+	if err != nil {
+		return fmt.Errorf("List(%q) failed: %w", base+"d", err)
+	}
+	if got, want := names(res.Objects), []string{marker, base + "d/!a", base + "d/a"}; !slices.Equal(got, want) {
+		errorf("List(%q) = %v, want %v", base+"d", got, want)
+	}
+	paged := []string{}
+	flat := s2.ListOptions{Prefix: marker, Limit: 1}
+	for range 4 {
+		res, err := strg.List(ctx, flat)
+		if err != nil {
+			return fmt.Errorf("List(%q, Limit 1) failed: %w", marker, err)
+		}
+		paged = append(paged, names(res.Objects)...)
+		if res.NextAfter == "" {
+			break
+		}
+		flat.After = res.NextAfter
+	}
+	if want := []string{marker, base + "d/!a", base + "d/a"}; !slices.Equal(paged, want) {
+		errorf("List(%q) page by page = %v, want %v", marker, paged, want)
+	}
+	// One level up, the marker folds into its common prefix.
+	res, err = strg.List(ctx, s2.ListOptions{Prefix: base})
+	if err != nil {
+		return fmt.Errorf("List(%q) failed: %w", base, err)
+	}
+	if got, want := names(res.Objects), []string{base + "d-1", base + "d0"}; !slices.Equal(got, want) || !slices.Equal(res.CommonPrefixes, []string{marker}) {
+		errorf("List(%q) = %v, prefixes %v; want %v, prefixes [%s]", base, got, res.CommonPrefixes, want, marker)
+	}
+	// Page by page, and resumed right after the marker.
+	paged = nil
+	opts := s2.ListOptions{Prefix: base, Recursive: true, Limit: 1}
+	for range len(wantAll) + 1 {
+		res, err := strg.List(ctx, opts)
+		if err != nil {
+			return fmt.Errorf("List(%q, recursive, Limit 1) failed: %w", base, err)
+		}
+		paged = append(paged, names(res.Objects)...)
+		if res.NextAfter == "" {
+			break
+		}
+		opts.After = res.NextAfter
+	}
+	if !slices.Equal(paged, wantAll) {
+		errorf("List(%q, recursive) page by page = %v, want %v", base, paged, wantAll)
+	}
+	res, err = strg.List(ctx, s2.ListOptions{Prefix: base, Recursive: true, StartAfter: marker})
+	if err != nil {
+		return fmt.Errorf("List(%q, StartAfter %q) failed: %w", base, marker, err)
+	}
+	if got, want := names(res.Objects), wantAll[2:]; !slices.Equal(got, want) {
+		errorf("List(%q, StartAfter %q) = %v, want %v", base, marker, got, want)
+	}
+	if n, err := s2.Count(ctx, strg, s2.CountOptions{Prefix: marker}); err != nil || n.Objects != 3 {
+		errorf("Count(%q) = %v, %v; want 3", marker, n.Objects, err)
+	}
+	if n, err := s2.Count(ctx, strg, s2.CountOptions{Prefix: marker, UpTo: 1}); err != nil || n.Objects != 1 || !n.Truncated {
+		errorf("Count(%q, UpTo 1) = %+v, %v; want 1, truncated", marker, n, err)
+	}
+
+	// Inside a Sub of the marker's directory, the marker would be named "", which names nothing.
+	sub, err := strg.Sub(ctx, base+"d")
+	if err != nil {
+		return fmt.Errorf("Sub(%q) failed: %w", base+"d", err)
+	}
+	res, err = sub.List(ctx, s2.ListOptions{Recursive: true})
+	if err != nil {
+		return fmt.Errorf("Sub(%q).List failed: %w", base+"d", err)
+	}
+	if got, want := names(res.Objects), []string{"!a", "a"}; !slices.Equal(got, want) {
+		errorf("Sub(%q).List(recursive) = %v, want %v", base+"d", got, want)
+	}
+
+	if err := strg.PutMetadata(ctx, marker, s2.Metadata{"k": "w"}); err != nil {
+		errorf("PutMetadata(%q) failed: %v", marker, err)
+	} else if got, err := strg.Get(ctx, marker); err != nil || got.Metadata()["k"] != "w" {
+		errorf("Get(%q) after PutMetadata = %v; want metadata k=w", marker, err)
+	}
+	copied, moved := base+"copied/", base+"moved/"
+	if err := strg.Copy(ctx, marker, copied); err != nil {
+		errorf("Copy(%q, %q) failed: %v", marker, copied, err)
+	} else if got, err := strg.Get(ctx, copied); err != nil || got.Length() != 0 || got.Metadata()["k"] != "w" {
+		errorf("Get(%q) after Copy = %v; want the marker's metadata", copied, err)
+	}
+	if err := s2.Move(ctx, strg, copied, moved); err != nil {
+		errorf("Move(%q, %q) failed: %v", copied, moved, err)
+	} else {
+		if ok, _ := strg.Exists(ctx, copied); ok {
+			errorf("Exists(%q) after Move = true", copied)
+		}
+		if got, err := strg.Get(ctx, moved); err != nil || got.Metadata()["k"] != "w" {
+			errorf("Get(%q) after Move = %v; want the marker's metadata", moved, err)
+		}
+	}
+
+	// A marker outlives the last key under it, and keeps its prefix listed.
+	kept := base + "e/"
+	if err := put(kept, nil); err != nil {
+		return err
+	}
+	if err := put(kept+"x", []byte("x")); err != nil {
+		return err
+	}
+	if err := strg.Delete(ctx, kept+"x"); err != nil {
+		errorf("Delete(%q) failed: %v", kept+"x", err)
+	}
+	if ok, err := strg.Exists(ctx, kept); err != nil || !ok {
+		errorf("Exists(%q) after deleting the last key under it = %v, %v; want true", kept, ok, err)
+	}
+	if res, err := strg.List(ctx, s2.ListOptions{Prefix: base}); err != nil || !slices.Contains(res.CommonPrefixes, kept) {
+		errorf("List(%q) = prefixes %v, %v; want %q among them", base, res.CommonPrefixes, err, kept)
+	}
+
+	// A prefix selects by string, so one past the marker leaves it.
+	if err := strg.DeleteRecursive(ctx, base+"d/a"); err != nil {
+		errorf("DeleteRecursive(%q) failed: %v", base+"d/a", err)
+	}
+	for name, want := range map[string]bool{marker: true, base + "d/!a": true, base + "d/a": false} {
+		if ok, err := strg.Exists(ctx, name); err != nil || ok != want {
+			errorf("Exists(%q) after DeleteRecursive(%q) = %v, %v; want %v", name, base+"d/a", ok, err, want)
+		}
+	}
+
+	// Deleting the marker leaves the keys under it, and deleting it again is a no-op.
+	for range 2 {
+		if err := strg.Delete(ctx, marker); err != nil {
+			errorf("Delete(%q) failed: %v", marker, err)
+		}
+	}
+	if ok, _ := strg.Exists(ctx, marker); ok {
+		errorf("Exists(%q) after Delete = true", marker)
+	}
+	if ok, err := strg.Exists(ctx, base+"d/!a"); err != nil || !ok {
+		errorf("Exists(%q) after deleting the marker = %v, %v; want true", base+"d/!a", ok, err)
+	}
+	// DeleteRecursive over the prefix takes a marker with the rest.
+	if err := put(marker, nil); err != nil {
+		return err
+	}
+	if err := strg.DeleteRecursive(ctx, marker); err != nil {
+		errorf("DeleteRecursive(%q) failed: %v", marker, err)
+	}
+	if n, err := s2.Count(ctx, strg, s2.CountOptions{Prefix: marker}); err != nil || n.Objects != 0 {
+		errorf("Count(%q) after DeleteRecursive = %v, %v; want 0", marker, n.Objects, err)
+	}
+	// So does emptying a Sub of its directory, though the Sub never lists it.
+	if err := put(marker, nil); err != nil {
+		return err
+	}
+	if err := put(base+"d/z", []byte("z")); err != nil {
+		return err
+	}
+	if err := sub.DeleteRecursive(ctx, ""); err != nil {
+		errorf("Sub(%q).DeleteRecursive(\"\") failed: %v", base+"d", err)
+	}
+	if ok, err := strg.Exists(ctx, marker); err != nil || ok {
+		errorf("Exists(%q) after Sub(%q).DeleteRecursive(\"\") = %v, %v; want false", marker, base+"d", ok, err)
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "\n"))
+	}
+	return nil
+}
+
+// TestStorageDirMarkerBesideObject validates that "x" and the marker "x/" are two objects, as on S3, for a backend that holds both.
+// A backend joining names with path.Join folds "x/" onto "x" and fails it.
+func TestStorageDirMarkerBesideObject(ctx context.Context, strg s2.Storage) error {
+	const object, marker = "s2test-beside", "s2test-beside/"
+	defer func() {
+		ctx := context.WithoutCancel(ctx)
+		_ = strg.Delete(ctx, object)
+		_ = strg.Delete(ctx, marker)
+	}()
+
+	if err := strg.Put(ctx, s2.NewObjectBytes(object, []byte("object"))); err != nil {
+		return fmt.Errorf("Put(%q) failed: %w", object, err)
+	}
+	if ok, err := strg.Exists(ctx, marker); err != nil || ok {
+		return fmt.Errorf("Exists(%q) beside %q alone = %v, %v; want false", marker, object, ok, err)
+	}
+	if err := strg.Put(ctx, s2.NewObjectBytes(marker, nil)); err != nil {
+		return fmt.Errorf("Put(%q) failed: %w", marker, err)
+	}
+	if err := strg.PutMetadata(ctx, marker, s2.Metadata{"k": "marker"}); err != nil {
+		return fmt.Errorf("PutMetadata(%q) failed: %w", marker, err)
+	}
+	if err := strg.Delete(ctx, marker); err != nil {
+		return fmt.Errorf("Delete(%q) failed: %w", marker, err)
+	}
+	got, err := strg.Get(ctx, object)
+	if err != nil {
+		return fmt.Errorf("Get(%q) after writing and deleting %q: %w", object, marker, err)
+	}
+	if got.Length() != uint64(len("object")) || got.Metadata()["k"] != "" {
+		return fmt.Errorf("Get(%q) = length %d, metadata %v: the operations on %q reached it", object, got.Length(), got.Metadata(), marker)
 	}
 	return nil
 }

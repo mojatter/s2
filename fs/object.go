@@ -30,11 +30,16 @@ type object struct {
 	loadErr error
 }
 
+// newObjectFileInfo describes name from info, its body's, or a marker's metadata file's, as a marker has no body.
 func newObjectFileInfo(fsys fs.FS, name string, info fs.FileInfo) *object {
+	var length uint64
+	if !isMarker(name) {
+		length = s2.MustUint64(info.Size())
+	}
 	return &object{
 		fsys:         fsys,
 		name:         name,
-		length:       s2.MustUint64(info.Size()),
+		length:       length,
 		lastModified: info.ModTime(),
 	}
 }
@@ -45,6 +50,9 @@ func (o *object) Name() string {
 
 // Open refuses a body of another length or modification time than Get saw, so a Put since Get cannot pair it with what Get returned (#349); a deleted one, or a directory, is s2.ErrNotExist.
 func (o *object) Open() (io.ReadCloser, error) {
+	if isMarker(o.name) {
+		return o.openMarker()
+	}
 	f, err := o.fsys.Open(o.name)
 	// ENOTDIR: a Put since Get made a parent a file, so the key is gone as well.
 	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
@@ -68,6 +76,21 @@ func (o *object) Open() (io.ReadCloser, error) {
 		return nil, fmt.Errorf("%w: %s", s2.ErrModified, o.name)
 	}
 	return f, nil
+}
+
+// openMarker opens a marker's empty body, failing once the marker is gone; its body cannot change, so a metadata update leaves it open as it leaves a body's.
+func (o *object) openMarker() (io.ReadCloser, error) {
+	info, err := fs.Stat(o.fsys, metaPath(o.name))
+	if isMissingMeta(err) {
+		return nil, fmt.Errorf("%w: %w", s2.ErrNotExist, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, o.name)
+	}
+	return io.NopCloser(bytes.NewReader(nil)), nil
 }
 
 // load reads the sidecar once; List results call it lazily, Get eagerly.
@@ -164,14 +187,18 @@ type meta struct {
 }
 
 // metaPath is the metadata file of name, in a .meta beside it, so every view of a directory finds the same one.
+// A marker "d/" has its own in d's .meta, under the reserved name ".meta".
 func metaPath(name string) string {
+	if isMarker(name) {
+		return path.Join(name, metaDir, metaDir)
+	}
 	dir, base := path.Split(name)
 	return path.Join(dir, metaDir, base)
 }
 
-// legacyMetaPath is where v0.19.x kept a nested name's metadata file: under this storage's own .meta.
+// legacyMetaPath is where v0.19.x kept a nested name's metadata file: under this storage's own .meta. No marker had one.
 func legacyMetaPath(name string) (string, bool) {
-	if !strings.Contains(name, "/") {
+	if isMarker(name) || !strings.Contains(name, "/") {
 		return "", false
 	}
 	return path.Join(metaDir, name), true

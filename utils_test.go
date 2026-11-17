@@ -100,6 +100,7 @@ func TestKey(t *testing.T) {
 		{"with prefix", "data", "a.txt", "data/a.txt"},
 		{"prefix with a trailing slash", "data/", "a.txt", "data/a.txt"},
 		{"nested prefix", "data/sub", "a.txt", "data/sub/a.txt"},
+		{"with prefix keeps the trailing slash", "data", "dir/", "data/dir/"},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
@@ -141,8 +142,11 @@ func TestValidateName(t *testing.T) {
 	}{
 		{"plain", "a.txt", false},
 		{"nested", "a/b.txt", false},
-		// A trailing "/" names nothing: path.Join folds it away.
-		{"trailing slash", "a/b/", true},
+		// One trailing "/" names a directory marker.
+		{"marker", "a/b/", false},
+		{"top-level marker", "a/", false},
+		{"two trailing slashes", "a//", true},
+		{"root marker", "./", true},
 		{"dot inside a name", "a..b", false},
 		{"leading dots in a name", "..a", false},
 		{"a dotfile", ".keep", false},

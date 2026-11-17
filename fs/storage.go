@@ -325,7 +325,7 @@ func (s *storage) loops(dir string, target fs.FileInfo) bool {
 	}
 }
 
-// walk is fs.WalkDir entering a symlinked directory too when follow is set, unless it loops; fn sees a symlink as what it leads to and never sees one leading nowhere.
+// walk is fs.WalkDir entering a symlinked directory too when follow is set, unless it loops; fn sees a symlink as what it leads to and never sees one leading nowhere or, following, looping.
 func (s *storage) walk(root string, follow bool, fn fs.WalkDirFunc) error {
 	return fs.WalkDir(s.fsys, root, func(name string, d fs.DirEntry, err error) error {
 		if err != nil || d.Type()&fs.ModeSymlink == 0 {
@@ -338,6 +338,10 @@ func (s *storage) walk(root string, follow bool, fn fs.WalkDirFunc) error {
 		if target == nil {
 			return nil
 		}
+		// A link's entry holds the target's FileInfo, so Info never fails; a looping one is left out before fn, as keyEntries leaves it out of List.
+		if info, _ := target.Info(); follow && target.IsDir() && s.loops(name, info) {
+			return nil
+		}
 		err = fn(name, target, nil)
 		// fs.WalkDir sees the link as a file, where SkipDir would skip its siblings.
 		if errors.Is(err, fs.SkipDir) || (err == nil && (!target.IsDir() || !follow)) {
@@ -345,11 +349,6 @@ func (s *storage) walk(root string, follow bool, fn fs.WalkDirFunc) error {
 		}
 		if err != nil {
 			return err
-		}
-		// A link's entry holds the target's FileInfo, so Info never fails.
-		info, _ := target.Info()
-		if s.loops(name, info) {
-			return nil
 		}
 		// fs.WalkDir answers nil for SkipAll, so carry it out of the nested walk.
 		skipAll := false
@@ -440,6 +439,17 @@ func (s *storage) listFlat(prefix, after string, limit int) (s2.ListResult, erro
 		CommonPrefixes: make([]string, 0),
 	}
 	last := ""
+	// The listed directory's own marker sorts before every key in it.
+	if dir != "." {
+		obj, err := s.listedMarker(dir)
+		if err != nil {
+			return s2.ListResult{}, err
+		}
+		if obj != nil && obj.name > after {
+			res.Objects = append(res.Objects, obj)
+			last = obj.name
+		}
+	}
 	for _, e := range keyed {
 		if e.key <= after {
 			continue
@@ -493,6 +503,16 @@ func (s *storage) walkKeys(dir, prefix, after string, n int, objs *[]s2.Object) 
 	if err != nil {
 		return err
 	}
+	// dir's own marker sorts before every key in it.
+	if key := dir + "/"; dir != "." && key > after && strings.HasPrefix(key, prefix) && len(*objs) < n {
+		obj, err := s.listedMarker(dir)
+		if err != nil {
+			return err
+		}
+		if obj != nil {
+			*objs = append(*objs, obj)
+		}
+	}
 	for _, e := range keyed {
 		if len(*objs) == n {
 			return nil
@@ -537,6 +557,14 @@ func (s *storage) Count(ctx context.Context, opts s2.CountOptions) (s2.CountResu
 		return s2.CountResult{}, err
 	}
 	var res s2.CountResult
+	add := func() error {
+		res.Objects++
+		if opts.UpTo > 0 && res.Objects > opts.UpTo {
+			res.Truncated = true
+			return fs.SkipAll
+		}
+		return nil
+	}
 	// Every key under prefix lies in its directory.
 	root := path.Dir(prefix)
 	err := s.walk(root, true, func(name string, d fs.DirEntry, err error) error {
@@ -562,17 +590,20 @@ func (s *storage) Count(ctx context.Context, opts s2.CountOptions) (s2.CountResu
 			if name != root && !strings.HasPrefix(name, prefix) {
 				return fs.SkipDir
 			}
-			return nil
+			// Its marker, if any, is a key too.
+			if name == "." || !strings.HasPrefix(name+"/", prefix) {
+				return nil
+			}
+			info, err := s.markerInfo(name)
+			if info == nil || err != nil {
+				return err
+			}
+			return add()
 		}
 		if !strings.HasPrefix(name, prefix) {
 			return nil
 		}
-		res.Objects++
-		if opts.UpTo > 0 && res.Objects > opts.UpTo {
-			res.Truncated = true
-			return fs.SkipAll
-		}
-		return nil
+		return add()
 	})
 	if err != nil {
 		return s2.CountResult{}, err
@@ -599,14 +630,11 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 }
 
 func (s *storage) get(name string) (*object, error) {
-	info, err := fs.Stat(s.fsys, name)
+	info, ok, err := s.statKey(name)
 	if err != nil {
-		if s.noKey(path.Dir(name), err) {
-			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, name)
-		}
-		return nil, fmt.Errorf("failed to stat: %w", err)
+		return nil, err
 	}
-	if info.IsDir() {
+	if !ok || info.IsDir() {
 		return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, name)
 	}
 	obj := newObjectFileInfo(s.fsys, name, info)
@@ -619,22 +647,13 @@ func (s *storage) get(name string) (*object, error) {
 	return obj, nil
 }
 
-// Exists reports whether a path exists under the storage root. Both
-// regular files and directories count as "present"; callers that need
-// to distinguish the two should use Get (which rejects directories)
-// or List (which only enumerates directories).
+// Exists reports whether name is an object or a directory, or, for a name ending in "/", a stored marker.
 func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
 	if err := validateName(name); err != nil {
 		return false, err
 	}
-	_, err := fs.Stat(s.fsys, name)
-	if err != nil {
-		if s.noKey(path.Dir(name), err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("failed to stat: %w", err)
-	}
-	return true, nil
+	_, ok, err := s.statKey(name)
+	return ok, err
 }
 
 var _ s2.Uploader = (*storage)(nil)
@@ -660,6 +679,12 @@ func (s *storage) Upload(ctx context.Context, obj s2.Object, opts s2.UploadOptio
 	}
 	defer func() { _ = rc.Close() }()
 
+	// Before the lock, which a body still arriving would otherwise hold.
+	if isMarker(name) {
+		if err := emptyBody(name, obj.Length(), rc); err != nil {
+			return s2.UploadResult{}, err
+		}
+	}
 	var check func() error
 	if opts.Conditional() {
 		check = func() error { return s.checkUpload(name, opts) }
@@ -686,6 +711,9 @@ func (s *storage) checkUpload(name string, opts s2.UploadOptions) error {
 func (s *storage) write(ctx context.Context, reads []string, name string, check func() error, open func() (io.Reader, meta, error)) (string, error) {
 	if check == nil {
 		check = func() error { return nil }
+	}
+	if isMarker(name) {
+		return s.writeMarker(ctx, reads, name, check, open)
 	}
 	if _, ok := s.fsys.(wfs.RenameFS); !ok {
 		var (
@@ -880,7 +908,7 @@ func (s *storage) pruneIfEmpty(ctx context.Context, name string) {
 	}
 }
 
-// emptied reports whether dir holds nothing but perhaps its .meta, without reading it whole.
+// emptied reports whether dir holds nothing but perhaps a .meta without its marker, without reading it whole.
 func emptied(fsys fs.FS, dir string) bool {
 	if dir == "." {
 		return false
@@ -889,7 +917,15 @@ func emptied(fsys fs.FS, dir string) bool {
 	if err != nil {
 		return false
 	}
-	return len(entries) == 0 || len(entries) == 1 && isMetaDir(entries[0].Name())
+	if len(entries) == 0 {
+		return true
+	}
+	if len(entries) > 1 || !isMetaDir(entries[0].Name()) {
+		return false
+	}
+	// A .meta holding dir's marker keeps dir.
+	_, err = fs.Stat(fsys, metaPath(dir+"/"))
+	return err != nil
 }
 
 // readSome reads up to n entries of dir.
@@ -979,6 +1015,9 @@ func (s *storage) Move(ctx context.Context, src, dst string) error {
 		if err := validateName(name); err != nil {
 			return err
 		}
+	}
+	if isMarker(src) || isMarker(dst) {
+		return s.moveMarker(ctx, src, dst)
 	}
 	// Prefer a direct rename on filesystems that support it: it's atomic and
 	// avoids reading the object body twice.
@@ -1253,6 +1292,9 @@ func (s *storage) Delete(ctx context.Context, name string) error {
 
 // delete removes name's metadata files, then its body, adding the directories it changed to changed; a directory is a prefix, not a key, and stays. Callers hold name's lock.
 func (s *storage) delete(name string, changed *[]string) error {
+	if isMarker(name) {
+		return s.deleteMarker(name, changed)
+	}
 	s.dropMeta(name)
 	info, err := fs.Stat(s.fsys, name)
 	switch {

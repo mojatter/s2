@@ -173,7 +173,7 @@ func (s *azblobStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListR
 			if item.name <= startAfter {
 				continue
 			}
-			if isDirMarker(item.name, item.contentLength) {
+			if s.isRootMarker(item.name) {
 				continue
 			}
 			out.Objects = append(out.Objects, &object{
@@ -248,6 +248,11 @@ func (s *azblobStorage) Exists(ctx context.Context, name string) (bool, error) {
 	}
 	if !isBlobNotFound(err) {
 		return false, err
+	}
+
+	// A marker is an object like any other, so only its own lookup answers for it.
+	if strings.HasSuffix(name, "/") {
+		return false, nil
 	}
 
 	// Fallback: probe for any blob under "<name>/".
@@ -393,11 +398,9 @@ func (s *azblobStorage) SignedURL(_ context.Context, opts s2.SignedURLOptions) (
 
 // --- helpers ---
 
+// key is name's full key; not path.Join, which drops a marker's trailing "/" and so names its neighbour.
 func (s *azblobStorage) key(name string) string {
-	if s.prefix == "" {
-		return name
-	}
-	return path.Join(s.prefix, name)
+	return s2.Key(s.prefix, name)
 }
 
 // listPrefix is the query prefix for a listing; only a delimited one treats the caller's prefix as a directory.
@@ -425,9 +428,9 @@ func isBlobNotFound(err error) bool {
 	return bloberror.HasCode(err, bloberror.BlobNotFound, bloberror.ContainerNotFound, bloberror.ResourceNotFound)
 }
 
-// isDirMarker reports a zero-byte key ending in "/", a directory marker another tool wrote: s2 cannot name it, so List hides it (#275).
-func isDirMarker(key string, size int64) bool {
-	return size == 0 && strings.HasSuffix(key, "/")
+// isRootMarker reports the marker of the storage's own prefix, which List hides as its name would be "".
+func (s *azblobStorage) isRootMarker(key string) bool {
+	return s.prefix != "" && key == s.prefix+"/"
 }
 
 // joinKeepSlash is path.Join that keeps the trailing slash confining a listing

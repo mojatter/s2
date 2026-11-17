@@ -584,8 +584,8 @@ func (s *StorageTestSuite) TestListPrefixesAreRelative() {
 	s.Equal([]string{"dd/"}, res.CommonPrefixes)
 }
 
-// A zero-byte key ending in "/" is a directory marker another tool wrote: List hides it, DeleteRecursive still removes it (#275).
-func (s *StorageTestSuite) TestListHidesDirMarkers() {
+// A key ending in "/" is a directory marker, listed as any key; only the storage prefix's own is hidden, as its name would be "".
+func (s *StorageTestSuite) TestListDirMarkers() {
 	testCases := []struct {
 		caseName     string
 		prefix       string
@@ -596,16 +596,15 @@ func (s *StorageTestSuite) TestListHidesDirMarkers() {
 		wantPrefixes []string
 		wantErr      string
 	}{
-		{caseName: "zero-byte marker", keys: map[string]string{"photos/": "", "photos/a.jpg": "a"}, opts: s2.ListOptions{Recursive: true}, want: []string{"photos/a.jpg"}},
+		{caseName: "zero-byte marker", keys: map[string]string{"photos/": "", "photos/a.jpg": "a"}, opts: s2.ListOptions{Recursive: true}, want: []string{"photos/", "photos/a.jpg"}},
 		{caseName: "marker with a body", keys: map[string]string{"photos/": "DATA"}, opts: s2.ListOptions{Recursive: true}, want: []string{"photos/"}},
-		{caseName: "delimited listing of the marked prefix", keys: map[string]string{"photos/": "", "photos/a.jpg": "a"}, opts: s2.ListOptions{Prefix: "photos/"}, want: []string{"photos/a.jpg"}},
+		{caseName: "delimited listing of the marked prefix", keys: map[string]string{"photos/": "", "photos/a.jpg": "a"}, opts: s2.ListOptions{Prefix: "photos/"}, want: []string{"photos/", "photos/a.jpg"}},
 		{caseName: "storage prefix's own marker", prefix: "b1", keys: map[string]string{"b1/": "", "b1/a.txt": "a"}, opts: s2.ListOptions{Recursive: true}, want: []string{"a.txt"}},
-		{caseName: "page of markers only", keys: map[string]string{"a/": "", "b.txt": "b"}, opts: s2.ListOptions{Recursive: true, Limit: 1}, want: []string{"b.txt"}},
-		{caseName: "run of markers across pages", keys: map[string]string{"a/": "", "b/": "", "c.txt": "c"}, opts: s2.ListOptions{Recursive: true, Limit: 1}, want: []string{"c.txt"}},
-		{caseName: "trailing marker", keys: map[string]string{"a.txt": "a", "b/": ""}, opts: s2.ListOptions{Recursive: true, Limit: 1}, want: []string{"a.txt"}},
-		{caseName: "marker-only prefix still lists as a common prefix", keys: map[string]string{"photos/": ""}, want: []string{}, wantPrefixes: []string{"photos/"}},
-		{caseName: "marker beside the object it folds onto", keys: map[string]string{"photos": "n", "photos/": ""}, opts: s2.ListOptions{Recursive: true}, want: []string{"photos"}},
-		{caseName: "token that does not advance", keys: map[string]string{"a/": "", "b/": "", "c.txt": "c"}, opts: s2.ListOptions{Recursive: true, Limit: 1}, stuck: true, wantErr: "does not advance"},
+		{caseName: "page of the own marker only", prefix: "b1", keys: map[string]string{"b1/": "", "b1/a.txt": "a"}, opts: s2.ListOptions{Recursive: true, Limit: 1}, want: []string{"a.txt"}},
+		{caseName: "markers across pages", keys: map[string]string{"a/": "", "b/": "", "c.txt": "c"}, opts: s2.ListOptions{Recursive: true, Limit: 1}, want: []string{"a/", "b/", "c.txt"}},
+		{caseName: "marker-only prefix lists as a common prefix", keys: map[string]string{"photos/": ""}, want: []string{}, wantPrefixes: []string{"photos/"}},
+		{caseName: "marker beside the object of its name", keys: map[string]string{"photos": "n", "photos/": ""}, opts: s2.ListOptions{Recursive: true}, want: []string{"photos", "photos/"}},
+		{caseName: "token that does not advance", prefix: "b1", keys: map[string]string{"b1/": "", "b1/c.txt": "c"}, opts: s2.ListOptions{Recursive: true, Limit: 1, After: mockContinuationPrefix}, stuck: true, wantErr: "does not advance"},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
@@ -876,6 +875,40 @@ func (s *StorageTestSuite) TestS2TestNameEscape() {
 			_, strg := s.testMockClient()
 			strg.(*storage).prefix = tc.prefix
 			s.Require().NoError(s2test.TestStorageNameEscape(context.Background(), strg))
+		})
+	}
+}
+
+func (s *StorageTestSuite) TestS2TestDirMarker() {
+	testCases := []struct {
+		caseName string
+		prefix   string
+	}{
+		{caseName: "no prefix"},
+		{caseName: "with prefix", prefix: "pfx"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			_, strg := s.testMockClient()
+			strg.(*storage).prefix = tc.prefix
+			s.Require().NoError(s2test.TestStorageDirMarker(context.Background(), strg))
+		})
+	}
+}
+
+func (s *StorageTestSuite) TestS2TestDirMarkerBesideObject() {
+	testCases := []struct {
+		caseName string
+		prefix   string
+	}{
+		{caseName: "no prefix"},
+		{caseName: "with prefix", prefix: "pfx"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			_, strg := s.testMockClient()
+			strg.(*storage).prefix = tc.prefix
+			s.Require().NoError(s2test.TestStorageDirMarkerBesideObject(context.Background(), strg))
 		})
 	}
 }
@@ -1418,7 +1451,7 @@ func (s *StorageTestSuite) TestSignedURL() {
 func (s *StorageTestSuite) TestListedObjectOpensItself() {
 	m := newMockS3Client()
 	// A key ending in "/" written by another tool, beside the object whose
-	// name it folds onto; a zero-byte one is hidden as a directory marker.
+	// name path.Join would fold it onto.
 	m.put("mybucket", "photos", []byte("THE NEIGHBOUR"), nil)
 	m.put("mybucket", "photos/", []byte("MARKER"), nil)
 	strg := &storage{client: m, presignClient: m, bucket: "mybucket"}
