@@ -110,7 +110,7 @@ func handleDeleteBucket(s *server.Server, w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// bucketHoldsObjects reports whether the bucket holds an object an S3 client can see; .keep markers do not count.
+// bucketHoldsObjects reports whether the bucket holds an object an S3 client can see: .keep files do not count, directory markers do, as on AWS.
 func bucketHoldsObjects(ctx context.Context, s *server.Server, name string) (bool, error) {
 	strg, err := s.Buckets.Get(ctx, name)
 	if err != nil {

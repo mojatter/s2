@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/mojatter/s2"
@@ -55,13 +56,13 @@ func objectsData(ctx context.Context, s *server.Server, bucket, prefix, search s
 		if err != nil {
 			return nil, err
 		}
-		objs = server.FilterKeep(res.Objects)
+		objs = listedFiles(res.Objects)
 	} else {
 		res, err := strg.List(ctx, s2.ListOptions{Prefix: prefix})
 		if err != nil {
 			return nil, err
 		}
-		objs = server.FilterKeep(res.Objects)
+		objs = listedFiles(res.Objects)
 		// A common prefix ends in "/" (#315); the template adds its own.
 		for _, p := range res.CommonPrefixes {
 			prefixes = append(prefixes, strings.TrimSuffix(p, "/"))
@@ -103,6 +104,12 @@ func objectsData(ctx context.Context, s *server.Server, bucket, prefix, search s
 		"Search":        search,
 		"Truncated":     truncated,
 	}, nil
+}
+
+// listedFiles drops what the console shows as a folder or not at all: .keep files and directory markers.
+func listedFiles(objs []s2.Object) []s2.Object {
+	objs = server.FilterKeep(objs)
+	return slices.DeleteFunc(objs, func(o s2.Object) bool { return strings.HasSuffix(o.Name(), "/") })
 }
 
 // writeObjectsFragment renders the objects.html fragment for an htmx swap.
@@ -290,7 +297,7 @@ func handleDeleteObject(s *server.Server, w http.ResponseWriter, r *http.Request
 			// plain 200, so the user has no way to tell that the folder
 			// was only partially cleared, or why it stopped where it did.
 			//
-			// .keep markers aren't filtered out here (unlike elsewhere):
+			// .keep files and directory markers aren't filtered out here (unlike elsewhere):
 			// they're deleted like any other object under the same
 			// wildcard grant, so an authorized folder doesn't linger empty.
 			after := ""
@@ -369,7 +376,7 @@ func searchFolder(ctx context.Context, strg s2.Storage, folder, listPrefix strin
 			return nil, false, err
 		}
 		for _, obj := range res.Objects {
-			if !strings.HasPrefix(obj.Name(), listPrefix) {
+			if !strings.HasPrefix(obj.Name(), listPrefix) || strings.HasSuffix(obj.Name(), "/") {
 				continue
 			}
 			if len(objs) == maxSearchMatches {

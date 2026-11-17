@@ -337,8 +337,12 @@ func (s *BucketsTestSuite) TestDeleteBucketNotEmpty() {
 		{caseName: "empty", bucket: "nb-empty", wantStatus: http.StatusNoContent},
 		{caseName: "one object", bucket: "nb-one", keys: []string{"k"}, wantStatus: http.StatusConflict},
 		{caseName: "nested object", bucket: "nb-nested", keys: []string{"dir/sub/k"}, wantStatus: http.StatusConflict},
-		{caseName: "console folders only", bucket: "nb-folders", keys: []string{"dir/", "dir/sub/"}, wantStatus: http.StatusNoContent},
-		{caseName: "a .keep written under a folder key", bucket: "nb-userkeep", keys: []string{"docs/.keep"}, wantStatus: http.StatusNoContent},
+		// A console folder is a directory marker, which S3 lists, so it keeps the bucket as on AWS.
+		{caseName: "console folders only", bucket: "nb-folders", keys: []string{"dir/", "dir/sub/"}, wantStatus: http.StatusConflict},
+		// A folder made before v0.33.0 is a .keep object, which listings hide.
+		{caseName: "pre-v0.33.0 console folders only", bucket: "nb-userkeep", keys: []string{"docs/.keep"}, wantStatus: http.StatusNoContent},
+		// A marker named .keep/ is a folder, not a .keep file.
+		{caseName: "a directory marker named .keep", bucket: "nb-keepmarker", keys: []string{"photos/.keep/"}, wantStatus: http.StatusConflict},
 		{caseName: "object without the bucket marker", bucket: "nb-nomarker", keys: []string{"k"}, dropMarker: true, wantStatus: http.StatusConflict},
 		{caseName: "trailing slash", bucket: "nb-slash", keys: []string{"k"}, trailingSlash: true, wantStatus: http.StatusConflict},
 	}
@@ -499,7 +503,7 @@ func TestNamesBucketSubresource(t *testing.T) {
 	}
 }
 
-// TestDeleteBucketNotEmptyPaged finds an object past a first page of .keep markers alone, on memfs as 1001 folders are slow on disk.
+// TestDeleteBucketNotEmptyPaged finds an object past a first page of hidden .keep files alone, as pre-v0.33.0 console folders hold, on memfs as 1001 folders are slow on disk.
 func TestDeleteBucketNotEmptyPaged(t *testing.T) {
 	ctx := context.Background()
 	cfg := server.DefaultConfig()
@@ -507,11 +511,11 @@ func TestDeleteBucketNotEmptyPaged(t *testing.T) {
 	srv, err := server.NewServer(ctx, cfg)
 	require.NoError(t, err)
 	require.NoError(t, srv.Buckets.Create(ctx, "paged"))
-	for i := range maxObjectKeys + 1 {
-		require.NoError(t, srv.Buckets.CreateFolder(ctx, "paged", fmt.Sprintf("f%05d", i)))
-	}
 	strg, err := srv.Buckets.Get(ctx, "paged")
 	require.NoError(t, err)
+	for i := range maxObjectKeys + 1 {
+		require.NoError(t, strg.Put(ctx, s2.NewObjectBytes(fmt.Sprintf("f%05d/.keep", i), nil)))
+	}
 	// "zzz/k" sorts after every folder, so only the second page holds it.
 	require.NoError(t, strg.Put(ctx, s2.NewObjectBytes("zzz/k", []byte("body"))))
 

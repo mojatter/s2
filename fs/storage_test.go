@@ -335,6 +335,22 @@ func (s *StorageTestSuite) TestS2TestNameEscape() {
 	s.Require().NoError(s2test.TestStorageNameEscape(context.Background(), strg))
 }
 
+func (s *StorageTestSuite) TestS2TestDirMarker() {
+	testCases := []struct {
+		caseName string
+		strg     s2.Storage
+	}{
+		{caseName: "memfs", strg: NewStorageMem(s2.Config{})},
+		{caseName: "osfs", strg: NewStorageDir(s.T().TempDir())},
+		{caseName: "confined root", strg: NewStorageDir(s.T().TempDir(), WithConfinedRoot())},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.Require().NoError(s2test.TestStorageDirMarker(context.Background(), tc.strg))
+		})
+	}
+}
+
 func (s *StorageTestSuite) TestS2TestSubConsistency() {
 	testCases := []struct {
 		caseName string
@@ -1295,6 +1311,8 @@ func (s *StorageTestSuite) TestListSeesASymlinkAsItsTarget() {
 	} {
 		s.Require().NoError(os.Symlink(filepath.Join(tmp, target), filepath.Join(tmp, link)))
 	}
+	// A marker the looping ext/loop reaches again, which neither List nor Count may take twice.
+	s.Require().NoError(strg.Put(ctx, s2.NewObjectBytes("ext/", nil)))
 
 	testCases := []struct {
 		caseName     string
@@ -1310,11 +1328,12 @@ func (s *StorageTestSuite) TestListSeesASymlinkAsItsTarget() {
 		{
 			caseName:    "recursive from above",
 			opts:        s2.ListOptions{Recursive: true},
-			wantObjects: []string{"ext/2024/a.txt", "file.txt", "top.txt"},
+			wantObjects: []string{"ext/", "ext/2024/a.txt", "file.txt", "top.txt"},
 		},
 		{
 			caseName:     "inside the link",
 			opts:         s2.ListOptions{Prefix: "ext/"},
+			wantObjects:  []string{"ext/"},
 			wantPrefixes: []string{"ext/2024/"},
 		},
 		{
@@ -1326,7 +1345,7 @@ func (s *StorageTestSuite) TestListSeesASymlinkAsItsTarget() {
 		{
 			caseName:    "recursive from a prefix of the link's name",
 			opts:        s2.ListOptions{Prefix: "e", Recursive: true},
-			wantObjects: []string{"ext/2024/a.txt"},
+			wantObjects: []string{"ext/", "ext/2024/a.txt"},
 		},
 	}
 	for _, tc := range testCases {

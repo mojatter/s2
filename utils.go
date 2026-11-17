@@ -25,33 +25,36 @@ func MustUint64(v int64) uint64 {
 }
 
 // ValidateName wraps [ErrInvalidName] unless name is already the name the
-// storage will use: exactly [fs.ValidPath]. A name that only resolves after
-// cleaning -- "../x", "/x", "./x", "a//b", "x/" -- is rejected rather than
-// folded, so the name a caller authorizes is the name it reads.
+// storage will use: [fs.ValidPath], optionally followed by one "/", which
+// names a directory marker such as the AWS console writes. A name that only
+// resolves after cleaning -- "../x", "/x", "./x", "a//b", "x//" -- is
+// rejected rather than folded, so the name a caller authorizes is the name it reads.
 func ValidateName(name string) error {
 	// fs.ValidPath accepts "." as the root of an FS; a storage name may not
 	// be the root itself.
-	if name == "." || !fs.ValidPath(name) {
+	if base := strings.TrimSuffix(name, "/"); base == "." || !fs.ValidPath(base) {
 		return fmt.Errorf("%w: %s", ErrInvalidName, name)
 	}
 	return nil
 }
 
 // ValidatePrefix is [ValidateName] for a value that selects objects rather
-// than naming one: "" selects everything, and one trailing "/" confines the
-// selection to a directory. Listing cursors take it too, since they are
-// compared against names rather than resolved to one.
+// than naming one, so "" selects everything. Listing cursors take it too,
+// since they are compared against names rather than resolved to one.
 func ValidatePrefix(prefix string) error {
 	if prefix == "" {
 		return nil
 	}
-	return ValidateName(strings.TrimSuffix(prefix, "/"))
+	return ValidateName(prefix)
 }
 
-// Key joins a storage prefix and an object name.
+// Key joins a storage prefix and an object name, keeping a marker's trailing "/".
 func Key(prefix, name string) string {
 	if prefix == "" {
 		return name
+	}
+	if strings.HasSuffix(name, "/") {
+		return path.Join(prefix, name) + "/"
 	}
 	return path.Join(prefix, name)
 }

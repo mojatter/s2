@@ -16,6 +16,7 @@ import (
 	"github.com/mojatter/s2"
 	"github.com/mojatter/wfs"
 	"github.com/mojatter/wfs/memfs"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -445,6 +446,28 @@ func (s *ObjectTestSuite) TestOpenRangeExposesTheFile() {
 			b, err := io.ReadAll(rc)
 			s.Require().NoError(err)
 			s.Equal("world", string(b))
+		})
+	}
+}
+
+func TestMetaPath(t *testing.T) {
+	testCases := []struct {
+		caseName   string
+		name       string
+		want       string
+		wantLegacy string
+	}{
+		{caseName: "top-level object", name: "a.txt", want: ".meta/a.txt"},
+		{caseName: "nested object", name: "d/a.txt", want: "d/.meta/a.txt", wantLegacy: ".meta/d/a.txt"},
+		{caseName: "marker", name: "d/", want: "d/.meta/.meta"},
+		{caseName: "nested marker", name: "a/d/", want: "a/d/.meta/.meta"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			assert.Equal(t, tc.want, metaPath(tc.name))
+			legacy, ok := legacyMetaPath(tc.name)
+			assert.Equal(t, tc.wantLegacy, legacy)
+			assert.Equal(t, tc.wantLegacy != "", ok)
 		})
 	}
 }

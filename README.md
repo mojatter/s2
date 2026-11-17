@@ -114,8 +114,8 @@ $S2_SERVER_ROOT/
 │   │   └── logo.png        # JSON metadata file for logo.png (etag, content_type, metadata)
 │   ├── logo.png
 │   └── css/
-│       ├── .keep
 │       ├── .meta/
+│       │   ├── .meta       # directory marker css/, as the console makes a folder (no body)
 │       │   └── style.css   # metadata file for css/style.css, beside it
 │       └── style.css
 └── uploads/
@@ -533,7 +533,7 @@ s2-server -f config.json
 | GET | `/{bucket}/{key...}?uploadId` | ListParts |
 | GET, HEAD | `/healthz` | Health check (configurable via `S2_SERVER_HEALTH_PATH`) |
 
-`DeleteBucket` refuses a bucket that still holds objects with `409 BucketNotEmpty`; `.keep` markers, which S3 listings hide (the bucket marker and console folders), do not count, and unfinished multipart uploads do not block it. The console's delete removes the contents.
+`DeleteBucket` refuses a bucket that still holds objects with `409 BucketNotEmpty`. A directory marker counts, as on AWS, and so does a console folder, which is one since v0.33.0. `.keep` files, which S3 listings hide (the bucket marker and console folders made before v0.33.0), do not count, and unfinished multipart uploads do not block it. The console's delete removes the contents.
 
 Custom metadata is supported via `x-amz-meta-*` headers on PutObject/CopyObject and returned on GetObject/HeadObject. `Content-Type` and `ETag` are not metadata: they are attributes the backend owns, described in [docs/backends.md](docs/backends.md#content-type-and-etag).
 

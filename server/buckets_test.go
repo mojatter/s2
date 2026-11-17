@@ -271,10 +271,14 @@ func (s *BucketsTestSuite) TestCreateFolder() {
 	strg, err := s.buckets.Get(ctx, "fb")
 	s.Require().NoError(err)
 
-	// sub/dir/.keep should exist under the bucket
+	// The folder is the directory marker "sub/dir/", as the AWS console writes.
+	ok, err := strg.Exists(ctx, "sub/dir/")
+	s.Require().NoError(err)
+	s.True(ok)
 	res, err := strg.List(ctx, s2.ListOptions{Prefix: "sub/", Recursive: true})
 	s.Require().NoError(err)
-	s.NotEmpty(res.Objects)
+	s.Require().Len(res.Objects, 1)
+	s.Equal("sub/dir/", res.Objects[0].Name())
 
 	// "sub/" should appear as a prefix in directory listing
 	res, err = strg.List(ctx, s2.ListOptions{})
@@ -626,17 +630,24 @@ func (s *BucketsTestSuite) TestGetAfterDelete() {
 }
 
 func (s *BucketsTestSuite) TestFilterKeep() {
-	objs := []s2.Object{
-		s2.NewObjectBytes(".keep", []byte{}),
-		s2.NewObjectBytes("file.txt", []byte("x")),
-		s2.NewObjectBytes("sub/.keep", []byte{}),
-		s2.NewObjectBytes("sub/data.csv", []byte("y")),
+	testCases := []struct {
+		caseName string
+		name     string
+		want     bool
+	}{
+		{caseName: "bucket marker", name: ".keep", want: false},
+		{caseName: "object", name: "file.txt", want: true},
+		{caseName: "pre-v0.33.0 folder", name: "sub/.keep", want: false},
+		{caseName: "nested object", name: "sub/data.csv", want: true},
+		{caseName: "directory marker named .keep", name: ".keep/", want: true},
+		{caseName: "nested directory marker named .keep", name: "sub/.keep/", want: true},
 	}
-
-	filtered := FilterKeep(objs)
-	s.Len(filtered, 2)
-	s.Equal("file.txt", filtered[0].Name())
-	s.Equal("sub/data.csv", filtered[1].Name())
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			got := FilterKeep([]s2.Object{s2.NewObjectBytes(tc.name, nil)})
+			s.Equal(tc.want, len(got) == 1)
+		})
+	}
 }
 
 func (s *BucketsTestSuite) TestFilterKeepEmpty() {

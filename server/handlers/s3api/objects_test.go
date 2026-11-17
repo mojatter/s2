@@ -1918,6 +1918,55 @@ func (s *ObjectsTestSuite) TestTreeConstraintStatus() {
 	}
 }
 
+// TestDirMarker walks a directory marker through the S3 API on fs, step by step, as an S3 client writes and reads one.
+func (s *ObjectsTestSuite) TestDirMarker() {
+	s.createBucket("dm")
+	ts := httptest.NewServer(s.server.S3Handler())
+	defer ts.Close()
+
+	testCases := []struct {
+		caseName     string
+		method       string
+		target       string
+		body         string
+		copySource   string
+		wantStatus   int
+		wantContains string
+	}{
+		{caseName: "put a marker", method: "PUT", target: "/dm/dir/", wantStatus: http.StatusOK},
+		{caseName: "head the marker", method: "HEAD", target: "/dm/dir/", wantStatus: http.StatusOK},
+		{caseName: "put a key under it", method: "PUT", target: "/dm/dir/a.txt", body: "a", wantStatus: http.StatusOK},
+		{caseName: "list the marker first", method: "GET", target: "/dm?list-type=2&prefix=dir/", wantStatus: http.StatusOK, wantContains: "<Key>dir/</Key>"},
+		{caseName: "fold it into its prefix one level up", method: "GET", target: "/dm?list-type=2&delimiter=/", wantStatus: http.StatusOK, wantContains: "<Prefix>dir/</Prefix>"},
+		{caseName: "put a marker named .keep", method: "PUT", target: "/dm/k/.keep/", wantStatus: http.StatusOK},
+		{caseName: "list a marker named .keep, unlike a .keep file", method: "GET", target: "/dm?list-type=2&prefix=k/", wantStatus: http.StatusOK, wantContains: "<Key>k/.keep/</Key>"},
+		{caseName: "fs refuses a marker body", method: "PUT", target: "/dm/body/", body: "x", wantStatus: http.StatusBadRequest},
+		{caseName: "fs refuses an object of the marker's name", method: "PUT", target: "/dm/dir", body: "x", wantStatus: http.StatusBadRequest},
+		{caseName: "copy a marker onto a marker", method: "PUT", target: "/dm/cp/", copySource: "/dm/dir/", wantStatus: http.StatusOK},
+		{caseName: "copy a marker onto an object", method: "PUT", target: "/dm/cp.txt", copySource: "/dm/cp/", wantStatus: http.StatusOK},
+		{caseName: "delete the marker", method: "DELETE", target: "/dm/dir/", wantStatus: http.StatusNoContent},
+		{caseName: "the marker is gone", method: "HEAD", target: "/dm/dir/", wantStatus: http.StatusNotFound},
+		{caseName: "the key under it stays", method: "HEAD", target: "/dm/dir/a.txt", wantStatus: http.StatusOK},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			req, err := http.NewRequest(tc.method, ts.URL+tc.target, strings.NewReader(tc.body))
+			s.Require().NoError(err)
+			if tc.copySource != "" {
+				req.Header.Set("x-amz-copy-source", tc.copySource)
+			}
+			resp, err := ts.Client().Do(req)
+			s.Require().NoError(err)
+			defer func() { _ = resp.Body.Close() }()
+
+			got, err := io.ReadAll(resp.Body)
+			s.Require().NoError(err)
+			s.Equal(tc.wantStatus, resp.StatusCode, "%s", got)
+			s.Contains(string(got), tc.wantContains)
+		})
+	}
+}
+
 // --- DeleteObject ---
 
 func (s *ObjectsTestSuite) TestDeleteObject() {

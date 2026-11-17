@@ -16,7 +16,7 @@ The steps below take a root from any version since v0.14.0 to the current one in
 
 1. **While stopped**, if you come from before v0.17.0: remove the multipart parts a pre-v0.16.0 server left behind, `for b in "${S2_SERVER_ROOT:?}"/*/; do rm -rf "${b}__s2mp__" "${b}.meta/__s2mp__"; done` on `osfs`, or delete `<bucket>/__s2mp__/` under the configured root with the provider's own tool on a cloud backend. Uploads in progress are lost either way.
 2. **While stopped**, if `$S2_SERVER_ROOT/.meta` is a directory and `$S2_SERVER_ROOT/.buckets` does not exist yet (a root v0.17.0, v0.18.0 or v0.18.1 served): `mv "${S2_SERVER_ROOT:?}/.meta" "${S2_SERVER_ROOT:?}/.buckets"`. See [v0.18.2](#v0182) for why the order matters.
-3. If you use policies: from before v0.16.0, grant `s3:ListBucketMultipartUploads` and `s3:ListMultipartUploadParts` where `s3:ListBucket` used to cover the multipart listings; from before v0.18.1, console folder creation also needs `s3:PutObject` on `<bucket>/<key>/.keep`; from before v0.20.1, `PUT /{bucket}/` and `DELETE /{bucket}/` need `s3:CreateBucket` and `s3:DeleteBucket`.
+3. If you use policies: from before v0.16.0, grant `s3:ListBucketMultipartUploads` and `s3:ListMultipartUploadParts` where `s3:ListBucket` used to cover the multipart listings; from before v0.18.1, console folder creation also needs `s3:PutObject` on the folder's marker, `<bucket>/<key>/` from v0.33.0 on (`<bucket>/<key>/.keep` before); from before v0.20.1, `PUT /{bucket}/` and `DELETE /{bucket}/` need `s3:CreateBucket` and `s3:DeleteBucket`.
 4. Start the new version.
 5. Once the new version has run, do not roll back below v0.20.0. Restore the backup instead.
 6. The steps above are only what must happen before the new version starts; read each version section you crossed for what clients see differently.
@@ -24,6 +24,14 @@ The steps below take a root from any version since v0.14.0 to the current one in
 ## Versions
 
 Each section lists whether the data at rest changes, what to do, and, where known, what a downgrade does. A version not listed here changes nothing on disk and needs no step; what its responses change is in its release notes.
+
+### v0.33.0
+
+- **Data at rest:** what is stored is read as before, and nothing needs migrating. New is the directory marker, a key ending in `/` such as `photos/`, which PutObject and the console now store ([#531](https://github.com/mojatter/s2/issues/531)); on `osfs` and `memfs` it is the file `photos/.meta/.meta`. Downgrading to v0.32.0 is safe but hides the markers written meanwhile: v0.32.0 answers `400 InvalidArgument` for their names and lists none of the zero-byte ones, though a folder that holds nothing but its marker still lists as a common prefix.
+- PutObject, HeadObject, GetObject, DeleteObject and CopyObject of a key ending in one `/` now act on that marker, as on S3, where v0.32.0 answered `400 InvalidArgument`. Deleting it leaves the keys under it, and ListObjects returns it before them, or folds it into its common prefix one level up. On an `s3`, `gcs` or `azblob` root, the zero-byte markers other tools wrote, which v0.32.0 left out of listings, are now listed too. A client that maps keys to local files should skip a key ending in `/`.
+- On `osfs` and `memfs` a marker holds no body: a PutObject of `photos/` with one answers `400 InvalidArgument` and writes nothing, where S3 stores the body. Nor can `photos` and `photos/` both be stored there, so writing either beside the other answers `400 InvalidArgument`, as an object beside a folder of the same name already did.
+- The console now makes a folder by writing its marker `<key>/` instead of `<key>/.keep`, as the AWS console does, so S3 clients see the folder as an object: HeadObject of `<key>/` answers `200`. A bucket holding nothing but such folders now answers DeleteBucket with `409 BucketNotEmpty`, as on AWS, where folders made before v0.33.0 do not count; the console's bucket delete removes either. Folders made before v0.33.0 stay `.keep` files and keep working; nothing converts them, since a `.keep` the console made cannot be told from one a client uploaded.
+- With policies, console folder creation now authorizes `s3:PutObject` on `<bucket>/<key>/` instead of `<bucket>/<key>/.keep`; a `<bucket>/<key>/*` or `<bucket>/*` resource covers both. A policy naming `.keep` exactly must name the marker instead.
 
 ### v0.32.0
 

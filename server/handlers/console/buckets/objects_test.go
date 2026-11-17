@@ -154,6 +154,31 @@ func (s *ObjectsTestSuite) TestHandleObjects() {
 			wantContains: []string{"file.txt", "Parent Directory"},
 		},
 		{
+			// A directory marker is the folder itself, never a file inside it.
+			caseName: "a folder holding only its marker is empty",
+			setup: func() {
+				s.createBucket("marked")
+				s.putObject("marked", "sub/", "")
+			},
+			bucketName:   "marked",
+			url:          "/buckets/marked?prefix=sub",
+			htmx:         true,
+			wantCode:     http.StatusOK,
+			wantContains: []string{"This folder is empty"},
+		},
+		{
+			caseName: "a search does not list markers",
+			setup: func() {
+				s.createBucket("marked-search")
+				s.putObject("marked-search", "sub/", "")
+			},
+			bucketName:   "marked-search",
+			url:          "/buckets/marked-search?search=sub",
+			htmx:         true,
+			wantCode:     http.StatusOK,
+			wantContains: []string{"This folder is empty"},
+		},
+		{
 			caseName:   "nonexistent bucket",
 			setup:      func() {},
 			bucketName: "nope",
@@ -518,7 +543,7 @@ func (s *ObjectsTestSuite) TestHandleCreateFolder() {
 
 		strg, err := s.server.Buckets.Get(context.Background(), "fld4")
 		s.Require().NoError(err)
-		exists, err := strg.Exists(context.Background(), "private/.keep")
+		exists, err := strg.Exists(context.Background(), server.FolderMarker("private"))
 		s.Require().NoError(err)
 		s.False(exists)
 	})
@@ -543,7 +568,7 @@ func (s *ObjectsTestSuite) TestHandleCreateFolder() {
 
 		strg, err := s.server.Buckets.Get(context.Background(), "fld3")
 		s.Require().NoError(err)
-		exists, err := strg.Exists(context.Background(), "secret/.keep")
+		exists, err := strg.Exists(context.Background(), server.FolderMarker("secret"))
 		s.Require().NoError(err)
 		s.False(exists)
 	})
