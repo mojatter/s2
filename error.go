@@ -40,6 +40,7 @@ var ErrUnknownETag = errors.New("s2: object stored but its etag is unknown")
 var ErrInvalidName = errors.New("s2: invalid name")
 
 // ErrModified is returned by Object.Open and OpenRange once the key holds another version than the one Get or List returned; Get the key again to read it.
+// A Copy or PutMetadata that reads the source in several requests returns it when the source changed in between; retry the call.
 var ErrModified = errors.New("s2: object modified since Get")
 
 // ErrPreconditionFailed is returned by Upload when a condition in UploadOptions does not hold; the key is left as it was.

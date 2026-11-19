@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"slices"
 	"strings"
@@ -35,6 +36,9 @@ type mockObject struct {
 	metadata     map[string]string
 	contentType  string
 	etag         string
+	tags         map[string]string
+	// headers holds the HEAD fields beside Content-Type a test sets on the object.
+	headers *s3.HeadObjectOutput
 }
 
 // mockDefaultContentType is what S3 stores when a write sends no Content-Type.
@@ -50,8 +54,10 @@ type mockS3Client struct {
 	notImplemented bool
 	// preconditionFailed answers every PutObject and CompleteMultipartUpload with PreconditionFailed, as a proxy might.
 	preconditionFailed bool
-	uploads            map[string]*mockUpload
-	nextUploadID       int
+	// completeConflict answers every CompleteMultipartUpload with ConditionalRequestConflict, as S3 does for a racing write.
+	completeConflict bool
+	uploads          map[string]*mockUpload
+	nextUploadID     int
 	// maxPartLen is the largest UploadPart body seen.
 	maxPartLen int
 	// checksumAlgorithm is what the last CreateMultipartUpload asked for.
@@ -60,12 +66,35 @@ type mockS3Client struct {
 	stuckToken bool
 	// refuseDelete names a raw key DeleteObjects keeps and reports in Errors.
 	refuseDelete string
+	// copyObjects counts CopyObject calls.
+	copyObjects int
+	// partCopies counts UploadPartCopy calls.
+	partCopies int
+	// getTaggings counts GetObjectTagging calls.
+	getTaggings int
+	// lastCreate is the last CreateMultipartUpload input.
+	lastCreate *s3.CreateMultipartUploadInput
+	// invalidRequest answers every CopyObject with InvalidRequest, whatever the source size.
+	invalidRequest bool
+	// largeCopy accepts CopyObject above maxCopyObjectSize, as s2-server does.
+	largeCopy bool
+	// headErr, if set, answers every HeadObject.
+	headErr error
+	// hideTagCount leaves TagCount out of HeadObject, as S3 does for a caller without s3:GetObjectTagging.
+	hideTagCount bool
+	// denyTagging answers GetObjectTagging with AccessDenied.
+	denyTagging bool
+	// afterCopyObject, if set, runs after each CopyObject the mock refuses.
+	afterCopyObject func()
+	// afterPartCopy, if set, runs after each UploadPartCopy with the count so far.
+	afterPartCopy func(n int)
 }
 
 type mockUpload struct {
 	parts       map[int32][]byte
 	metadata    map[string]string
 	contentType string
+	tags        map[string]string
 }
 
 // mockKey keys the store verbatim. S3 keys are opaque strings, and path.Join
@@ -208,17 +237,48 @@ func (m *mockS3Client) ListObjectsV2(ctx context.Context, params *s3.ListObjects
 }
 
 func (m *mockS3Client) HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
+	m.mu.RLock()
+	headErr, hideTagCount := m.headErr, m.hideTagCount
+	m.mu.RUnlock()
+	if headErr != nil {
+		return nil, headErr
+	}
 	obj, ok := m.get(aws.ToString(params.Bucket), aws.ToString(params.Key))
 	if !ok {
 		return nil, fmt.Errorf("NotFound: %w", &s3types.NoSuchKey{})
 	}
-	return &s3.HeadObjectOutput{
-		ContentLength: aws.Int64(int64(len(obj.body))),
-		LastModified:  aws.Time(obj.lastModified),
-		Metadata:      obj.metadata,
-		ETag:          aws.String(obj.etag),
-		ContentType:   aws.String(obj.contentType),
-	}, nil
+	out := &s3.HeadObjectOutput{}
+	if obj.headers != nil {
+		*out = *obj.headers
+	}
+	out.ContentLength = aws.Int64(int64(len(obj.body)))
+	out.LastModified = aws.Time(obj.lastModified)
+	out.Metadata = obj.metadata
+	out.ETag = aws.String(obj.etag)
+	out.ContentType = aws.String(obj.contentType)
+	if len(obj.tags) > 0 && !hideTagCount {
+		out.TagCount = aws.Int32(int32(len(obj.tags))) // #nosec G115 -- a handful of test tags
+	}
+	return out, nil
+}
+
+func (m *mockS3Client) GetObjectTagging(ctx context.Context, params *s3.GetObjectTaggingInput, optFns ...func(*s3.Options)) (*s3.GetObjectTaggingOutput, error) {
+	obj, ok := m.get(aws.ToString(params.Bucket), aws.ToString(params.Key))
+	if !ok {
+		return nil, &s3types.NoSuchKey{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.getTaggings++
+	if m.denyTagging {
+		return nil, &smithy.GenericAPIError{Code: "AccessDenied"}
+	}
+	out := &s3.GetObjectTaggingOutput{}
+	for k, v := range obj.tags {
+		out.TagSet = append(out.TagSet, s3types.Tag{Key: aws.String(k), Value: aws.String(v)})
+	}
+	return out, nil
 }
 
 func (m *mockS3Client) PutObject(ctx context.Context, params *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
@@ -264,7 +324,19 @@ func (m *mockS3Client) CreateMultipartUpload(ctx context.Context, params *s3.Cre
 	m.nextUploadID++
 	m.checksumAlgorithm = params.ChecksumAlgorithm
 	id := fmt.Sprintf("upload-%d", m.nextUploadID)
-	m.uploads[id] = &mockUpload{parts: make(map[int32][]byte), metadata: params.Metadata, contentType: aws.ToString(params.ContentType)}
+	m.lastCreate = params
+	up := &mockUpload{parts: make(map[int32][]byte), metadata: params.Metadata, contentType: aws.ToString(params.ContentType)}
+	if params.Tagging != nil {
+		q, err := url.ParseQuery(aws.ToString(params.Tagging))
+		if err != nil {
+			return nil, &smithy.GenericAPIError{Code: "InvalidArgument"}
+		}
+		up.tags = make(map[string]string)
+		for k := range q {
+			up.tags[k] = q.Get(k)
+		}
+	}
+	m.uploads[id] = up
 	return &s3.CreateMultipartUploadOutput{Bucket: params.Bucket, Key: params.Key, UploadId: aws.String(id)}, nil
 }
 
@@ -294,6 +366,9 @@ func (m *mockS3Client) CompleteMultipartUpload(ctx context.Context, params *s3.C
 	if !ok {
 		return nil, &s3types.NoSuchUpload{}
 	}
+	if m.completeConflict {
+		return nil, &smithy.GenericAPIError{Code: "ConditionalRequestConflict"}
+	}
 	bucket, key := aws.ToString(params.Bucket), aws.ToString(params.Key)
 	if err := m.refuse(bucket, key, params.IfMatch, params.IfNoneMatch); err != nil {
 		return nil, err
@@ -308,6 +383,7 @@ func (m *mockS3Client) CompleteMultipartUpload(ctx context.Context, params *s3.C
 	sum := md5.Sum(sums) // #nosec G401 -- mirrors S3's ETag
 	etag := fmt.Sprintf(`"%s-%d"`, hex.EncodeToString(sum[:]), len(params.MultipartUpload.Parts))
 	m.objects[mockKey(bucket, key)].etag = etag
+	m.objects[mockKey(bucket, key)].tags = up.tags
 	delete(m.uploads, aws.ToString(params.UploadId))
 	return &s3.CompleteMultipartUploadOutput{Bucket: params.Bucket, Key: params.Key, ETag: aws.String(etag)}, nil
 }
@@ -397,6 +473,15 @@ func (m *mockS3Client) CopyObject(ctx context.Context, params *s3.CopyObjectInpu
 	if !ok {
 		return nil, &s3types.NoSuchKey{}
 	}
+	m.mu.Lock()
+	m.copyObjects++
+	m.mu.Unlock()
+	if m.invalidRequest || (!m.largeCopy && int64(len(srcObj.body)) > maxCopyObjectSize) {
+		if m.afterCopyObject != nil {
+			m.afterCopyObject()
+		}
+		return nil, &smithy.GenericAPIError{Code: "InvalidRequest", Message: "The specified copy source is larger than the maximum allowable size for a copy source"}
+	}
 
 	// COPY keeps the source's metadata and Content-Type; REPLACE takes both from the request.
 	metadata, contentType := srcObj.metadata, srcObj.contentType
@@ -406,6 +491,41 @@ func (m *mockS3Client) CopyObject(ctx context.Context, params *s3.CopyObjectInpu
 
 	m.putWithContentType(aws.ToString(params.Bucket), aws.ToString(params.Key), srcObj.body, metadata, contentType)
 	return &s3.CopyObjectOutput{}, nil
+}
+
+func (m *mockS3Client) UploadPartCopy(ctx context.Context, params *s3.UploadPartCopyInput, optFns ...func(*s3.Options)) (*s3.UploadPartCopyOutput, error) {
+	copySource, err := url.QueryUnescape(aws.ToString(params.CopySource))
+	if err != nil {
+		return nil, &smithy.GenericAPIError{Code: "InvalidArgument"}
+	}
+	srcBucket, srcKey, _ := strings.Cut(copySource, "/")
+	srcObj, ok := m.get(srcBucket, srcKey)
+	if !ok {
+		return nil, &s3types.NoSuchKey{}
+	}
+	if params.CopySourceIfMatch != nil && aws.ToString(params.CopySourceIfMatch) != srcObj.etag {
+		return nil, &smithy.GenericAPIError{Code: "PreconditionFailed"}
+	}
+	var first, last int
+	if _, err := fmt.Sscanf(aws.ToString(params.CopySourceRange), "bytes=%d-%d", &first, &last); err != nil || last >= len(srcObj.body) {
+		return nil, &smithy.GenericAPIError{Code: "InvalidRange"}
+	}
+	b := srcObj.body[first : last+1]
+	m.mu.Lock()
+	up, ok := m.uploads[aws.ToString(params.UploadId)]
+	if ok {
+		up.parts[aws.ToInt32(params.PartNumber)] = b
+		m.partCopies++
+	}
+	after, n := m.afterPartCopy, m.partCopies
+	m.mu.Unlock()
+	if !ok {
+		return nil, &s3types.NoSuchUpload{}
+	}
+	if after != nil {
+		after(n)
+	}
+	return &s3.UploadPartCopyOutput{CopyPartResult: &s3types.CopyPartResult{ETag: aws.String(mockETag(b))}}, nil
 }
 
 type StorageTestSuite struct {
@@ -1453,6 +1573,359 @@ func (s *StorageTestSuite) TestMove() {
 	defer rc.Close()
 	body, _ := io.ReadAll(rc)
 	s.Equal("a", string(body))
+}
+
+// TestCopyOverCopyObjectLimit shrinks the 5 GiB limit so Copy, Move and PutMetadata take UploadPartCopy ranges.
+func (s *StorageTestSuite) TestCopyOverCopyObjectLimit() {
+	defer func(limit, part int64, conc int) {
+		maxCopyObjectSize, copyPartSize, copyConcurrency = limit, part, conc
+	}(maxCopyObjectSize, copyPartSize, copyConcurrency)
+
+	maxCopyObjectSize, copyPartSize = 4, 3
+	body := []byte("0123456789")
+	expires := time.Date(2026, 10, 21, 7, 28, 0, 0, time.UTC)
+	headers := &s3.HeadObjectOutput{
+		CacheControl:            aws.String("no-cache"),
+		ContentDisposition:      aws.String("attachment"),
+		ContentEncoding:         aws.String("gzip"),
+		ContentLanguage:         aws.String("ja"),
+		WebsiteRedirectLocation: aws.String("/elsewhere"),
+		ExpiresString:           aws.String(expires.Format(http.TimeFormat)),
+	}
+	copyBig := func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "big", "big-copy") }
+	putMetadata := func(ctx context.Context, strg s2.Storage) error {
+		return strg.PutMetadata(ctx, "big", s2.Metadata{"new": "w"})
+	}
+	testCases := []struct {
+		caseName string
+		run      func(ctx context.Context, strg s2.Storage) error
+		// concurrency, when set, replaces copyConcurrency.
+		concurrency int
+		// replaceAt rewrites the source after that many part copies; cancelAt cancels the caller's context then.
+		replaceAt int
+		cancelAt  int
+		// invalidRequest refuses CopyObject for another reason than the size.
+		invalidRequest bool
+		// largeCopy accepts CopyObject above the limit; deleteAfterRefusal removes the source once CopyObject is refused.
+		largeCopy          bool
+		deleteAfterRefusal bool
+		// hideTagCount, denyTagging and completeConflict set the mock's switches of the same names.
+		hideTagCount     bool
+		denyTagging      bool
+		completeConflict bool
+		// headFailsAfterRefusal makes HeadObject answer SlowDown once CopyObject is refused.
+		headFailsAfterRefusal bool
+		untagged              bool
+		name                  string
+		metadata              map[string]string
+		// carried is whether the upload carries the source's headers, as a COPY directive keeps them.
+		carried         bool
+		wantCopyObjects int
+		wantParts       int
+		wantTaggings    int
+		wantErr         bool
+		wantErrIs       error
+		// wantErrCodes are API error codes the returned error must wrap.
+		wantErrCodes []string
+	}{
+		{
+			caseName:        "copy",
+			run:             copyBig,
+			name:            "big-copy",
+			metadata:        map[string]string{"k": "v"},
+			carried:         true,
+			wantCopyObjects: 1,
+			wantParts:       4,
+			wantTaggings:    1,
+		},
+		{
+			caseName:        "copy one part at a time",
+			run:             copyBig,
+			concurrency:     1,
+			name:            "big-copy",
+			metadata:        map[string]string{"k": "v"},
+			carried:         true,
+			wantCopyObjects: 1,
+			wantParts:       4,
+			wantTaggings:    1,
+		},
+		{
+			caseName:        "untagged copy",
+			run:             copyBig,
+			untagged:        true,
+			name:            "big-copy",
+			metadata:        map[string]string{"k": "v"},
+			carried:         true,
+			wantCopyObjects: 1,
+			wantParts:       4,
+			wantTaggings:    1,
+		},
+		{
+			caseName:        "tagged copy, HEAD reports no tag count",
+			run:             copyBig,
+			hideTagCount:    true,
+			name:            "big-copy",
+			metadata:        map[string]string{"k": "v"},
+			carried:         true,
+			wantCopyObjects: 1,
+			wantParts:       4,
+			wantTaggings:    1,
+		},
+		{
+			caseName:        "GetObjectTagging refused",
+			run:             copyBig,
+			denyTagging:     true,
+			wantCopyObjects: 1,
+			wantTaggings:    1,
+			wantErr:         true,
+			wantErrCodes:    []string{"AccessDenied"},
+		},
+		{
+			caseName:        "move",
+			run:             func(ctx context.Context, strg s2.Storage) error { return s2.Move(ctx, strg, "big", "big-copy") },
+			name:            "big-copy",
+			metadata:        map[string]string{"k": "v"},
+			carried:         true,
+			wantCopyObjects: 1,
+			wantParts:       4,
+			wantTaggings:    1,
+		},
+		{
+			caseName:        "put metadata",
+			run:             putMetadata,
+			name:            "big",
+			metadata:        map[string]string{"new": "w"},
+			wantCopyObjects: 1,
+			wantParts:       4,
+			wantTaggings:    1,
+		},
+		{
+			caseName:        "put metadata where CopyObject has no limit",
+			run:             putMetadata,
+			largeCopy:       true,
+			untagged:        true,
+			name:            "big",
+			metadata:        map[string]string{"new": "w"},
+			wantCopyObjects: 1,
+		},
+		{
+			caseName:           "source deleted after the refused CopyObject",
+			run:                copyBig,
+			deleteAfterRefusal: true,
+			wantCopyObjects:    1,
+			wantErr:            true,
+			wantErrIs:          s2.ErrNotExist,
+		},
+		{
+			caseName:              "HEAD fails after the refused CopyObject",
+			run:                   copyBig,
+			headFailsAfterRefusal: true,
+			wantCopyObjects:       1,
+			wantErr:               true,
+			wantErrCodes:          []string{"InvalidRequest", "SlowDown"},
+		},
+		{
+			caseName:        "caller's context canceled between parts",
+			run:             copyBig,
+			concurrency:     1,
+			cancelAt:        1,
+			wantCopyObjects: 1,
+			wantParts:       1,
+			wantTaggings:    1,
+			wantErr:         true,
+			wantErrIs:       context.Canceled,
+		},
+		{
+			caseName:        "at the limit",
+			run:             func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "small", "small-copy") },
+			name:            "small-copy",
+			wantCopyObjects: 1,
+		},
+		{
+			caseName:        "invalid request at the limit",
+			run:             func(ctx context.Context, strg s2.Storage) error { return strg.Copy(ctx, "small", "small-copy") },
+			invalidRequest:  true,
+			wantCopyObjects: 1,
+			wantErr:         true,
+		},
+		{
+			caseName:        "source replaced between parts",
+			run:             copyBig,
+			concurrency:     1,
+			replaceAt:       1,
+			wantCopyObjects: 1,
+			wantParts:       1,
+			wantTaggings:    1,
+			wantErr:         true,
+			wantErrIs:       s2.ErrModified,
+		},
+		{
+			caseName:        "put metadata, source replaced before complete",
+			run:             putMetadata,
+			concurrency:     1,
+			replaceAt:       4,
+			wantCopyObjects: 1,
+			wantParts:       4,
+			wantTaggings:    1,
+			wantErr:         true,
+			wantErrIs:       s2.ErrModified,
+		},
+		{
+			caseName:         "put metadata, complete conflicts with a write",
+			run:              putMetadata,
+			completeConflict: true,
+			wantCopyObjects:  1,
+			wantParts:        4,
+			wantTaggings:     1,
+			wantErr:          true,
+			wantErrIs:        s2.ErrModified,
+		},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			m, strg := s.testMockClient()
+			m.putWithContentType("mybucket", "big", body, map[string]string{"k": "v"}, "text/plain")
+			m.putWithContentType("mybucket", "small", body[:4], nil, "text/plain")
+			big, _ := m.get("mybucket", "big")
+			big.headers = headers
+			if !tc.untagged {
+				big.tags = map[string]string{"t": "1 2"}
+			}
+			m.invalidRequest = tc.invalidRequest
+			m.largeCopy = tc.largeCopy
+			m.hideTagCount, m.denyTagging, m.completeConflict = tc.hideTagCount, tc.denyTagging, tc.completeConflict
+			if tc.deleteAfterRefusal {
+				m.afterCopyObject = func() { m.delete("mybucket", "big") }
+			}
+			if tc.headFailsAfterRefusal {
+				m.afterCopyObject = func() {
+					m.mu.Lock()
+					defer m.mu.Unlock()
+
+					m.headErr = &smithy.GenericAPIError{Code: "SlowDown"}
+				}
+			}
+			copyConcurrency = 5
+			if tc.concurrency > 0 {
+				copyConcurrency = tc.concurrency
+			}
+			replaced := []byte("abcdefghij")
+			if tc.replaceAt > 0 {
+				m.afterPartCopy = func(n int) {
+					if n == tc.replaceAt {
+						m.put("mybucket", "big", replaced, nil)
+					}
+				}
+			}
+			if tc.cancelAt > 0 {
+				m.afterPartCopy = func(n int) {
+					if n == tc.cancelAt {
+						cancel()
+					}
+				}
+			}
+
+			err := tc.run(ctx, strg)
+			s.Equal(tc.wantCopyObjects, m.copyObjects)
+			s.Equal(tc.wantParts, m.partCopies)
+			s.Equal(tc.wantTaggings, m.getTaggings)
+			s.Empty(m.uploads, "an upload was left behind")
+			if tc.wantErr {
+				s.Error(err)
+				if tc.wantErrIs != nil {
+					s.ErrorIs(err, tc.wantErrIs)
+				}
+				for _, code := range tc.wantErrCodes {
+					s.True(hasAPIErrorCode(err, code), "%v does not wrap %s", err, code)
+					s.NotErrorIs(err, s2.ErrNotExist)
+				}
+				for _, name := range []string{"big-copy", "small-copy"} {
+					_, ok := m.get("mybucket", name)
+					s.False(ok, "a failed copy wrote %s", name)
+				}
+				if tc.replaceAt > 0 {
+					obj, _ := m.get("mybucket", "big")
+					s.Equal(replaced, obj.body, "the newer write was lost")
+				}
+				return
+			}
+			s.Require().NoError(err)
+			obj, ok := m.get("mybucket", tc.name)
+			s.Require().True(ok)
+			s.Equal(string(body[:len(obj.body)]), string(obj.body))
+			s.Equal("text/plain", obj.contentType)
+			if tc.metadata == nil {
+				return
+			}
+			s.Equal(tc.metadata, obj.metadata)
+			s.Equal(body, obj.body)
+			if tc.untagged {
+				s.Empty(obj.tags)
+			} else {
+				s.Equal(map[string]string{"t": "1 2"}, obj.tags)
+			}
+			in := m.lastCreate
+			if tc.wantParts == 0 {
+				s.Nil(in, "a single CopyObject started an upload")
+				return
+			}
+			if tc.carried {
+				s.Equal(headers.CacheControl, in.CacheControl)
+				s.Equal(headers.ContentDisposition, in.ContentDisposition)
+				s.Equal(headers.ContentEncoding, in.ContentEncoding)
+				s.Equal(headers.ContentLanguage, in.ContentLanguage)
+				s.Nil(in.WebsiteRedirectLocation, "CopyObject does not copy the redirect")
+				s.Require().NotNil(in.Expires)
+				s.True(expires.Equal(*in.Expires), "Expires %v", *in.Expires)
+			} else {
+				s.Nil(in.CacheControl)
+				s.Nil(in.ContentDisposition)
+				s.Nil(in.ContentEncoding)
+				s.Nil(in.ContentLanguage)
+				s.Nil(in.WebsiteRedirectLocation)
+				s.Nil(in.Expires)
+			}
+		})
+	}
+}
+
+// hasAPIErrorCode reports whether any API error err wraps has code, following both branches of a multi-%w error.
+func hasAPIErrorCode(err error, code string) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == code {
+		return true
+	}
+	if u, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, e := range u.Unwrap() {
+			if hasAPIErrorCode(e, code) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *StorageTestSuite) TestCopyPartSizeFor() {
+	testCases := []struct {
+		caseName string
+		size     int64
+		want     int64
+	}{
+		{caseName: "just over CopyObject's limit", size: 5<<30 + 1, want: 1 << 30},
+		{caseName: "10000 parts of 1 GiB", size: maxCopyParts << 30, want: 1 << 30},
+		{caseName: "one byte more", size: maxCopyParts<<30 + 1, want: 1<<30 + 1},
+		{caseName: "50 TB", size: 50e12, want: 5e9},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			got := copyPartSizeFor(tc.size)
+			s.Equal(tc.want, got)
+			s.LessOrEqual((tc.size+got-1)/got, int64(maxCopyParts))
+		})
+	}
 }
 
 func (s *StorageTestSuite) TestSignedURL() {
