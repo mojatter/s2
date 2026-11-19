@@ -9,7 +9,7 @@ require (
 	github.com/aws/smithy-go v1.28.8
 	github.com/chromedp/cdproto v0.159.2
 	github.com/chromedp/chromedp v0.23.0
-	github.com/mojatter/s2 v0.33.0
+	github.com/mojatter/s2 v0.34.0
 	github.com/stretchr/testify v1.12.1
 )
 
