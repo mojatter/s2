@@ -390,7 +390,7 @@ type CopyStorageResult struct {
 // It stops at the first error, keeping what was copied. With Overwrite false and no Uploader on dst,
 // or with dst == src, the check for an existing object is not atomic against a concurrent writer.
 // When dst == src, a DstDir that could place copies inside the selection is refused before copying;
-// a dst that is another view of src, such as a Sub or a wrapper, is not detected and unsupported.
+// a dst that is another view of src, such as a Sub, a wrapper or a second Storage on the same bucket, is not detected and unsupported.
 func CopyStorage(ctx context.Context, src, dst Storage, opts CopyStorageOptions) (res CopyStorageResult, err error) {
 	last := ""
 	defer func() {
