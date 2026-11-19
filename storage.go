@@ -387,8 +387,8 @@ type CopyStorageResult struct {
 }
 
 // CopyStorage copies the objects opts.SrcOptions selects on src to dst, keeping each object's name, Content-Type and metadata.
-// It stops at the first error, keeping what was copied. With Overwrite false and no Uploader on dst,
-// or with dst == src, the check for an existing object is not atomic against a concurrent writer.
+// It stops at the first error, keeping what was copied. With Overwrite false, the check for an existing object is atomic
+// against a concurrent writer only when dst != src and dst's Uploader honours IfNoneMatch.
 // When dst == src, a DstDir that could place copies inside the selection is refused before copying;
 // a dst that is another view of src, such as a Sub, a wrapper or a second Storage on the same bucket, is not detected and unsupported.
 func CopyStorage(ctx context.Context, src, dst Storage, opts CopyStorageOptions) (res CopyStorageResult, err error) {
@@ -538,7 +538,7 @@ func countRejected(err error, res *CopyStorageResult) error {
 	return err
 }
 
-// putIfAbsent writes obj unless an object holds its name, atomically when dst has an Uploader.
+// putIfAbsent writes obj unless an object holds its name, atomically when dst's Uploader honours IfNoneMatch.
 func putIfAbsent(ctx context.Context, dst Storage, obj Object) error {
 	_, err := Upload(ctx, dst, obj, UploadOptions{IfNoneMatch: "*"})
 	// ErrUnknownETag means obj was stored, even when the read-back wraps ErrUnsupported.
