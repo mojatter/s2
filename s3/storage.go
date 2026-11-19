@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"path"
 	"strings"
@@ -29,6 +30,8 @@ type clientAPI interface {
 	DeleteObject(ctx context.Context, params *s3.DeleteObjectInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectOutput, error)
 	DeleteObjects(ctx context.Context, params *s3.DeleteObjectsInput, optFns ...func(*s3.Options)) (*s3.DeleteObjectsOutput, error)
 	CopyObject(ctx context.Context, params *s3.CopyObjectInput, optFns ...func(*s3.Options)) (*s3.CopyObjectOutput, error)
+	UploadPartCopy(ctx context.Context, params *s3.UploadPartCopyInput, optFns ...func(*s3.Options)) (*s3.UploadPartCopyOutput, error)
+	GetObjectTagging(ctx context.Context, params *s3.GetObjectTaggingInput, optFns ...func(*s3.Options)) (*s3.GetObjectTaggingOutput, error)
 }
 
 type presignClientAPI interface {
@@ -456,7 +459,7 @@ func (s *storage) uploadOptions(o *transfermanager.Options) {
 
 // PutMetadata copies the object onto itself, resending its Content-Type, which a REPLACE copy would otherwise reset.
 // A Content-Type kept under the legacy s2-content-type key moves to the object's own.
-// The HeadObject and CopyObject calls are not atomic: a Put between them loses its Content-Type.
+// The HeadObject and the copy are not atomic: a Put between them loses its Content-Type, or above 5 GiB fails with s2.ErrModified.
 func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Metadata) error {
 	if err := s2.ValidateName(name); err != nil {
 		return err
@@ -481,7 +484,16 @@ func (s *storage) PutMetadata(ctx context.Context, name string, metadata s2.Meta
 		MetadataDirective: s3types.MetadataDirectiveReplace,
 		ContentType:       contentType,
 	})
-	return mapNotExist(err, name)
+	// As in Copy, only a provider that refuses the source for its size gets the multipart copy.
+	if !isInvalidRequest(err) || aws.ToInt64(head.ContentLength) <= maxCopyObjectSize {
+		return mapNotExist(err, name)
+	}
+	return mapNotExist(s.copyParts(ctx, name, key, head, &s3.CreateMultipartUploadInput{
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(key),
+		Metadata:    metadata,
+		ContentType: contentType,
+	}), name)
 }
 
 func (s *storage) Copy(ctx context.Context, src, dst string) error {
@@ -490,12 +502,168 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 			return err
 		}
 	}
+	srcKey := s.key(src)
 	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:     aws.String(s.bucket),
 		Key:        aws.String(s.key(dst)),
-		CopySource: aws.String(copySource(s.bucket, s.key(src))),
+		CopySource: aws.String(copySource(s.bucket, srcKey)),
 	})
-	return mapNotExist(err, src)
+	if !isInvalidRequest(err) {
+		return mapNotExist(err, src)
+	}
+	// A source over 5 GiB is refused with InvalidRequest; HEAD tells it from the other causes.
+	head, herr := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(srcKey),
+	})
+	if isNotFoundErr(herr) {
+		return mapNotExist(herr, src)
+	}
+	if herr != nil {
+		return fmt.Errorf("%w; HeadObject for its size: %w", err, herr)
+	}
+	if aws.ToInt64(head.ContentLength) <= maxCopyObjectSize {
+		return err
+	}
+	// Carry what a COPY directive would keep; UploadPartCopy copies the bytes only.
+	input := &s3.CreateMultipartUploadInput{
+		Bucket:             aws.String(s.bucket),
+		Key:                aws.String(s.key(dst)),
+		Metadata:           head.Metadata,
+		ContentType:        head.ContentType,
+		CacheControl:       head.CacheControl,
+		ContentDisposition: head.ContentDisposition,
+		ContentEncoding:    head.ContentEncoding,
+		ContentLanguage:    head.ContentLanguage,
+	}
+	if t, perr := http.ParseTime(aws.ToString(head.ExpiresString)); perr == nil {
+		input.Expires = aws.Time(t)
+	}
+	return mapNotExist(s.copyParts(ctx, src, srcKey, head, input), src)
+}
+
+// isInvalidRequest reports whether err is S3's InvalidRequest, which CopyObject answers for a source over 5 GiB.
+func isInvalidRequest(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidRequest"
+}
+
+// maxCopyObjectSize is the largest source one CopyObject accepts (5 GiB); copyParts takes the larger ones.
+var maxCopyObjectSize int64 = 5 << 30
+
+// copyPartSize is the smallest UploadPartCopy range copyParts uses.
+var copyPartSize int64 = 1 << 30
+
+// copyConcurrency is how many ranges copyParts copies at once, as Upload sends parts.
+var copyConcurrency = 5
+
+// maxCopyParts is S3's limit on the parts of one multipart upload.
+const maxCopyParts = 10000
+
+// copyPartSizeFor is the range size that copies size bytes in at most maxCopyParts parts.
+func copyPartSizeFor(size int64) int64 {
+	return max(copyPartSize, (size+maxCopyParts-1)/maxCopyParts)
+}
+
+// copyParts copies srcKey, pinned to head's ETag, onto the upload input describes, in UploadPartCopy ranges.
+// The source's tags go along, as CopyObject keeps them; a source changed meanwhile fails with s2.ErrModified.
+func (s *storage) copyParts(ctx context.Context, name, srcKey string, head *s3.HeadObjectOutput, input *s3.CreateMultipartUploadInput) error {
+	// Always ask: HEAD hides the tag count from a caller that may not read tags, whose CopyObject AWS refuses.
+	tags, err := s.client.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(srcKey),
+	})
+	if err != nil {
+		return err
+	}
+	if len(tags.TagSet) > 0 {
+		q := url.Values{}
+		for _, t := range tags.TagSet {
+			q.Set(aws.ToString(t.Key), aws.ToString(t.Value))
+		}
+		input.Tagging = aws.String(q.Encode())
+	}
+	up, err := s.client.CreateMultipartUpload(ctx, input)
+	if err != nil {
+		return err
+	}
+	parts, err := s.uploadCopyParts(ctx, srcKey, head.ETag, input.Key, up.UploadId, aws.ToInt64(head.ContentLength))
+	if err == nil {
+		complete := &s3.CompleteMultipartUploadInput{
+			Bucket:          input.Bucket,
+			Key:             input.Key,
+			UploadId:        up.UploadId,
+			MultipartUpload: &s3types.CompletedMultipartUpload{Parts: parts},
+		}
+		// Rewriting the source in place must not put the old bytes over a newer write.
+		if srcKey == aws.ToString(input.Key) {
+			complete.IfMatch = head.ETag
+		}
+		_, err = s.client.CompleteMultipartUpload(ctx, complete)
+	}
+	if err != nil {
+		// Abort on a fresh context, as transfermanager does, so a canceled ctx leaves no upload behind.
+		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+
+		_, _ = s.client.AbortMultipartUpload(actx, &s3.AbortMultipartUploadInput{
+			Bucket:   input.Bucket,
+			Key:      input.Key,
+			UploadId: up.UploadId,
+		})
+		// A conditional Complete that races a write answers 409 ConditionalRequestConflict instead of 412.
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "PreconditionFailed" || apiErr.ErrorCode() == "ConditionalRequestConflict") {
+			return fmt.Errorf("%w: %s: %w", s2.ErrModified, name, err)
+		}
+		return err
+	}
+	return nil
+}
+
+// uploadCopyParts copies size bytes of srcKey in copyConcurrency ranges at a time, each refused if the source no longer has etag.
+func (s *storage) uploadCopyParts(ctx context.Context, srcKey string, etag, key, uploadID *string, size int64) ([]s3types.CompletedPart, error) {
+	partSize := copyPartSizeFor(size)
+	parts := make([]s3types.CompletedPart, (size+partSize-1)/partSize)
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+
+	sem := make(chan struct{}, copyConcurrency)
+	var wg sync.WaitGroup
+	for i := range parts {
+		sem <- struct{}{}
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		go func() {
+			defer func() { <-sem; wg.Done() }()
+
+			off, n := int64(i)*partSize, int32(i+1) // #nosec G115 -- at most maxCopyParts
+			out, err := s.client.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
+				Bucket:            aws.String(s.bucket),
+				Key:               key,
+				UploadId:          uploadID,
+				PartNumber:        aws.Int32(n),
+				CopySource:        aws.String(copySource(s.bucket, srcKey)),
+				CopySourceIfMatch: etag,
+				CopySourceRange:   aws.String(fmt.Sprintf("bytes=%d-%d", off, min(off+partSize, size)-1)),
+			})
+			if err == nil && out.CopyPartResult == nil {
+				err = fmt.Errorf("UploadPartCopy answered no CopyPartResult for part %d", n)
+			}
+			if err != nil {
+				cancel(err)
+				return
+			}
+			parts[i] = s3types.CompletedPart{ETag: out.CopyPartResult.ETag, PartNumber: aws.Int32(n)}
+		}()
+	}
+	wg.Wait()
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
+	}
+	return parts, nil
 }
 
 // copySource URL-encodes each segment of key, since S3 decodes x-amz-copy-source and reads "+" as a space.

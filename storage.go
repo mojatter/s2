@@ -116,11 +116,12 @@ type Storage interface {
 	// is NOT atomic with Put; a crash between the two leaves the object on
 	// disk with whatever metadata Put itself wrote. Replaces (does not merge)
 	// any existing metadata. A backend may fail the call when the object
-	// changes concurrently; that error is the provider's own.
+	// changes concurrently; that error is ErrModified or the provider's own.
 	PutMetadata(ctx context.Context, name string, metadata Metadata) error
 	// Copy duplicates src to dst. The semantics are backend-defined: the s3
 	// backend uses server-side copy, while file-backed backends stream the
-	// body.
+	// body. A backend may fail the call when src changes concurrently; that
+	// error is ErrModified or the provider's own.
 	Copy(ctx context.Context, src, dst string) error
 	// Delete removes the object at name. Deleting a non-existent object is
 	// a no-op and does not return an error.
