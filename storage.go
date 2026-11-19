@@ -413,6 +413,11 @@ func CopyStorage(ctx context.Context, src, dst Storage, opts CopyStorageOptions)
 			return res, err
 		}
 		for _, obj := range page.Objects {
+			// Key would fold an invalid name onto another object's, and List refuses it as StartAfter.
+			if ValidateName(obj.Name()) != nil {
+				res.Rejected++
+				continue
+			}
 			dstName := Key(opts.DstDir, obj.Name())
 			if same {
 				err = copyWithin(ctx, src, obj.Name(), dstName, opts.Overwrite, &res)
