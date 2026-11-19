@@ -473,14 +473,18 @@ func (s *mapStorage) List(_ context.Context, opts ListOptions) (ListResult, erro
 	if after == "" {
 		after = opts.StartAfter
 	}
+	limit := s.pageSize
+	if opts.Limit > 0 && opts.Limit < limit {
+		limit = opts.Limit
+	}
 	var res ListResult
 	for _, name := range names {
 		rest, ok := strings.CutPrefix(name, opts.Prefix)
 		if !ok || name <= after || (!opts.Recursive && strings.Contains(rest, "/")) {
 			continue
 		}
-		if len(res.Objects) == s.pageSize {
-			res.NextAfter = res.Objects[s.pageSize-1].Name()
+		if len(res.Objects) == limit {
+			res.NextAfter = res.Objects[limit-1].Name()
 			break
 		}
 		res.Objects = append(res.Objects, NewObjectBytes(name, nil))
@@ -777,6 +781,32 @@ func TestCopyStorage(t *testing.T) {
 			want:       CopyStorageResult{Copied: 1},
 			wantDst:    []string{"a/1", "bk/a/1"},
 			wantCopies: []string{"a/1 bk/a/1"},
+		},
+		{
+			caseName: "uses SrcOptions.Limit as the page size and copies every page",
+			src:      newMapStorage(photo("a"), photo("b"), photo("c")),
+			dst:      newMapStorage(),
+			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true, Limit: 1}},
+			want:     CopyStorageResult{Copied: 3},
+			wantDst:  []string{"a", "b", "c"},
+		},
+		{
+			caseName:   "resumes within one storage after a failing Copy",
+			src:        &mapStorage{objs: newMapStorage(photo("a/1"), photo("a/2")).objs, pageSize: 1000, failGet: "a/2"},
+			opts:       CopyStorageOptions{DstDir: "bk", SrcOptions: ListOptions{Prefix: "a/", Recursive: true}},
+			want:       CopyStorageResult{Copied: 1},
+			wantDst:    []string{"a/1", "a/2", "bk/a/1"},
+			wantCopies: []string{"a/1 bk/a/1", "a/2 bk/a/2"},
+			wantErr:    "get failed",
+			wantResume: &ListOptions{Prefix: "a/", Recursive: true, StartAfter: "a/1"},
+		},
+		{
+			caseName:   "counts a name Copy refuses within one storage",
+			src:        newMapStorage(photo("a/1"), NewObjectBytes("a/b/", []byte("x"))),
+			opts:       CopyStorageOptions{DstDir: "bk", SrcOptions: ListOptions{Prefix: "a/", Recursive: true}},
+			want:       CopyStorageResult{Copied: 1, Rejected: 1},
+			wantDst:    []string{"a/1", "a/b/", "bk/a/1"},
+			wantCopies: []string{"a/1 bk/a/1", "a/b/ bk/a/b/"},
 		},
 		{
 			caseName:   "copies within one storage a name held only as a prefix",
