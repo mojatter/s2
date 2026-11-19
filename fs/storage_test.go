@@ -4826,3 +4826,36 @@ func TestInvalidName(t *testing.T) {
 		})
 	}
 }
+
+func TestCopyStorageRejected(t *testing.T) {
+	testCases := []struct {
+		caseName  string
+		src       []string
+		dst       []string
+		overwrite bool
+		want      s2.CopyStorageResult
+	}{
+		{caseName: "under an object", src: []string{"x/y", "z"}, dst: []string{"x"}, want: s2.CopyStorageResult{Copied: 1, Rejected: 1}},
+		{caseName: "beside a marker", src: []string{"x", "z"}, dst: []string{"x/"}, overwrite: true, want: s2.CopyStorageResult{Copied: 1, Rejected: 1}},
+		{caseName: "beside a marker without Overwrite", src: []string{"x", "z"}, dst: []string{"x/"}, want: s2.CopyStorageResult{Copied: 1, Rejected: 1}},
+		{caseName: "marker beside an object", src: []string{"x/", "z"}, dst: []string{"x"}, overwrite: true, want: s2.CopyStorageResult{Copied: 1, Rejected: 1}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			ctx := t.Context()
+			src, dst := NewStorageMem(s2.Config{}), NewStorageMem(s2.Config{})
+			for _, name := range tc.src {
+				require.NoError(t, src.Put(ctx, s2.NewObjectBytes(name, nil)))
+			}
+			for _, name := range tc.dst {
+				require.NoError(t, dst.Put(ctx, s2.NewObjectBytes(name, nil)))
+			}
+			got, err := s2.CopyStorage(ctx, src, dst, s2.CopyStorageOptions{SrcOptions: s2.ListOptions{Recursive: true}, Overwrite: tc.overwrite})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+			ok, err := dst.Exists(ctx, "z")
+			require.NoError(t, err)
+			assert.True(t, ok)
+		})
+	}
+}

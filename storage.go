@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -359,6 +360,196 @@ func countByList(ctx context.Context, s Storage, opts CountOptions) (CountResult
 		after = page.NextAfter
 	}
 }
+
+// CopyStorageOptions controls a CopyStorage call.
+type CopyStorageOptions struct {
+	// DstDir is prepended to every copied name on dst; empty keeps the names as they are.
+	DstDir string
+	// SrcOptions selects the objects on src, as List does; Limit is the page size and every page is copied.
+	SrcOptions ListOptions
+	// Overwrite replaces an object that already exists on dst; false skips it.
+	Overwrite bool
+}
+
+// CopyStorageResult reports what a CopyStorage call did, also when it returns an error.
+type CopyStorageResult struct {
+	// Copied is the number of objects written to dst.
+	Copied int64
+	// Skipped is the number of objects that already existed on dst while Overwrite was false.
+	Skipped int64
+	// Unsupported is the number of objects src lists but cannot read; they are skipped.
+	Unsupported int64
+	// Rejected is the number of objects src or dst refuses by name (ErrInvalidName); they are skipped.
+	Rejected int64
+	// ResumeOptions is nil when the call finished; otherwise pass it as SrcOptions to continue.
+	// Its StartAfter ends the range already processed; with Overwrite, objects past it may be written again.
+	ResumeOptions *ListOptions
+}
+
+// CopyStorage copies the objects opts.SrcOptions selects on src to dst, keeping each object's name, Content-Type and metadata.
+// It stops at the first error, keeping what was copied. With Overwrite false and no Uploader on dst,
+// or with dst == src, the check for an existing object is not atomic against a concurrent writer.
+// When dst == src, a DstDir that could place copies inside the selection is refused before copying;
+// a dst that is another view of src, such as a Sub or a wrapper, is not detected and unsupported.
+func CopyStorage(ctx context.Context, src, dst Storage, opts CopyStorageOptions) (res CopyStorageResult, err error) {
+	last := ""
+	defer func() {
+		if err != nil {
+			res.ResumeOptions = resumeOptions(opts.SrcOptions, last)
+		}
+	}()
+
+	if err := ValidatePrefix(opts.DstDir); err != nil {
+		return res, err
+	}
+	same := sameStorage(src, dst)
+	if same && strings.HasPrefix(Key(opts.DstDir, opts.SrcOptions.Prefix), opts.SrcOptions.Prefix) {
+		return res, fmt.Errorf("s2: CopyStorage onto the same storage: DstDir %q overlaps Prefix %q", opts.DstDir, opts.SrcOptions.Prefix)
+	}
+	lopts := opts.SrcOptions
+	for {
+		page, err := src.List(ctx, lopts)
+		if err != nil {
+			return res, err
+		}
+		for _, obj := range page.Objects {
+			dstName := Key(opts.DstDir, obj.Name())
+			if same {
+				err = copyWithin(ctx, src, obj.Name(), dstName, opts.Overwrite, &res)
+			} else {
+				err = copyAcross(ctx, src, dst, obj.Name(), dstName, opts.Overwrite, &res)
+			}
+			if err != nil {
+				return res, err
+			}
+			last = obj.Name()
+		}
+		if page.NextAfter == "" {
+			return res, nil
+		}
+		if page.NextAfter == lopts.After {
+			return res, fmt.Errorf("s2: List returned a NextAfter that does not advance: %q", lopts.After)
+		}
+		lopts.After = page.NextAfter
+	}
+}
+
+// resumeOptions returns opts resuming after last, or opts unchanged when nothing finished.
+func resumeOptions(opts ListOptions, last string) *ListOptions {
+	if last != "" {
+		opts.After = ""
+		opts.StartAfter = last
+	}
+	return &opts
+}
+
+// sameStorage reports whether a and b are the same value; an incomparable pair is not.
+func sameStorage(a, b Storage) (same bool) {
+	defer func() {
+		if recover() != nil {
+			same = false
+		}
+	}()
+
+	return a == b
+}
+
+// copyWithin copies name to dstName on s with Storage.Copy.
+func copyWithin(ctx context.Context, s Storage, name, dstName string, overwrite bool, res *CopyStorageResult) error {
+	if !overwrite {
+		exists, err := hasObject(ctx, s, dstName)
+		if err != nil {
+			return countRejected(err, res)
+		}
+		if exists {
+			res.Skipped++
+			return nil
+		}
+	}
+	if err := s.Copy(ctx, name, dstName); err != nil {
+		return countRejected(err, res)
+	}
+	res.Copied++
+	return nil
+}
+
+// copyAcross reads name from src with Get, for the metadata a listing may lack, and writes it to dst as dstName.
+func copyAcross(ctx context.Context, src, dst Storage, name, dstName string, overwrite bool, res *CopyStorageResult) error {
+	if !overwrite {
+		// Checked first so an existing object is skipped without sending its body.
+		exists, err := hasObject(ctx, dst, dstName)
+		if err != nil {
+			return countRejected(err, res)
+		}
+		if exists {
+			res.Skipped++
+			return nil
+		}
+	}
+	obj, err := src.Get(ctx, name)
+	if errors.Is(err, errors.ErrUnsupported) {
+		res.Unsupported++
+		return nil
+	}
+	if err != nil {
+		return countRejected(err, res)
+	}
+	out := renamedObject{Object: obj, name: dstName}
+	if overwrite {
+		err = dst.Put(ctx, out)
+	} else {
+		err = putIfAbsent(ctx, dst, out)
+	}
+	switch {
+	case errors.Is(err, ErrPreconditionFailed):
+		res.Skipped++
+		return nil
+	case err != nil && !errors.Is(err, ErrUnknownETag):
+		// ErrUnknownETag means the object was stored.
+		return countRejected(err, res)
+	}
+	res.Copied++
+	return nil
+}
+
+// hasObject reports whether s holds an object at name, as Get answers; Exists also reports a directory or prefix.
+func hasObject(ctx context.Context, s Storage, name string) (bool, error) {
+	_, err := s.Get(ctx, name)
+	switch {
+	case err == nil, errors.Is(err, errors.ErrUnsupported):
+		return true, nil
+	case errors.Is(err, ErrNotExist):
+		return false, nil
+	}
+	return false, err
+}
+
+// countRejected counts err in Rejected when it wraps ErrInvalidName, and returns any other error.
+func countRejected(err error, res *CopyStorageResult) error {
+	if errors.Is(err, ErrInvalidName) {
+		res.Rejected++
+		return nil
+	}
+	return err
+}
+
+// putIfAbsent writes obj unless an object holds its name, atomically when dst has an Uploader.
+func putIfAbsent(ctx context.Context, dst Storage, obj Object) error {
+	_, err := Upload(ctx, dst, obj, UploadOptions{IfNoneMatch: "*"})
+	// ErrUnknownETag means obj was stored, even when the read-back wraps ErrUnsupported.
+	if errors.Is(err, errors.ErrUnsupported) && !errors.Is(err, ErrUnknownETag) {
+		return dst.Put(ctx, obj)
+	}
+	return err
+}
+
+// renamedObject is an Object stored under another name.
+type renamedObject struct {
+	Object
+	name string
+}
+
+func (o renamedObject) Name() string { return o.name }
 
 // NewStorageFunc is a function that creates a new storage.
 type NewStorageFunc func(ctx context.Context, cfg Config) (Storage, error)
