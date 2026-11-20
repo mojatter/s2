@@ -478,6 +478,14 @@ func TestStorageUploadConditionsPartialSupport(t *testing.T) {
 type subStorage struct {
 	s2.Storage
 	view func(s2.Storage) s2.Storage
+	uri  string // overrides the root's URI when set
+}
+
+func (s *subStorage) URI() string {
+	if s.uri != "" {
+		return s.uri
+	}
+	return s.Storage.URI()
 }
 
 func (s *subStorage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
@@ -488,13 +496,21 @@ func (s *subStorage) Sub(ctx context.Context, prefix string) (s2.Storage, error)
 	return s.view(sub), nil
 }
 
-// driftView answers Get with its own ETag, or with no Content-Type and metadata, List with listETag, and Delete without deleting when noDelete is set.
+// driftView answers Get with its own ETag, or with no Content-Type and metadata, List with listETag, Delete without deleting when noDelete is set, and URI with uri.
 type driftView struct {
 	s2.Storage
 	etag     string
 	dropMeta bool
 	listETag string
 	noDelete bool
+	uri      string
+}
+
+func (s *driftView) URI() string {
+	if s.uri != "" {
+		return s.uri
+	}
+	return s.Storage.URI()
 }
 
 func (s *driftView) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
@@ -553,6 +569,7 @@ func TestStorageSubConsistencyRejects(t *testing.T) {
 	testCases := []struct {
 		caseName string
 		view     func(t *testing.T) func(s2.Storage) s2.Storage
+		rootURI  string
 		wantErrs []string
 	}{
 		{caseName: "a view", view: func(*testing.T) func(s2.Storage) s2.Storage { return func(sub s2.Storage) s2.Storage { return sub } }},
@@ -569,13 +586,19 @@ func TestStorageSubConsistencyRejects(t *testing.T) {
 		{caseName: "another ETag in List", view: func(*testing.T) func(s2.Storage) s2.Storage {
 			return func(sub s2.Storage) s2.Storage { return &driftView{Storage: sub, listETag: `"other"`} }
 		}, wantErrs: []string{`List: root answers ETag`}},
+		{caseName: "a URI not extending the parent's", view: func(*testing.T) func(s2.Storage) s2.Storage {
+			return func(sub s2.Storage) s2.Storage { return &driftView{Storage: sub, uri: "mem://elsewhere/"} }
+		}, wantErrs: []string{`Sub("s2test-sub").URI() = "mem://elsewhere/" under root URI`}},
+		{caseName: "a root URI without a trailing slash", view: func(*testing.T) func(s2.Storage) s2.Storage {
+			return func(sub s2.Storage) s2.Storage { return sub }
+		}, rootURI: "mem://x", wantErrs: []string{`URI() = "mem://x", want a trailing "/"`}},
 		{caseName: "Delete does nothing", view: func(*testing.T) func(s2.Storage) s2.Storage {
 			return func(sub s2.Storage) s2.Storage { return &driftView{Storage: sub, noDelete: true} }
 		}, wantErrs: []string{`root.Exists("s2test-sub/a.txt") after Sub("s2test-sub").Delete = true`}},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
-			err := TestStorageSubConsistency(t.Context(), &subStorage{Storage: newMemFS(t), view: tc.view(t)})
+			err := TestStorageSubConsistency(t.Context(), &subStorage{Storage: newMemFS(t), view: tc.view(t), uri: tc.rootURI})
 			if len(tc.wantErrs) == 0 {
 				if err != nil {
 					t.Errorf("want no error, got: %v", err)

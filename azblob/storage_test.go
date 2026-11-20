@@ -335,6 +335,7 @@ func (s *StorageTestSuite) testMockStorage() (*mockAzblobClient, s2.Storage) {
 	return m, &azblobStorage{
 		client:    m,
 		container: "mycontainer",
+		uri:       s2.JoinURI(m.serviceURL(), "mycontainer"),
 	}
 }
 
@@ -407,6 +408,7 @@ func (s *StorageTestSuite) TestNewStorage() {
 		cfg           s2.Config
 		wantContainer string
 		wantPrefix    string
+		wantURI       string
 	}{
 		{
 			caseName: "container only",
@@ -417,6 +419,7 @@ func (s *StorageTestSuite) TestNewStorage() {
 			},
 			wantContainer: "my-container",
 			wantPrefix:    "",
+			wantURI:       "https://test.blob.core.windows.net/my-container/",
 		},
 		{
 			caseName: "container with prefix",
@@ -427,6 +430,17 @@ func (s *StorageTestSuite) TestNewStorage() {
 			},
 			wantContainer: "my-container",
 			wantPrefix:    "some/prefix",
+			wantURI:       "https://test.blob.core.windows.net/my-container/some/prefix/",
+		},
+		{
+			caseName: "connection string drops its key",
+			cfg: s2.Config{
+				Type:   s2.TypeAzblob,
+				Root:   "my-container",
+				Azblob: &s2.AzblobConfig{ConnectionString: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=dGVzdA==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"},
+			},
+			wantContainer: "my-container",
+			wantURI:       "http://127.0.0.1:10000/devstoreaccount1/my-container/",
 		},
 		{
 			caseName: "root with slashes trimmed",
@@ -437,6 +451,7 @@ func (s *StorageTestSuite) TestNewStorage() {
 			},
 			wantContainer: "my-container",
 			wantPrefix:    "pfx",
+			wantURI:       "https://test.blob.core.windows.net/my-container/pfx/",
 		},
 	}
 
@@ -449,6 +464,7 @@ func (s *StorageTestSuite) TestNewStorage() {
 			s.Equal(tc.wantContainer, st.container)
 			s.Equal(tc.wantPrefix, st.prefix)
 			s.NotNil(st.client)
+			s.Equal(tc.wantURI, st.URI())
 		})
 	}
 }
@@ -907,6 +923,8 @@ func (s *StorageTestSuite) TestSub() {
 	sub, err := strg.Sub(ctx, "cc")
 	s.Require().NoError(err)
 	s.Equal(s2.TypeAzblob, sub.Type())
+	s.Equal("https://mockaccount.blob.core.windows.net/mycontainer/", strg.URI())
+	s.Equal("https://mockaccount.blob.core.windows.net/mycontainer/cc/", sub.URI())
 
 	res, err := sub.List(ctx, s2.ListOptions{Limit: 10, Recursive: true})
 	s.Require().NoError(err)

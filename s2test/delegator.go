@@ -10,6 +10,7 @@ import (
 // the corresponding *Func field, returning a zero value when the field is nil.
 type StorageDelegator struct {
 	TypeFunc            func() s2.Type
+	URIFunc             func() string
 	SubFunc             func(ctx context.Context, prefix string) (s2.Storage, error)
 	ListFunc            func(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error)
 	GetFunc             func(ctx context.Context, name string) (s2.Object, error)
@@ -28,6 +29,13 @@ var _ s2.Storage = (*StorageDelegator)(nil)
 func (d *StorageDelegator) Type() s2.Type {
 	if d.TypeFunc != nil {
 		return d.TypeFunc()
+	}
+	return ""
+}
+
+func (d *StorageDelegator) URI() string {
+	if d.URIFunc != nil {
+		return d.URIFunc()
 	}
 	return ""
 }

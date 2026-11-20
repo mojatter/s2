@@ -111,6 +111,41 @@ func TestKey(t *testing.T) {
 	}
 }
 
+func TestJoinURI(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		uri      string
+		prefix   string
+		want     string
+	}{
+		{"no prefix", "s3://b/", "", "s3://b/"},
+		{"adds the trailing slash", "s3://b", "", "s3://b/"},
+		{"nested prefix", "s3://b/p/", "a/b", "s3://b/p/a/b/"},
+		{"prefix with a trailing slash", "gs://b/", "a/", "gs://b/a/"},
+		{"escapes the prefix", "file:///d/", "x y", "file:///d/x%20y/"},
+		{"takes a percent sign as is", "file:///d/", "x%y", "file:///d/x%25y/"},
+		{"keeps an escaped path", "file:///d%20e/", "x", "file:///d%20e/x/"},
+		{"keeps the host and port", "http://h:9/base/", "bk", "http://h:9/base/bk/"},
+		{"drops the query", "https://h/b/?sv=x", "p", "https://h/b/p/"},
+		{"drops an empty query", "https://h/b/?", "p", "https://h/b/p/"},
+		{"drops the fragment", "https://h/b/#f", "p", "https://h/b/p/"},
+		{"drops the credentials", "https://u:pw@h/b/", "p", "https://h/b/p/"},
+		{"empty URI", "", "a", ""},
+		{"opaque URI", "mailto:x", "p", ""},
+		{"host and port without a scheme", "localhost:9000", "p", ""},
+		{"no scheme", "rel/path", "p", ""},
+		{"scheme-relative", "//h/b/", "p", ""},
+		{"URI that does not parse", "%zz", "a", ""},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			if got := JoinURI(tc.uri, tc.prefix); got != tc.want {
+				t.Errorf("JoinURI(%q, %q) = %q, want %q", tc.uri, tc.prefix, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRelName(t *testing.T) {
 	testCases := []struct {
 		caseName string
