@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -552,6 +553,7 @@ func (s *StorageTestSuite) testMockClient() (*mockS3Client, s2.Storage) {
 		presignClient: m,
 		bucket:        "mybucket",
 		prefix:        "",
+		uri:           bucketURI("", "mybucket"),
 	}
 }
 
@@ -1117,25 +1119,31 @@ func (s *StorageTestSuite) TestNewStorage() {
 		caseName   string
 		cfg        s2.Config
 		wantBucket string
+		env        string // AWS_ENDPOINT_URL
+		load       LoadOptionsFunc
 		wantPrefix string
+		wantURI    string
 	}{
 		{
 			caseName:   "bucket only",
 			cfg:        s2.Config{Type: s2.TypeS3, Root: "my-bucket"},
 			wantBucket: "my-bucket",
 			wantPrefix: "",
+			wantURI:    "s3://my-bucket/",
 		},
 		{
 			caseName:   "bucket with prefix",
 			cfg:        s2.Config{Type: s2.TypeS3, Root: "my-bucket/some/prefix"},
 			wantBucket: "my-bucket",
 			wantPrefix: "some/prefix",
+			wantURI:    "s3://my-bucket/some/prefix/",
 		},
 		{
 			caseName:   "root with slashes trimmed",
 			cfg:        s2.Config{Type: s2.TypeS3, Root: "/my-bucket/pfx/"},
 			wantBucket: "my-bucket",
 			wantPrefix: "pfx",
+			wantURI:    "s3://my-bucket/pfx/",
 		},
 		{
 			caseName: "with S3Config region only",
@@ -1146,6 +1154,7 @@ func (s *StorageTestSuite) TestNewStorage() {
 			},
 			wantBucket: "my-bucket",
 			wantPrefix: "",
+			wantURI:    "s3://my-bucket/",
 		},
 		{
 			caseName: "with S3Config credentials",
@@ -1159,6 +1168,7 @@ func (s *StorageTestSuite) TestNewStorage() {
 			},
 			wantBucket: "my-bucket",
 			wantPrefix: "",
+			wantURI:    "s3://my-bucket/",
 		},
 		{
 			caseName: "with S3Config endpoint",
@@ -1171,6 +1181,7 @@ func (s *StorageTestSuite) TestNewStorage() {
 			},
 			wantBucket: "my-bucket",
 			wantPrefix: "",
+			wantURI:    "http://localhost:9000/my-bucket/",
 		},
 		{
 			caseName: "with full S3Config",
@@ -1186,6 +1197,7 @@ func (s *StorageTestSuite) TestNewStorage() {
 			},
 			wantBucket: "my-bucket",
 			wantPrefix: "data",
+			wantURI:    "http://localhost:9000/my-bucket/data/",
 		},
 		{
 			caseName: "nil S3Config",
@@ -1196,11 +1208,58 @@ func (s *StorageTestSuite) TestNewStorage() {
 			},
 			wantBucket: "my-bucket",
 			wantPrefix: "",
+			wantURI:    "s3://my-bucket/",
+		},
+		{
+			caseName: "endpoint credentials, query and fragment dropped",
+			cfg: s2.Config{
+				Type: s2.TypeS3,
+				Root: "my-bucket",
+				S3:   &s2.S3Config{EndpointURL: "https://user:pw@example.com/base/?x=1#f"},
+			},
+			wantBucket: "my-bucket",
+			wantURI:    "https://example.com/base/my-bucket/",
+		},
+		{
+			caseName:   "endpoint from the environment",
+			cfg:        s2.Config{Type: s2.TypeS3, Root: "my-bucket", S3: &s2.S3Config{Region: "us-east-1"}},
+			env:        "http://env.example:9000",
+			wantBucket: "my-bucket",
+			wantURI:    "http://env.example:9000/my-bucket/",
+		},
+		{
+			caseName: "endpoint from a deprecated resolver",
+			cfg:      s2.Config{Type: s2.TypeS3, Root: "my-bucket", S3: &s2.S3Config{Region: "us-east-1"}},
+			load: func(s2.Config) ([]func(*awsconfig.LoadOptions) error, error) {
+				resolver := aws.EndpointResolverWithOptionsFunc(func(_, region string, _ ...any) (aws.Endpoint, error) { //nolint:staticcheck // the deprecated resolver is the case under test
+					return aws.Endpoint{URL: "http://minio.example:9000"}, nil //nolint:staticcheck // the deprecated resolver is the case under test
+				})
+				return []func(*awsconfig.LoadOptions) error{awsconfig.WithEndpointResolverWithOptions(resolver)}, nil //nolint:staticcheck // the deprecated resolver is the case under test
+			},
+			wantBucket: "my-bucket",
+		},
+		{
+			caseName: "endpoint without a scheme",
+			cfg: s2.Config{
+				Type: s2.TypeS3,
+				Root: "my-bucket",
+				S3:   &s2.S3Config{EndpointURL: "localhost:9000"},
+			},
+			wantBucket: "my-bucket",
 		},
 	}
 
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
+			// Keeps the developer's own endpoint settings out of the expected URIs.
+			s.T().Setenv("AWS_ENDPOINT_URL", tc.env)
+			s.T().Setenv("AWS_ENDPOINT_URL_S3", "")
+			s.T().Setenv("AWS_CONFIG_FILE", filepath.Join(s.T().TempDir(), "config"))
+			s.T().Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(s.T().TempDir(), "credentials"))
+			if tc.load != nil {
+				RegisterLoadOptionsFunc(tc.load)
+				defer UnregisterLoadOptionsFunc()
+			}
 			strg, err := NewStorage(context.Background(), tc.cfg)
 			s.Require().NoError(err)
 
@@ -1208,6 +1267,7 @@ func (s *StorageTestSuite) TestNewStorage() {
 			s.Equal(tc.wantBucket, st.bucket)
 			s.Equal(tc.wantPrefix, st.prefix)
 			s.NotNil(st.client)
+			s.Equal(tc.wantURI, st.URI())
 		})
 	}
 }
@@ -1475,6 +1535,12 @@ func (s *StorageTestSuite) TestSub() {
 	sub, err := strg.Sub(ctx, "cc")
 	s.Require().NoError(err)
 	s.Equal(s2.TypeS3, sub.Type())
+	s.Equal("s3://mybucket/cc/", sub.URI())
+	data, err := strg.Sub(ctx, "data")
+	s.Require().NoError(err)
+	view, err := data.Sub(ctx, "x y")
+	s.Require().NoError(err)
+	s.Equal("s3://mybucket/data/x%20y/", view.URI())
 
 	res, err := sub.List(ctx, s2.ListOptions{Limit: 10, Recursive: true})
 	s.Require().NoError(err)

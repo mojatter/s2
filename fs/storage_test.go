@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -4858,4 +4859,45 @@ func TestCopyStorageRejected(t *testing.T) {
 			assert.True(t, ok)
 		})
 	}
+}
+
+func TestURI(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+	file := (&url.URL{Scheme: "file", Path: path.Join("/", filepath.ToSlash(rootKey(dir)))}).String()
+	sub := func(s s2.Storage, prefix string) s2.Storage {
+		t.Helper()
+		v, err := s.Sub(ctx, prefix)
+		require.NoError(t, err)
+		return v
+	}
+	mem := NewStorageMem(s2.Config{})
+	memRoot := mem.URI()
+	require.Regexp(t, `^mem://\d+/$`, memRoot)
+	sidecar, ok := SubSidecar(mem)
+	require.True(t, ok)
+	osfsStorage, err := NewStorage(ctx, s2.Config{Type: s2.TypeOSFS, Root: dir})
+	require.NoError(t, err)
+
+	testCases := []struct {
+		caseName string
+		strg     s2.Storage
+		want     string
+	}{
+		{caseName: "memfs Sub", strg: sub(mem, "a/b/"), want: memRoot + "a/b/"},
+		{caseName: "memfs empty Sub", strg: sub(mem, ""), want: memRoot},
+		{caseName: "memfs Sub of a Sub", strg: sub(sub(mem, "a"), "b"), want: memRoot + "a/b/"},
+		{caseName: "memfs sidecar", strg: sidecar, want: memRoot + ".meta/"},
+		{caseName: "osfs dir", strg: NewStorageDir(dir), want: file + "/"},
+		{caseName: "osfs from Config", strg: osfsStorage, want: file + "/"},
+		{caseName: "osfs Sub escaped", strg: sub(NewStorageDir(dir), "x y"), want: file + "/x%20y/"},
+		{caseName: "osfs dir nested", strg: NewStorageDir(filepath.Join(dir, "n")), want: file + "/n/"},
+		{caseName: "other fs.FS", strg: NewStorageFS(s2.Config{}, fstest.MapFS{}), want: ""},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.strg.URI())
+		})
+	}
+	assert.NotEqual(t, memRoot, NewStorageMem(s2.Config{}).URI())
 }

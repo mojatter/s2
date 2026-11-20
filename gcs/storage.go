@@ -29,6 +29,7 @@ type gcsStorage struct {
 	client gcsClient
 	bucket string
 	prefix string
+	uri    string
 }
 
 func init() {
@@ -72,11 +73,32 @@ func NewStorage(ctx context.Context, cfg s2.Config) (s2.Storage, error) {
 		client: &sdkClient{c: client, svc: svc},
 		bucket: bucket,
 		prefix: prefix,
+		uri:    s2.JoinURI(bucketURI(os.Getenv("STORAGE_EMULATOR_HOST"), bucket), prefix),
 	}, nil
 }
 
 func (s *gcsStorage) Type() s2.Type {
 	return s2.TypeGCS
+}
+
+// URI returns where s stores objects, such as "gs://bucket/prefix/"; empty when unknown.
+func (s *gcsStorage) URI() string {
+	return s.uri
+}
+
+// bucketURI returns "gs://bucket/", or the URL of bucket on the emulator at host; empty when host does not parse.
+func bucketURI(host, bucket string) string {
+	if host == "" {
+		return (&url.URL{Scheme: "gs", Host: bucket, Path: "/"}).String()
+	}
+	if !strings.Contains(host, "://") {
+		host = "http://" + host
+	}
+	u, err := url.Parse(host)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return s2.JoinURI((&url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/"}).String(), bucket)
 }
 
 func (s *gcsStorage) Sub(_ context.Context, prefix string) (s2.Storage, error) {
@@ -87,6 +109,7 @@ func (s *gcsStorage) Sub(_ context.Context, prefix string) (s2.Storage, error) {
 		client: s.client,
 		bucket: s.bucket,
 		prefix: path.Join(s.prefix, prefix),
+		uri:    s2.JoinURI(s.uri, prefix),
 	}, nil
 }
 

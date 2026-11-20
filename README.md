@@ -336,6 +336,7 @@ Each backend has its own configuration and authentication options. See [docs/bac
 ```go
 type Storage interface {
 	Type() Type
+	URI() string
 	Sub(ctx context.Context, prefix string) (Storage, error)
 	List(ctx context.Context, opts ListOptions) (ListResult, error)
 	Get(ctx context.Context, name string) (Object, error)

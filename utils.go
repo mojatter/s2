@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/fs"
 	"math"
+	"net/url"
 	"path"
 	"strings"
 )
@@ -57,6 +58,21 @@ func Key(prefix, name string) string {
 		return path.Join(prefix, name) + "/"
 	}
 	return path.Join(prefix, name)
+}
+
+// JoinURI appends prefix to the cleaned path of a Storage URI, unescaped, so the result ends in "/";
+// it drops credentials, query and fragment, and is empty when uri is empty, does not parse, has no scheme or is opaque.
+func JoinURI(uri, prefix string) string {
+	u, err := url.Parse(uri)
+	if uri == "" || err != nil || u.Scheme == "" || u.Opaque != "" {
+		return ""
+	}
+	u.Path = strings.TrimSuffix(path.Join(u.Path, prefix), "/") + "/"
+	u.RawPath = ""
+	u.User = nil
+	u.RawQuery, u.ForceQuery = "", false
+	u.Fragment, u.RawFragment = "", ""
+	return u.String()
 }
 
 // RelName is the inverse of Key: it strips the storage prefix, leaving a name

@@ -1403,7 +1403,8 @@ func TestStorageNameEscape(ctx context.Context, strg s2.Storage) error {
 	return nil
 }
 
-// TestStorageSubConsistency validates that a Sub is a view of its parent: an object written, described or deleted through one is the same through the other.
+// TestStorageSubConsistency validates that a Sub is a view of its parent: an object written, described or deleted through one is the same through the other,
+// and its URI extends the parent's.
 func TestStorageSubConsistency(ctx context.Context, strg s2.Storage) error {
 	const dir = "s2test-sub"
 	defer func() { _ = strg.DeleteRecursive(ctx, dir+"/") }()
@@ -1422,6 +1423,14 @@ func TestStorageSubConsistency(ctx context.Context, strg s2.Storage) error {
 	var errs []string
 	errorf := func(format string, args ...any) {
 		errs = append(errs, fmt.Sprintf(format, args...))
+	}
+	// A Sub's URI must extend its parent's, so URIs can be compared by prefix.
+	switch u := strg.URI(); {
+	case u == "":
+	case !strings.HasSuffix(u, "/"):
+		errorf("URI() = %q, want a trailing \"/\"", u)
+	case sub.URI() != u+dir+"/":
+		errorf("Sub(%q).URI() = %q under root URI %q, want %q", dir, sub.URI(), u, u+dir+"/")
 	}
 	// compare reports how name differs between the writer and the reader.
 	compare := func(step string, writer, reader view, name string, md s2.Metadata) {

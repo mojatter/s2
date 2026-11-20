@@ -89,6 +89,11 @@ type SignedURLOptions struct {
 type Storage interface {
 	// Type returns the type of the storage.
 	Type() Type
+	// URI returns the location of the objects, ending in "/", such as "s3://bucket/prefix/"; empty when unknown.
+	// A Sub's URI extends its parent's, so two storages overlap where one URI begins with the other;
+	// different URIs do not prove them apart. It identifies a storage and is not meant to open one.
+	// A wrapper that rewrites names must override it.
+	URI() string
 	// Sub returns a view of the given prefix that shares the parent's lifetime:
 	// an object written through either is the same object, with the same ETag,
 	// Content-Type and metadata, through the other.

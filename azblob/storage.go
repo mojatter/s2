@@ -28,6 +28,7 @@ type azblobStorage struct {
 	client    azblobClient
 	container string
 	prefix    string
+	uri       string
 }
 
 func init() {
@@ -52,6 +53,7 @@ func NewStorage(ctx context.Context, cfg s2.Config) (s2.Storage, error) {
 		client:    client,
 		container: ctr,
 		prefix:    prefix,
+		uri:       s2.JoinURI(s2.JoinURI(client.serviceURL(), ctr), prefix),
 	}, nil
 }
 
@@ -110,6 +112,11 @@ func (s *azblobStorage) Type() s2.Type {
 	return s2.TypeAzblob
 }
 
+// URI returns where s stores objects, the URL of the container and prefix without its query; empty when unknown.
+func (s *azblobStorage) URI() string {
+	return s.uri
+}
+
 func (s *azblobStorage) Sub(_ context.Context, prefix string) (s2.Storage, error) {
 	if err := s2.ValidatePrefix(prefix); err != nil {
 		return nil, err
@@ -118,6 +125,7 @@ func (s *azblobStorage) Sub(_ context.Context, prefix string) (s2.Storage, error
 		client:    s.client,
 		container: s.container,
 		prefix:    path.Join(s.prefix, prefix),
+		uri:       s2.JoinURI(s.uri, prefix),
 	}, nil
 }
 

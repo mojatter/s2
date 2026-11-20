@@ -44,6 +44,7 @@ type storage struct {
 	presignClient presignClientAPI
 	bucket        string
 	prefix        string
+	uri           string // empty when unknown
 	// checksum is the client's RequestChecksumCalculation, which transfermanager would otherwise override.
 	checksum aws.RequestChecksumCalculation
 }
@@ -140,16 +141,35 @@ func NewStorage(ctx context.Context, cfg s2.Config) (s2.Storage, error) {
 
 	bucket, prefix := s2.ParseRoot(cfg.Root)
 	client := s3.NewFromConfig(awsCfg, s3Opts...)
+	uri := s2.JoinURI(bucketURI(aws.ToString(client.Options().BaseEndpoint), bucket), prefix)
+	if client.Options().EndpointResolver != nil { //nolint:staticcheck // read only to tell that the endpoint is unknown
+		// A deprecated resolver hides the endpoint, which "s3://bucket/" would wrongly claim to be AWS.
+		uri = ""
+	}
 	return &storage{
 		client:   client,
 		bucket:   bucket,
 		prefix:   prefix,
+		uri:      uri,
 		checksum: client.Options().RequestChecksumCalculation,
 	}, nil
 }
 
+// bucketURI returns "s3://bucket/", or the path-style URL of bucket on endpoint as JoinURI builds it.
+func bucketURI(endpoint, bucket string) string {
+	if endpoint == "" {
+		return (&url.URL{Scheme: "s3", Host: bucket, Path: "/"}).String()
+	}
+	return s2.JoinURI(endpoint, bucket)
+}
+
 func (s *storage) Type() s2.Type {
 	return s2.TypeS3
+}
+
+// URI returns where s stores objects, such as "s3://bucket/prefix/"; empty when unknown.
+func (s *storage) URI() string {
+	return s.uri
 }
 
 func (s *storage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
@@ -160,6 +180,7 @@ func (s *storage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
 		client:   s.client,
 		bucket:   s.bucket,
 		prefix:   path.Join(s.prefix, prefix),
+		uri:      s2.JoinURI(s.uri, prefix),
 		checksum: s.checksum,
 	}, nil
 }

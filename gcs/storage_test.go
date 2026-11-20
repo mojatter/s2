@@ -525,6 +525,7 @@ func (s *StorageTestSuite) testMockStorage() (*mockGCSClient, s2.Storage) {
 	return m, &gcsStorage{
 		client: m,
 		bucket: "mybucket",
+		uri:    bucketURI("", "mybucket"),
 	}
 }
 
@@ -1081,6 +1082,8 @@ func (s *StorageTestSuite) TestSub() {
 	sub, err := strg.Sub(ctx, "cc")
 	s.Require().NoError(err)
 	s.Equal(s2.TypeGCS, sub.Type())
+	s.Equal("gs://mybucket/", strg.URI())
+	s.Equal("gs://mybucket/cc/", sub.URI())
 
 	res, err := sub.List(ctx, s2.ListOptions{Limit: 10, Recursive: true})
 	s.Require().NoError(err)
@@ -1467,4 +1470,22 @@ func (s *StorageTestSuite) TestSignedURL() {
 	s.Require().NoError(err)
 	s.Contains(url, "mybucket")
 	s.Contains(url, "a.txt")
+}
+
+func (s *StorageTestSuite) TestBucketURI() {
+	testCases := []struct {
+		caseName string
+		host     string
+		want     string
+	}{
+		{caseName: "GCS", want: "gs://b/"},
+		{caseName: "emulator host and port", host: "localhost:4443", want: "http://localhost:4443/b/"},
+		{caseName: "emulator with a scheme", host: "https://emu.example:4443", want: "https://emu.example:4443/b/"},
+		{caseName: "emulator host that does not parse", host: "http://%zz", want: ""},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			s.Equal(tc.want, bucketURI(tc.host, "b"))
+		})
+	}
 }

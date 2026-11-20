@@ -11,8 +11,11 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -68,6 +71,7 @@ func newStorageFS(cfg s2.Config, fs fs.FS, opts ...Option) *storage {
 	}
 	if o, ok := fs.(*osfs.OSFS); ok {
 		s.lk = dirLockerFor(o.Dir)
+		s.uri = fileURI(o.Dir)
 	} else {
 		s.lk = newNameLocker()
 	}
@@ -80,8 +84,17 @@ func NewStorageMem(cfg s2.Config, opts ...Option) s2.Storage {
 		fsys: memfs.New(),
 		typ:  s2.TypeMemFS,
 		lk:   newNameLocker(),
+		uri:  (&url.URL{Scheme: "mem", Host: strconv.FormatUint(memIDs.Add(1), 10), Path: "/"}).String(),
 	}
 	return s.with(opts)
+}
+
+// memIDs numbers the memfs storages, each its own URI host.
+var memIDs atomic.Uint64
+
+// fileURI returns the file URI of dir, as rootKey resolves it.
+func fileURI(dir string) string {
+	return s2.JoinURI((&url.URL{Scheme: "file", Path: "/"}).String(), filepath.ToSlash(rootKey(dir)))
 }
 
 func NewStorageDir(dir string, opts ...Option) s2.Storage {
@@ -89,6 +102,7 @@ func NewStorageDir(dir string, opts ...Option) s2.Storage {
 		fsys: osfs.DirFS(dir),
 		typ:  s2.TypeOSFS,
 		lk:   dirLockerFor(dir),
+		uri:  fileURI(dir),
 	}
 	return s.with(opts)
 }
@@ -108,6 +122,7 @@ type storage struct {
 	prefix string // of this storage under the lock root
 	root   fs.FS  // the lock root, nil when fsys is it
 	noSync bool   // set by WithoutSync
+	uri    string // empty when unknown
 }
 
 // rootFS is the filesystem the storage was created on, which a Sub's prefix lies under.
@@ -127,6 +142,11 @@ func (s *storage) Type() s2.Type {
 		}
 	}
 	return s.typ
+}
+
+// URI returns where s stores objects: "file:///dir/prefix/" on osfs, "mem://n/prefix/" on memfs, empty otherwise.
+func (s *storage) URI() string {
+	return s.uri
 }
 
 func (s *storage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
@@ -158,7 +178,7 @@ func (s *storage) sub(prefix string) (s2.Storage, error) {
 	// io/fs.Sub takes neither.
 	prefix = strings.TrimSuffix(prefix, "/")
 	if prefix == "" {
-		return &storage{cfg: s.cfg, fsys: s.fsys, typ: s.typ, lk: s.lk, prefix: s.prefix, root: s.root, noSync: s.noSync}, nil
+		return &storage{cfg: s.cfg, fsys: s.fsys, typ: s.typ, lk: s.lk, prefix: s.prefix, root: s.root, noSync: s.noSync, uri: s.uri}, nil
 	}
 	sub, err := fs.Sub(s.fsys, prefix)
 	if err != nil {
@@ -172,6 +192,7 @@ func (s *storage) sub(prefix string) (s2.Storage, error) {
 		prefix: path.Join(s.prefix, prefix),
 		root:   s.rootFS(),
 		noSync: s.noSync,
+		uri:    s2.JoinURI(s.uri, prefix),
 	}, nil
 }
 
