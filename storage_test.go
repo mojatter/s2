@@ -447,10 +447,13 @@ type mapStorage struct {
 	stuck         bool
 	invalid       string // refused by name, as fs refuses its reserved names
 	getErrStored  error  // Get answers it once the object is stored
+	uri           string
 	copies        []string
 	gets          []string
 	puts          []string
 }
+
+func (s *mapStorage) URI() string { return s.uri }
 
 func newMapStorage(objs ...Object) *mapStorage {
 	s := &mapStorage{objs: map[string]Object{}, pageSize: 1000}
@@ -841,12 +844,171 @@ func TestCopyStorage(t *testing.T) {
 			wantResume: &ListOptions{Prefix: "a/", Recursive: true},
 		},
 		{
+			caseName:   "refuses a dst whose URI lies inside the selection",
+			src:        &mapStorage{objs: newMapStorage(photo("a")).objs, pageSize: 1000, uri: "mem://1/"},
+			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://1/backup/"},
+			opts:       CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			wantErr:    `DstDir "" on mem://1/backup/ overlaps Prefix "" on mem://1/`,
+			wantResume: &ListOptions{Recursive: true},
+		},
+		{
+			caseName: "copies into a dst whose URI holds the selection",
+			src:      &mapStorage{objs: newMapStorage(photo("a")).objs, pageSize: 1000, uri: "s3://b/x/"},
+			dst:      &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "s3://b"},
+			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			want:     CopyStorageResult{Copied: 1},
+			wantDst:  []string{"a"},
+		},
+		{
+			caseName: "counts an object whose copy would land inside the selection",
+			src:      &mapStorage{objs: newMapStorage(photo("a"), photo("x/a"), photo("z")).objs, pageSize: 1, uri: "s3://b/x/"},
+			dst:      &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "s3://b"},
+			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}, Overwrite: true},
+			want:     CopyStorageResult{Copied: 2, Rejected: 1},
+			wantDst:  []string{"a", "z"},
+		},
+		{
+			caseName:   "resumes past an object whose copy would land inside the selection",
+			src:        &mapStorage{objs: newMapStorage(photo("x/a"), photo("y")).objs, pageSize: 1000, uri: "s3://b/x/", failGet: "y"},
+			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "s3://b"},
+			opts:       CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			want:       CopyStorageResult{Rejected: 1},
+			wantErr:    "get failed",
+			wantResume: &ListOptions{Recursive: true, StartAfter: "x/a"},
+		},
+		{
+			caseName: "copies beside the selection under a DstDir sharing its first letters",
+			src:      &mapStorage{objs: newMapStorage(photo("a")).objs, pageSize: 1000, uri: "mem://1/backup2/"},
+			dst:      &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://1/"},
+			opts:     CopyStorageOptions{DstDir: "backup", SrcOptions: ListOptions{Recursive: true}},
+			want:     CopyStorageResult{Copied: 1},
+			wantDst:  []string{"backup/a"},
+		},
+		{
+			caseName:   "refuses a DstDir that is the selection",
+			src:        &mapStorage{objs: newMapStorage(photo("a")).objs, pageSize: 1000, uri: "mem://1/backup/"},
+			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://1/"},
+			opts:       CopyStorageOptions{DstDir: "backup", SrcOptions: ListOptions{Recursive: true}},
+			wantErr:    "overlaps",
+			wantResume: &ListOptions{Recursive: true},
+		},
+		{
+			caseName: "copies between hosts differing in case",
+			src:      &mapStorage{objs: newMapStorage(photo("a")).objs, pageSize: 1000, uri: "s3://MyBucket/"},
+			dst:      &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "s3://mybucket/"},
+			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			want:     CopyStorageResult{Copied: 1},
+			wantDst:  []string{"a"},
+		},
+		{
+			caseName: "copies into a view inside a non-recursive selection",
+			src:      &mapStorage{objs: newMapStorage(photo("a"), photo("b")).objs, pageSize: 1, uri: "mem://1/"},
+			dst:      &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://1/backup/"},
+			want:     CopyStorageResult{Copied: 2},
+			wantDst:  []string{"a", "b"},
+		},
+		{
+			caseName:   "refuses a non-recursive copy onto the selection itself",
+			src:        &mapStorage{objs: newMapStorage(photo("a")).objs, pageSize: 1000, uri: "mem://1/"},
+			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://1/"},
+			wantErr:    "overlaps",
+			wantResume: &ListOptions{},
+		},
+		{
+			caseName:   "refuses a non-recursive copy onto a selection named without its slash",
+			src:        &mapStorage{objs: newMapStorage(photo("d/a")).objs, pageSize: 1000, uri: "mem://1/"},
+			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://1/"},
+			opts:       CopyStorageOptions{SrcOptions: ListOptions{Prefix: "d"}},
+			wantErr:    "overlaps",
+			wantResume: &ListOptions{Prefix: "d"},
+		},
+		{
+			caseName:   "refuses a non-recursive copy into a DstDir that is the selection",
+			src:        &mapStorage{objs: newMapStorage(photo("a")).objs, pageSize: 1000, uri: "mem://1/x/"},
+			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://1/"},
+			opts:       CopyStorageOptions{DstDir: "x"},
+			wantErr:    `DstDir "x" on mem://1/ overlaps Prefix "" on mem://1/x/`,
+			wantResume: &ListOptions{},
+		},
+		{
+			caseName: "copies between opaque URIs",
+			src:      &mapStorage{objs: newMapStorage(photo("a")).objs, pageSize: 1000, uri: "custom:a/"},
+			dst:      &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "custom:b/"},
+			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			want:     CopyStorageResult{Copied: 1},
+			wantDst:  []string{"a"},
+		},
+		{
+			caseName:   "compares URIs cleaned",
+			src:        &mapStorage{objs: newMapStorage(photo("a")).objs, pageSize: 1000, uri: "s3://b//x/"},
+			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "s3://b/x/bk/"},
+			opts:       CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			wantErr:    `DstDir "" on s3://b/x/bk/ overlaps Prefix "" on s3://b/x/`,
+			wantResume: &ListOptions{Recursive: true},
+		},
+		{
+			caseName:   "leaves credentials and query out of the error",
+			src:        &mapStorage{objs: newMapStorage(photo("a")).objs, pageSize: 1000, uri: "https://u:pw@h/b/?sv=x"},
+			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "https://h/b/bk/"},
+			opts:       CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			wantErr:    `DstDir "" on https://h/b/bk/ overlaps Prefix "" on https://h/b/`,
+			wantResume: &ListOptions{Recursive: true},
+		},
+		{
+			caseName:   "compares URIs unescaped",
+			src:        &mapStorage{objs: newMapStorage(photo("a")).objs, pageSize: 1000, uri: "file:///d/%61/"},
+			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "file:///d/a/bk/"},
+			opts:       CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			wantErr:    "overlaps",
+			wantResume: &ListOptions{Recursive: true},
+		},
+		{
+			caseName: "copies to a view of src outside the selection",
+			src:      &mapStorage{objs: newMapStorage(photo("data/a"), photo("x")).objs, pageSize: 1000, uri: "mem://1/"},
+			dst:      &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://1/backup/"},
+			opts:     CopyStorageOptions{SrcOptions: ListOptions{Prefix: "data/", Recursive: true}},
+			want:     CopyStorageResult{Copied: 1},
+			wantDst:  []string{"data/a"},
+		},
+		{
+			caseName: "copies to a URI on another host",
+			src:      &mapStorage{objs: newMapStorage(photo("a")).objs, pageSize: 1000, uri: "mem://1/"},
+			dst:      &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://2/backup/"},
+			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			want:     CopyStorageResult{Copied: 1},
+			wantDst:  []string{"a"},
+		},
+		{
+			caseName: "copies when dst has no URI",
+			src:      &mapStorage{objs: newMapStorage(photo("a")).objs, pageSize: 1000, uri: "mem://1/"},
+			dst:      newMapStorage(),
+			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			want:     CopyStorageResult{Copied: 1},
+			wantDst:  []string{"a"},
+		},
+		{
 			caseName:   "refuses an invalid DstDir",
 			src:        newMapStorage(photo("a")),
 			dst:        newMapStorage(),
 			opts:       CopyStorageOptions{DstDir: "../x"},
 			wantErr:    "invalid name",
 			wantResume: &ListOptions{},
+		},
+		{
+			caseName:   "refuses an invalid Prefix on one storage",
+			src:        newMapStorage(photo("a")),
+			opts:       CopyStorageOptions{SrcOptions: ListOptions{Prefix: "a//", Recursive: true}},
+			wantErr:    "invalid name",
+			wantDst:    []string{"a"},
+			wantResume: &ListOptions{Prefix: "a//", Recursive: true},
+		},
+		{
+			caseName:   "refuses an invalid Prefix between views of one URI",
+			src:        &mapStorage{objs: newMapStorage(photo("a")).objs, pageSize: 1000, uri: "mem://1/"},
+			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://1/"},
+			opts:       CopyStorageOptions{SrcOptions: ListOptions{Prefix: "./a", Recursive: true}},
+			wantErr:    "invalid name",
+			wantResume: &ListOptions{Prefix: "./a", Recursive: true},
 		},
 	}
 	for _, tc := range testCases {

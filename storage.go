@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -385,7 +386,7 @@ type CopyStorageResult struct {
 	Skipped int64
 	// Unsupported is the number of objects src lists but cannot read; they are skipped.
 	Unsupported int64
-	// Rejected is the number of objects src or dst refuses by name (ErrInvalidName); they are skipped.
+	// Rejected is the number of objects src or dst refuses by name (ErrInvalidName), or whose copy lands in the selection.
 	Rejected int64
 	// ResumeOptions is nil when the call finished; otherwise pass it as SrcOptions to continue.
 	// Its StartAfter ends the range already processed; with Overwrite, objects past it may be written again.
@@ -395,8 +396,9 @@ type CopyStorageResult struct {
 // CopyStorage copies the objects opts.SrcOptions selects on src to dst, keeping each object's name, Content-Type and metadata.
 // It stops at the first error, keeping what was copied. With Overwrite false, the check for an existing object is atomic
 // against a concurrent writer only when dst != src and dst's Uploader honours IfNoneMatch.
-// When dst == src, a DstDir that could place copies inside the selection is refused before copying;
-// a dst that is another view of src, such as a Sub, a wrapper or a second Storage on the same bucket, is not detected and unsupported.
+// When dst == src, or their URIs share a scheme and host, a dst and DstDir that place copies inside the selection are refused,
+// and with such URIs an object whose copy would still land there is counted in Rejected.
+// A dst that is another view of src in a way the URIs do not show is not detected, and a recursive copy can then loop.
 func CopyStorage(ctx context.Context, src, dst Storage, opts CopyStorageOptions) (res CopyStorageResult, err error) {
 	last := ""
 	defer func() {
@@ -408,9 +410,33 @@ func CopyStorage(ctx context.Context, src, dst Storage, opts CopyStorageOptions)
 	if err := ValidatePrefix(opts.DstDir); err != nil {
 		return res, err
 	}
+	if err := ValidatePrefix(opts.SrcOptions.Prefix); err != nil {
+		return res, err
+	}
 	same := sameStorage(src, dst)
 	if same && strings.HasPrefix(Key(opts.DstDir, opts.SrcOptions.Prefix), opts.SrcOptions.Prefix) {
 		return res, fmt.Errorf("s2: CopyStorage onto the same storage: DstDir %q overlaps Prefix %q", opts.DstDir, opts.SrcOptions.Prefix)
+	}
+	srcAt, dstAt, views := uriPaths(src, dst)
+	views = views && !same
+	prefix := opts.SrcOptions.Prefix
+	if !opts.SrcOptions.Recursive {
+		// A non-recursive listing reads Prefix as a directory and stops at the next "/".
+		prefix = dirPrefix(prefix)
+	}
+	sel := srcAt + prefix
+	// listed reports whether the listing would return a key at p.
+	listed := func(p string) bool {
+		rest, ok := strings.CutPrefix(p, sel)
+		return ok && (opts.SrcOptions.Recursive || !strings.Contains(rest, "/"))
+	}
+	if views {
+		// Every copy lands under out, so out inside the selection would list the copies again.
+		out := dstAt + dirPrefix(opts.DstDir) + prefix
+		if listed(out) {
+			return res, fmt.Errorf("s2: CopyStorage: DstDir %q on %s overlaps Prefix %q on %s",
+				opts.DstDir, JoinURI(dst.URI(), ""), opts.SrcOptions.Prefix, JoinURI(src.URI(), ""))
+		}
 	}
 	lopts := opts.SrcOptions
 	for {
@@ -425,6 +451,12 @@ func CopyStorage(ctx context.Context, src, dst Storage, opts CopyStorageOptions)
 				continue
 			}
 			dstName := Key(opts.DstDir, obj.Name())
+			// A copy inside the selection would be listed again, or change the objects being copied.
+			if views && listed(dstAt+dstName) {
+				res.Rejected++
+				last = obj.Name()
+				continue
+			}
 			if same {
 				err = copyWithin(ctx, src, obj.Name(), dstName, opts.Overwrite, &res)
 			} else {
@@ -463,6 +495,34 @@ func sameStorage(a, b Storage) (same bool) {
 	}()
 
 	return a == b
+}
+
+// uriPaths returns the unescaped URI paths of src and dst, each ending in "/", when both have a URI with the same scheme and host.
+func uriPaths(src, dst Storage) (srcAt, dstAt string, ok bool) {
+	su, sok := parseURI(src)
+	du, dok := parseURI(dst)
+	// An s3:// host is a bucket name, whose case matters.
+	if !sok || !dok || su.Scheme != du.Scheme || su.Host != du.Host {
+		return "", "", false
+	}
+	return su.Path, du.Path, true
+}
+
+// parseURI parses s's URI as JoinURI cleans it; JoinURI leaves out one it cannot extend, such as "custom:a/".
+func parseURI(s Storage) (*url.URL, bool) {
+	u, err := url.Parse(JoinURI(s.URI(), ""))
+	if err != nil || u.Scheme == "" {
+		return nil, false
+	}
+	return u, true
+}
+
+// dirPrefix returns dir with a trailing "/", or "" for no dir.
+func dirPrefix(dir string) string {
+	if dir = strings.TrimSuffix(dir, "/"); dir != "" {
+		return dir + "/"
+	}
+	return ""
 }
 
 // copyWithin copies name to dstName on s with Storage.Copy.
