@@ -4901,3 +4901,115 @@ func TestURI(t *testing.T) {
 	}
 	assert.NotEqual(t, memRoot, NewStorageMem(s2.Config{}).URI())
 }
+
+func TestCopyStorageOntoView(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		newSrc   func(dir string) s2.Storage
+		dst      func(t *testing.T, src s2.Storage, dir string) s2.Storage
+		names    []string
+		prefix   string
+		flat     bool // lists without Recursive
+		dstHolds bool // dst is an ancestor of src, so the copies count there
+		want     s2.CopyStorageResult
+		wantErr  bool
+	}{
+		{
+			caseName: "refuses a Sub of src inside the selection",
+			newSrc:   func(string) s2.Storage { return NewStorageMem(s2.Config{}) },
+			dst: func(t *testing.T, src s2.Storage, _ string) s2.Storage {
+				d, err := src.Sub(t.Context(), "backup")
+				require.NoError(t, err)
+				return d
+			},
+			names:   []string{"a", "m", "z"},
+			wantErr: true,
+		},
+		{
+			caseName: "refuses another osfs storage inside the selection",
+			newSrc:   func(dir string) s2.Storage { return NewStorageDir(dir) },
+			dst: func(_ *testing.T, _ s2.Storage, dir string) s2.Storage {
+				return NewStorageDir(filepath.Join(dir, "backup"))
+			},
+			names:   []string{"a", "m", "z"},
+			wantErr: true,
+		},
+		{
+			caseName: "copies to a Sub of src outside the selection",
+			newSrc:   func(string) s2.Storage { return NewStorageMem(s2.Config{}) },
+			dst: func(t *testing.T, src s2.Storage, _ string) s2.Storage {
+				d, err := src.Sub(t.Context(), "backup")
+				require.NoError(t, err)
+				return d
+			},
+			names:  []string{"data/a", "data/m", "data/z"},
+			prefix: "data/",
+			want:   s2.CopyStorageResult{Copied: 3},
+		},
+		{
+			caseName: "copies to a Sub of src with a non-recursive listing",
+			newSrc:   func(string) s2.Storage { return NewStorageMem(s2.Config{}) },
+			dst: func(t *testing.T, src s2.Storage, _ string) s2.Storage {
+				d, err := src.Sub(t.Context(), "backup")
+				require.NoError(t, err)
+				return d
+			},
+			names: []string{"a", "m", "z"},
+			flat:  true,
+			want:  s2.CopyStorageResult{Copied: 3},
+		},
+		{
+			caseName: "skips the copy that would land on src in its parent",
+			newSrc:   func(dir string) s2.Storage { return NewStorageDir(filepath.Join(dir, "x")) },
+			dst: func(_ *testing.T, _ s2.Storage, dir string) s2.Storage {
+				return NewStorageDir(dir)
+			},
+			names:    []string{"a", "x/a", "z"},
+			dstHolds: true,
+			want:     s2.CopyStorageResult{Copied: 2, Rejected: 1},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			// Bounds the endless copy a missed overlap would start.
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+
+			dir := t.TempDir()
+			src := tc.newSrc(dir)
+			for _, name := range tc.names {
+				require.NoError(t, src.Put(ctx, s2.NewObjectBytes(name, []byte(name))))
+			}
+			dst := tc.dst(t, src, dir)
+			got, err := s2.CopyStorage(ctx, src, dst, s2.CopyStorageOptions{
+				SrcOptions: s2.ListOptions{Prefix: tc.prefix, Recursive: !tc.flat, Limit: 1},
+				Overwrite:  true,
+			})
+			if tc.wantErr {
+				assert.ErrorContains(t, err, "overlaps")
+			} else {
+				assert.NoError(t, err)
+			}
+			got.ResumeOptions = nil
+			assert.Equal(t, tc.want, got)
+			// No copy may land on a source object.
+			for _, name := range tc.names {
+				obj, err := src.Get(ctx, name)
+				require.NoError(t, err)
+				rc, err := obj.Open()
+				require.NoError(t, err)
+				body, err := io.ReadAll(rc)
+				_ = rc.Close()
+				require.NoError(t, err)
+				assert.Equal(t, name, string(body))
+			}
+			holder := src
+			if tc.dstHolds {
+				holder = dst
+			}
+			n, err := s2.Count(ctx, holder, s2.CountOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, int64(len(tc.names))+tc.want.Copied, n.Objects)
+		})
+	}
+}
