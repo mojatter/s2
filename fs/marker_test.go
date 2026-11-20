@@ -259,7 +259,11 @@ func TestMarkerBodyBeforeLock(t *testing.T) {
 			done <- strg.Put(ctx, s2.NewObjectReader("slow/", io.NopCloser(body), 0))
 		}()
 		<-body.reading
-		defer close(body.release)
+		// Wait for Put so it does not write into TempDir while it is removed.
+		defer func() {
+			close(body.release)
+			<-done
+		}()
 
 		// DeleteRecursive takes the root exclusively, which a held name lock would block.
 		deleted := make(chan error, 1)
