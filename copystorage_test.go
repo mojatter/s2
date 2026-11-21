@@ -176,6 +176,7 @@ func TestCopyStorage(t *testing.T) {
 		wantErr     string
 		wantResume  *ListOptions
 		wantKeepsMD string
+		wantReports []string // "status name>dstName", then ": err" when Err is set
 	}{
 		{
 			caseName:    "copies every page under DstDir, keeping markers and metadata",
@@ -195,30 +196,33 @@ func TestCopyStorage(t *testing.T) {
 			wantDst:  []string{"a/1"},
 		},
 		{
-			caseName: "skips an existing object without an Uploader or reading it",
-			src:      newMapStorage(photo("a"), photo("b")),
-			dst:      newMapStorage(NewObjectBytes("a", []byte("old"))),
-			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
-			want:     CopyStorageResult{Copied: 1, Skipped: 1},
-			wantDst:  []string{"a=old", "b"},
-			wantGets: []string{"b"},
+			caseName:    "skips an existing object without an Uploader or reading it",
+			src:         newMapStorage(photo("a"), photo("b")),
+			dst:         newMapStorage(NewObjectBytes("a", []byte("old"))),
+			opts:        CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			want:        CopyStorageResult{Copied: 1, Skipped: 1},
+			wantDst:     []string{"a=old", "b"},
+			wantGets:    []string{"b"},
+			wantReports: []string{"skipped a>a", "copied b>b"},
 		},
 		{
-			caseName: "skips an existing object through the Uploader without reading it",
-			src:      newMapStorage(photo("a"), photo("b")),
-			dst:      &uploaderMapStorage{mapStorage: newMapStorage(NewObjectBytes("a", []byte("old")))},
-			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
-			want:     CopyStorageResult{Copied: 1, Skipped: 1},
-			wantDst:  []string{"a=old", "b"},
-			wantGets: []string{"b"},
+			caseName:    "skips an existing object through the Uploader without reading it",
+			src:         newMapStorage(photo("a"), photo("b")),
+			dst:         &uploaderMapStorage{mapStorage: newMapStorage(NewObjectBytes("a", []byte("old")))},
+			opts:        CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			want:        CopyStorageResult{Copied: 1, Skipped: 1},
+			wantDst:     []string{"a=old", "b"},
+			wantGets:    []string{"b"},
+			wantReports: []string{"skipped a>a", "copied b>b"},
 		},
 		{
-			caseName: "falls back to Put when the Uploader answers ErrUnsupported",
-			src:      newMapStorage(photo("a"), photo("b")),
-			dst:      &uploaderMapStorage{mapStorage: newMapStorage(NewObjectBytes("a", []byte("old"))), unsupported: true},
-			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
-			want:     CopyStorageResult{Copied: 1, Skipped: 1},
-			wantDst:  []string{"a=old", "b"},
+			caseName:    "falls back to Put when the Uploader answers ErrUnsupported",
+			src:         newMapStorage(photo("a"), photo("b")),
+			dst:         &uploaderMapStorage{mapStorage: newMapStorage(NewObjectBytes("a", []byte("old"))), unsupported: true},
+			opts:        CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			want:        CopyStorageResult{Copied: 1, Skipped: 1},
+			wantDst:     []string{"a=old", "b"},
+			wantReports: []string{"skipped a>a", "copied b>b"},
 		},
 		{
 			caseName: "counts an object stored with an unknown ETag as copied",
@@ -246,45 +250,50 @@ func TestCopyStorage(t *testing.T) {
 			wantDst:  []string{"x", "x/y"},
 		},
 		{
-			caseName: "counts a name dst refuses before reading it",
-			src:      newMapStorage(photo("a"), photo("b")),
-			dst:      &mapStorage{objs: map[string]Object{}, pageSize: 1000, invalid: "a"},
-			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
-			want:     CopyStorageResult{Copied: 1, Rejected: 1},
-			wantDst:  []string{"b"},
-			wantGets: []string{"b"},
+			caseName:    "counts a name dst refuses before reading it",
+			src:         newMapStorage(photo("a"), photo("b")),
+			dst:         &mapStorage{objs: map[string]Object{}, pageSize: 1000, invalid: "a"},
+			opts:        CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			want:        CopyStorageResult{Copied: 1, Rejected: 1},
+			wantDst:     []string{"b"},
+			wantGets:    []string{"b"},
+			wantReports: []string{"rejected a>a: s2: invalid name: a", "copied b>b"},
 		},
 		{
-			caseName: "counts a name src lists but refuses",
-			src:      &mapStorage{objs: newMapStorage(photo("a"), photo("b")).objs, pageSize: 1000, invalid: "a"},
-			dst:      newMapStorage(),
-			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
-			want:     CopyStorageResult{Copied: 1, Rejected: 1},
-			wantDst:  []string{"b"},
+			caseName:    "counts a name src lists but refuses",
+			src:         &mapStorage{objs: newMapStorage(photo("a"), photo("b")).objs, pageSize: 1000, invalid: "a"},
+			dst:         newMapStorage(),
+			opts:        CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			want:        CopyStorageResult{Copied: 1, Rejected: 1},
+			wantDst:     []string{"b"},
+			wantReports: []string{"rejected a>a: s2: invalid name: a", "copied b>b"},
 		},
 		{
-			caseName: "replaces an existing object with Overwrite",
-			src:      newMapStorage(photo("a")),
-			dst:      newMapStorage(NewObjectBytes("a", []byte("old"))),
-			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}, Overwrite: true},
-			want:     CopyStorageResult{Copied: 1},
-			wantDst:  []string{"a"},
+			caseName:    "replaces an existing object with Overwrite",
+			src:         newMapStorage(photo("a")),
+			dst:         newMapStorage(NewObjectBytes("a", []byte("old"))),
+			opts:        CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}, Overwrite: true},
+			want:        CopyStorageResult{Copied: 1},
+			wantDst:     []string{"a"},
+			wantReports: []string{"copied a>a"},
 		},
 		{
-			caseName: "counts an object src cannot read",
-			src:      &mapStorage{objs: newMapStorage(photo("a"), photo("b")).objs, pageSize: 1000, unreadable: "a"},
-			dst:      newMapStorage(),
-			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
-			want:     CopyStorageResult{Copied: 1, Unsupported: 1},
-			wantDst:  []string{"b"},
+			caseName:    "counts an object src cannot read",
+			src:         &mapStorage{objs: newMapStorage(photo("a"), photo("b")).objs, pageSize: 1000, unreadable: "a"},
+			dst:         newMapStorage(),
+			opts:        CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			want:        CopyStorageResult{Copied: 1, Unsupported: 1},
+			wantDst:     []string{"b"},
+			wantReports: []string{"unsupported a>a: unsupported operation: a", "copied b>b"},
 		},
 		{
-			caseName: "counts a name dst refuses",
-			src:      newMapStorage(NewObjectBytes("a/", []byte("x")), photo("b")),
-			dst:      newMapStorage(),
-			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
-			want:     CopyStorageResult{Copied: 1, Rejected: 1},
-			wantDst:  []string{"b"},
+			caseName:    "counts a name dst refuses",
+			src:         newMapStorage(NewObjectBytes("a/", []byte("x")), photo("b")),
+			dst:         newMapStorage(),
+			opts:        CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			want:        CopyStorageResult{Copied: 1, Rejected: 1},
+			wantDst:     []string{"b"},
+			wantReports: []string{"rejected a/>a/: s2: invalid name: a/ has a body", "copied b>b"},
 		},
 		{
 			caseName:   "keeps SrcOptions when the first object fails",
@@ -334,24 +343,26 @@ func TestCopyStorage(t *testing.T) {
 			wantDst:  []string{"a/1", "bk/a/1"},
 		},
 		{
-			caseName:   "keeps an invalid name out of ResumeOptions",
-			src:        &mapStorage{objs: newMapStorage(photo("a"), photo("a//b"), photo("c")).objs, pageSize: 1000, failGet: "c"},
-			dst:        newMapStorage(),
-			opts:       CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
-			want:       CopyStorageResult{Copied: 1, Rejected: 1},
-			wantDst:    []string{"a"},
-			wantGets:   []string{"a", "c"},
-			wantErr:    "get failed",
-			wantResume: &ListOptions{Recursive: true, StartAfter: "a"},
+			caseName:    "keeps an invalid name out of ResumeOptions",
+			src:         &mapStorage{objs: newMapStorage(photo("a"), photo("a//b"), photo("c")).objs, pageSize: 1000, failGet: "c"},
+			dst:         newMapStorage(),
+			opts:        CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
+			want:        CopyStorageResult{Copied: 1, Rejected: 1},
+			wantDst:     []string{"a"},
+			wantGets:    []string{"a", "c"},
+			wantErr:     "get failed",
+			wantResume:  &ListOptions{Recursive: true, StartAfter: "a"},
+			wantReports: []string{"copied a>a", "rejected a//b>: s2: invalid name: a//b"},
 		},
 		{
-			caseName: "rejects an invalid name before joining it with DstDir",
-			src:      newMapStorage(photo("a//x"), photo("a/x")),
-			dst:      newMapStorage(),
-			opts:     CopyStorageOptions{DstDir: "bk", SrcOptions: ListOptions{Recursive: true}},
-			want:     CopyStorageResult{Copied: 1, Rejected: 1},
-			wantDst:  []string{"bk/a/x"},
-			wantGets: []string{"a/x"},
+			caseName:    "rejects an invalid name before joining it with DstDir",
+			src:         newMapStorage(photo("a//x"), photo("a/x")),
+			dst:         newMapStorage(),
+			opts:        CopyStorageOptions{DstDir: "bk", SrcOptions: ListOptions{Recursive: true}},
+			want:        CopyStorageResult{Copied: 1, Rejected: 1},
+			wantDst:     []string{"bk/a/x"},
+			wantGets:    []string{"a/x"},
+			wantReports: []string{"rejected a//x>: s2: invalid name: a//x", "copied a/x>bk/a/x"},
 		},
 		{
 			caseName:   "replaces an existing object within one storage with Overwrite",
@@ -380,12 +391,13 @@ func TestCopyStorage(t *testing.T) {
 			wantResume: &ListOptions{Prefix: "a/", Recursive: true, StartAfter: "a/1"},
 		},
 		{
-			caseName:   "counts a name Copy refuses within one storage",
-			src:        newMapStorage(photo("a/1"), NewObjectBytes("a/b/", []byte("x"))),
-			opts:       CopyStorageOptions{DstDir: "bk", SrcOptions: ListOptions{Prefix: "a/", Recursive: true}},
-			want:       CopyStorageResult{Copied: 1, Rejected: 1},
-			wantDst:    []string{"a/1", "a/b/", "bk/a/1"},
-			wantCopies: []string{"a/1 bk/a/1", "a/b/ bk/a/b/"},
+			caseName:    "counts a name Copy refuses within one storage",
+			src:         newMapStorage(photo("a/1"), NewObjectBytes("a/b/", []byte("x"))),
+			opts:        CopyStorageOptions{DstDir: "bk", SrcOptions: ListOptions{Prefix: "a/", Recursive: true}},
+			want:        CopyStorageResult{Copied: 1, Rejected: 1},
+			wantDst:     []string{"a/1", "a/b/", "bk/a/1"},
+			wantCopies:  []string{"a/1 bk/a/1", "a/b/ bk/a/b/"},
+			wantReports: []string{"copied a/1>bk/a/1", "rejected a/b/>bk/a/b/: s2: invalid name: bk/a/b/ has a body"},
 		},
 		{
 			caseName:   "copies within one storage a name held only as a prefix",
@@ -396,12 +408,13 @@ func TestCopyStorage(t *testing.T) {
 			wantCopies: []string{"x bk/x"},
 		},
 		{
-			caseName:   "copies within one storage with Copy",
-			src:        newMapStorage(photo("a/1"), NewObjectBytes("a/b/", nil), photo("bk/a/1")),
-			opts:       CopyStorageOptions{DstDir: "bk", SrcOptions: ListOptions{Prefix: "a/", Recursive: true}},
-			want:       CopyStorageResult{Copied: 1, Skipped: 1},
-			wantDst:    []string{"a/1", "a/b/", "bk/a/1", "bk/a/b/"},
-			wantCopies: []string{"a/b/ bk/a/b/"},
+			caseName:    "copies within one storage with Copy",
+			src:         newMapStorage(photo("a/1"), NewObjectBytes("a/b/", nil), photo("bk/a/1")),
+			opts:        CopyStorageOptions{DstDir: "bk", SrcOptions: ListOptions{Prefix: "a/", Recursive: true}},
+			want:        CopyStorageResult{Copied: 1, Skipped: 1},
+			wantDst:     []string{"a/1", "a/b/", "bk/a/1", "bk/a/b/"},
+			wantCopies:  []string{"a/b/ bk/a/b/"},
+			wantReports: []string{"skipped a/1>bk/a/1", "copied a/b/>bk/a/b/"},
 		},
 		{
 			caseName:   "refuses a DstDir inside the selection on one storage",
@@ -436,12 +449,13 @@ func TestCopyStorage(t *testing.T) {
 			wantDst:  []string{"a"},
 		},
 		{
-			caseName: "counts an object whose copy would land inside the selection",
-			src:      &mapStorage{objs: newMapStorage(photo("a"), photo("x/a"), photo("z")).objs, pageSize: 1, uri: "s3://b/x/"},
-			dst:      &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "s3://b"},
-			opts:     CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}, Overwrite: true},
-			want:     CopyStorageResult{Copied: 2, Rejected: 1},
-			wantDst:  []string{"a", "z"},
+			caseName:    "counts an object whose copy would land inside the selection",
+			src:         &mapStorage{objs: newMapStorage(photo("a"), photo("x/a"), photo("z")).objs, pageSize: 1, uri: "s3://b/x/"},
+			dst:         &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "s3://b"},
+			opts:        CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}, Overwrite: true},
+			want:        CopyStorageResult{Copied: 2, Rejected: 1},
+			wantDst:     []string{"a", "z"},
+			wantReports: []string{"copied a>a", `rejected x/a>x/a: s2: CopyStorage: copy "x/a" on s3://b/ lands in Prefix "" on s3://b/x/`, "copied z>z"},
 		},
 		{
 			caseName:   "resumes past an object whose copy would land inside the selection",
@@ -597,6 +611,25 @@ func TestCopyStorage(t *testing.T) {
 			if tc.dst != nil {
 				dst = tc.dst
 			}
+			var reports []string
+			counted := CopyStorageResult{}
+			tc.opts.ObjectDone = func(r CopyStorageObjectResult) {
+				line := fmt.Sprintf("%s %s>%s", r.Status, r.Name, r.DstName)
+				if r.Err != nil {
+					line += ": " + r.Err.Error()
+				}
+				reports = append(reports, line)
+				switch r.Status {
+				case CopyStorageCopied:
+					counted.Copied++
+				case CopyStorageSkipped:
+					counted.Skipped++
+				case CopyStorageUnsupported:
+					counted.Unsupported++
+				case CopyStorageRejected:
+					counted.Rejected++
+				}
+			}
 			got, err := CopyStorage(t.Context(), src, dst, tc.opts)
 			if tc.wantErr != "" {
 				assert.ErrorContains(t, err, tc.wantErr)
@@ -606,6 +639,10 @@ func TestCopyStorage(t *testing.T) {
 			assert.Equal(t, tc.wantResume, got.ResumeOptions)
 			got.ResumeOptions = nil
 			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.want, counted, "reports must match the counts")
+			if tc.wantReports != nil {
+				assert.Equal(t, tc.wantReports, reports)
+			}
 
 			var m *mapStorage
 			switch d := dst.(type) {
