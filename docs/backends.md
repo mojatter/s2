@@ -426,4 +426,6 @@ s2-server takes `extra` from its config file or from `S2_SERVER_EXTRA`, which re
 S2_SERVER_TYPE=example S2_SERVER_EXTRA='{"credentials_file": "/etc/example/credentials.json"}' s2-server
 ```
 
+An object the backend lists but cannot read as stored, such as a document that can only be exported, makes `Get` return an error wrapping `errors.ErrUnsupported`: `CopyStorage` skips it and counts it in `Unsupported`, and s2-server answers a GetObject, HeadObject or copy of it with `403 InvalidObjectState`, as S3 answers a GET of an archived object; a HEAD carries no body, so a client sees only the 403 there. GetObjectTagging, which reads nothing from the object, answers its empty tag set. The console's view, meta and preview answer `403` with "object cannot be read as stored". No bundled backend returns the error ([#562](https://github.com/mojatter/s2/issues/562)).
+
 s2-server compiles its backends in by import, so serving a backend from another module needs a main package of its own: a copy of [cmd/s2-server/main.go](../cmd/s2-server/main.go) that also imports the backend's package.

@@ -26,7 +26,7 @@ func handleView(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	obj, err := strg.Get(ctx, objectName)
 	if err != nil {
-		server.WriteConsoleStorageError(w, r, err)
+		server.WriteConsoleGetError(w, r, err)
 		return
 	}
 
@@ -59,7 +59,7 @@ func handleMeta(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	obj, err := strg.Get(ctx, objectName)
 	if err != nil {
-		server.WriteConsoleStorageError(w, r, err)
+		server.WriteConsoleGetError(w, r, err)
 		return
 	}
 
@@ -91,7 +91,7 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	obj, err := strg.Get(ctx, objectName)
 	if err != nil {
-		server.WriteConsoleStorageError(w, r, err)
+		server.WriteConsoleGetError(w, r, err)
 		return
 	}
 

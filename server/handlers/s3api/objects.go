@@ -357,7 +357,7 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	obj, err := strg.Get(ctx, key)
 	if err != nil {
-		writeS2Error(w, r, err)
+		writeGetError(w, r, err)
 		return
 	}
 	// The conditions are judged on the version Get saw, which Open then refuses to swap (#349).
@@ -472,7 +472,7 @@ func setObjectHeaders(w http.ResponseWriter, obj s2.Object, key string) {
 	w.Header().Set("Content-Length", strconv.FormatUint(obj.Length(), 10))
 }
 
-// handleGetObjectTagging answers the empty tag set of an existing object, since s2 keeps no tags.
+// handleGetObjectTagging answers the empty tag set of an existing object, since s2 keeps no tags; one Get cannot read exists too.
 func handleGetObjectTagging(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	server.SetS3Operation(r, "GetObjectTagging")
 	ctx := r.Context()
@@ -481,7 +481,7 @@ func handleGetObjectTagging(s *server.Server, w http.ResponseWriter, r *http.Req
 		writeS2Error(w, r, err)
 		return
 	}
-	if _, err := strg.Get(ctx, r.PathValue("key")); err != nil {
+	if _, err := strg.Get(ctx, r.PathValue("key")); err != nil && !errors.Is(err, errors.ErrUnsupported) {
 		writeS2Error(w, r, err)
 		return
 	}
@@ -698,7 +698,7 @@ func copySourceObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 	}
 	srcObj, err := srcStrg.Get(ctx, key)
 	if err != nil {
-		writeS2Error(w, r, err)
+		writeGetError(w, r, err)
 		return nil, false
 	}
 	// A copy answers 412 where a GET would answer 304, as S3 does.

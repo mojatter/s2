@@ -105,6 +105,7 @@ type Storage interface {
 	// The returned Object's Metadata map is non-nil and writable even when
 	// the object carries none; a List result may report nil instead.
 	// If no object exists at name, the returned error wraps ErrNotExist.
+	// For an object List reports but the backend cannot read, it wraps errors.ErrUnsupported.
 	Get(ctx context.Context, name string) (Object, error)
 	// Exists reports whether anything is present at name. Backends that
 	// expose a directory hierarchy (osfs, memfs) treat both regular

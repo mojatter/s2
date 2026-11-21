@@ -41,6 +41,9 @@ const (
 	msgIncompleteBody = "You did not provide the number of bytes specified by the Content-Length HTTP header"
 )
 
+// msgInvalidObjectState is S3's message for a GET of an archived object.
+const msgInvalidObjectState = "The operation is not valid for the object's storage class"
+
 // msgPreconditionFailed is S3's message for a 412.
 const msgPreconditionFailed = "At least one of the pre-conditions you specified did not hold."
 
@@ -82,6 +85,13 @@ func writeError(w http.ResponseWriter, r *http.Request, code string, message str
 // writeS2Error answers err with S3's code and message and logs the detail the message drops.
 func writeS2Error(w http.ResponseWriter, r *http.Request, err error) {
 	code, msg, status := s2ErrorToS3Error(err)
+	logS3Error(r, code, status, err)
+	writeError(w, r, code, msg, status)
+}
+
+// writeGetError is writeS2Error for a failure from Storage.Get.
+func writeGetError(w http.ResponseWriter, r *http.Request, err error) {
+	code, msg, status := getErrorToS3Error(err)
 	logS3Error(r, code, status, err)
 	writeError(w, r, code, msg, status)
 }
@@ -294,6 +304,14 @@ func uploadErrorToS3Error(err error, conditional bool) (string, string, int) {
 	// A condition the backend cannot hold, or an If-None-Match other than "*", as S3 answers it.
 	if conditional && errors.Is(err, errors.ErrUnsupported) {
 		return "NotImplemented", "A header you provided implies functionality that is not implemented", http.StatusNotImplemented
+	}
+	return s2ErrorToS3Error(err)
+}
+
+// getErrorToS3Error maps a failure from Storage.Get: an object listed but not readable answers 403, as S3 answers a GET of an archived one.
+func getErrorToS3Error(err error) (string, string, int) {
+	if errors.Is(err, errors.ErrUnsupported) {
+		return "InvalidObjectState", msgInvalidObjectState, http.StatusForbidden
 	}
 	return s2ErrorToS3Error(err)
 }
