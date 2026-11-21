@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	cloud.google.com/go/storage v1.71.0
-	github.com/mojatter/s2 v0.34.0
+	github.com/mojatter/s2 v0.35.0
 	github.com/stretchr/testify v1.12.1
 	google.golang.org/api v0.312.0
 )
