@@ -16,6 +16,34 @@ type CopyStorageOptions struct {
 	SrcOptions ListOptions
 	// Overwrite replaces an object that already exists on dst; false skips it.
 	Overwrite bool
+	// ObjectDone, if set, is called for each object counted in the result, in listing order; not for the object a failing call stops at.
+	ObjectDone func(CopyStorageObjectResult)
+}
+
+// CopyStorageStatus is what CopyStorage did with one object, matching a count in CopyStorageResult.
+type CopyStorageStatus string
+
+const (
+	// CopyStorageCopied is an object counted in CopyStorageResult.Copied.
+	CopyStorageCopied CopyStorageStatus = "copied"
+	// CopyStorageSkipped is an object counted in CopyStorageResult.Skipped.
+	CopyStorageSkipped CopyStorageStatus = "skipped"
+	// CopyStorageUnsupported is an object counted in CopyStorageResult.Unsupported.
+	CopyStorageUnsupported CopyStorageStatus = "unsupported"
+	// CopyStorageRejected is an object counted in CopyStorageResult.Rejected.
+	CopyStorageRejected CopyStorageStatus = "rejected"
+)
+
+// CopyStorageObjectResult is what CopyStorage did with one object.
+type CopyStorageObjectResult struct {
+	// Name is the object's name on src.
+	Name string
+	// DstName is the copy's name on dst; empty when Name fails ValidateName.
+	DstName string
+	// Status is the count the object went into.
+	Status CopyStorageStatus
+	// Err is why the object was unsupported or rejected, nil otherwise; a rejection by name wraps ErrInvalidName.
+	Err error
 }
 
 // CopyStorageResult reports what a CopyStorage call did, also when it returns an error.
@@ -29,7 +57,7 @@ type CopyStorageResult struct {
 	// Rejected is the number of objects src or dst refuses by name (ErrInvalidName), or whose copy lands in the selection.
 	Rejected int64
 	// ResumeOptions is nil when the call finished; otherwise pass it as SrcOptions to continue.
-	// Its StartAfter ends the range already processed; with Overwrite, objects past it may be written again.
+	// Its StartAfter ends the range already processed; with Overwrite, objects past it may be written again, and an invalid name past it is counted again.
 	ResumeOptions *ListOptions
 }
 
@@ -78,6 +106,7 @@ func CopyStorage(ctx context.Context, src, dst Storage, opts CopyStorageOptions)
 				opts.DstDir, JoinURI(dst.URI(), ""), opts.SrcOptions.Prefix, JoinURI(src.URI(), ""))
 		}
 	}
+	t := tally{res: &res, done: opts.ObjectDone}
 	lopts := opts.SrcOptions
 	for {
 		page, err := src.List(ctx, lopts)
@@ -86,21 +115,22 @@ func CopyStorage(ctx context.Context, src, dst Storage, opts CopyStorageOptions)
 		}
 		for _, obj := range page.Objects {
 			// Key would fold an invalid name onto another object's, and List refuses it as StartAfter.
-			if ValidateName(obj.Name()) != nil {
-				res.Rejected++
+			if err := ValidateName(obj.Name()); err != nil {
+				t.add(obj.Name(), "", CopyStorageRejected, err)
 				continue
 			}
 			dstName := Key(opts.DstDir, obj.Name())
 			// A copy inside the selection would be listed again, or change the objects being copied.
 			if views && listed(dstAt+dstName) {
-				res.Rejected++
+				t.add(obj.Name(), dstName, CopyStorageRejected, fmt.Errorf("s2: CopyStorage: copy %q on %s lands in Prefix %q on %s",
+					dstName, JoinURI(dst.URI(), ""), opts.SrcOptions.Prefix, JoinURI(src.URI(), "")))
 				last = obj.Name()
 				continue
 			}
 			if same {
-				err = copyWithin(ctx, src, obj.Name(), dstName, opts.Overwrite, &res)
+				err = copyWithin(ctx, src, obj.Name(), dstName, opts.Overwrite, t)
 			} else {
-				err = copyAcross(ctx, src, dst, obj.Name(), dstName, opts.Overwrite, &res)
+				err = copyAcross(ctx, src, dst, obj.Name(), dstName, opts.Overwrite, t)
 			}
 			if err != nil {
 				return res, err
@@ -166,44 +196,44 @@ func dirPrefix(dir string) string {
 }
 
 // copyWithin copies name to dstName on s with Storage.Copy.
-func copyWithin(ctx context.Context, s Storage, name, dstName string, overwrite bool, res *CopyStorageResult) error {
+func copyWithin(ctx context.Context, s Storage, name, dstName string, overwrite bool, t tally) error {
 	if !overwrite {
 		exists, err := hasObject(ctx, s, dstName)
 		if err != nil {
-			return countRejected(err, res)
+			return t.rejected(name, dstName, err)
 		}
 		if exists {
-			res.Skipped++
+			t.add(name, dstName, CopyStorageSkipped, nil)
 			return nil
 		}
 	}
 	if err := s.Copy(ctx, name, dstName); err != nil {
-		return countRejected(err, res)
+		return t.rejected(name, dstName, err)
 	}
-	res.Copied++
+	t.add(name, dstName, CopyStorageCopied, nil)
 	return nil
 }
 
 // copyAcross reads name from src with Get, for the metadata a listing may lack, and writes it to dst as dstName.
-func copyAcross(ctx context.Context, src, dst Storage, name, dstName string, overwrite bool, res *CopyStorageResult) error {
+func copyAcross(ctx context.Context, src, dst Storage, name, dstName string, overwrite bool, t tally) error {
 	if !overwrite {
 		// Checked first so an existing object is skipped without sending its body.
 		exists, err := hasObject(ctx, dst, dstName)
 		if err != nil {
-			return countRejected(err, res)
+			return t.rejected(name, dstName, err)
 		}
 		if exists {
-			res.Skipped++
+			t.add(name, dstName, CopyStorageSkipped, nil)
 			return nil
 		}
 	}
 	obj, err := src.Get(ctx, name)
 	if errors.Is(err, errors.ErrUnsupported) {
-		res.Unsupported++
+		t.add(name, dstName, CopyStorageUnsupported, err)
 		return nil
 	}
 	if err != nil {
-		return countRejected(err, res)
+		return t.rejected(name, dstName, err)
 	}
 	out := renamedObject{Object: obj, name: dstName}
 	if overwrite {
@@ -213,13 +243,13 @@ func copyAcross(ctx context.Context, src, dst Storage, name, dstName string, ove
 	}
 	switch {
 	case errors.Is(err, ErrPreconditionFailed):
-		res.Skipped++
+		t.add(name, dstName, CopyStorageSkipped, nil)
 		return nil
 	case err != nil && !errors.Is(err, ErrUnknownETag):
 		// ErrUnknownETag means the object was stored.
-		return countRejected(err, res)
+		return t.rejected(name, dstName, err)
 	}
-	res.Copied++
+	t.add(name, dstName, CopyStorageCopied, nil)
 	return nil
 }
 
@@ -235,10 +265,33 @@ func hasObject(ctx context.Context, s Storage, name string) (bool, error) {
 	return false, err
 }
 
-// countRejected counts err in Rejected when it wraps ErrInvalidName, and returns any other error.
-func countRejected(err error, res *CopyStorageResult) error {
+// tally counts each object in res and reports it.
+type tally struct {
+	res  *CopyStorageResult
+	done func(CopyStorageObjectResult)
+}
+
+// add counts one object under status, then reports it.
+func (t tally) add(name, dstName string, status CopyStorageStatus, err error) {
+	switch status {
+	case CopyStorageCopied:
+		t.res.Copied++
+	case CopyStorageSkipped:
+		t.res.Skipped++
+	case CopyStorageUnsupported:
+		t.res.Unsupported++
+	case CopyStorageRejected:
+		t.res.Rejected++
+	}
+	if t.done != nil {
+		t.done(CopyStorageObjectResult{Name: name, DstName: dstName, Status: status, Err: err})
+	}
+}
+
+// rejected counts err as rejected when it wraps ErrInvalidName, and returns any other error.
+func (t tally) rejected(name, dstName string, err error) error {
 	if errors.Is(err, ErrInvalidName) {
-		res.Rejected++
+		t.add(name, dstName, CopyStorageRejected, err)
 		return nil
 	}
 	return err
