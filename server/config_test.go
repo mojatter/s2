@@ -570,3 +570,85 @@ func TestLoadEnvExtra(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadEnvSections(t *testing.T) {
+	fileJSON := `{
+		"type": "osfs",
+		"osfs": {"confined_root": true, "no_sync": true},
+		"s3": {"endpoint_url": "http://file", "region": "file-region"},
+		"azblob": {"account_name": "file-account", "account_key": "file-key"}
+	}`
+	fileSections := func() s2.Config {
+		return s2.Config{
+			OSFS:   &s2.OSFSConfig{ConfinedRoot: true, NoSync: true},
+			S3:     &s2.S3Config{EndpointURL: "http://file", Region: "file-region"},
+			Azblob: &s2.AzblobConfig{AccountName: "file-account", AccountKey: "file-key"},
+		}
+	}
+	testCases := []struct {
+		caseName string
+		envName  string
+		env      string
+		want     func(*s2.Config)
+		wantErr  string
+	}{
+		{caseName: "unset keeps the file sections", envName: EnvS2ServerOSFS, env: "", want: func(*s2.Config) {}},
+		{
+			caseName: "osfs replaces the file section whole",
+			envName:  EnvS2ServerOSFS,
+			env:      `{"no_sync": true}`,
+			want:     func(c *s2.Config) { c.OSFS = &s2.OSFSConfig{NoSync: true} },
+		},
+		{
+			caseName: "s3 replaces the file section whole",
+			envName:  EnvS2ServerS3,
+			env:      `{"region": "env-region"}`,
+			want:     func(c *s2.Config) { c.S3 = &s2.S3Config{Region: "env-region"} },
+		},
+		{
+			caseName: "gcs absent from the file",
+			envName:  EnvS2ServerGCS,
+			env:      `{"credentials_file": "/env/credentials.json"}`,
+			want:     func(c *s2.Config) { c.GCS = &s2.GCSConfig{CredentialsFile: "/env/credentials.json"} },
+		},
+		{
+			caseName: "azblob replaces the file section whole",
+			envName:  EnvS2ServerAzblob,
+			env:      `{"connection_string": "env-conn"}`,
+			want:     func(c *s2.Config) { c.Azblob = &s2.AzblobConfig{ConnectionString: "env-conn"} },
+		},
+		{
+			caseName: "null clears the file section",
+			envName:  EnvS2ServerOSFS,
+			env:      "null",
+			want:     func(c *s2.Config) { c.OSFS = nil },
+		},
+		{caseName: "not JSON", envName: EnvS2ServerOSFS, env: `{"no_sync":`, wantErr: "invalid S2_SERVER_OSFS"},
+		{caseName: "not an object", envName: EnvS2ServerS3, env: `[]`, wantErr: "invalid S2_SERVER_S3"},
+		{caseName: "wrong field type", envName: EnvS2ServerAzblob, env: `{"account_name": 1}`, wantErr: "invalid S2_SERVER_AZBLOB"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			require.NoError(t, os.WriteFile(path, []byte(fileJSON), 0o600))
+			for _, name := range []string{EnvS2ServerOSFS, EnvS2ServerS3, EnvS2ServerGCS, EnvS2ServerAzblob} {
+				t.Setenv(name, "")
+			}
+			t.Setenv(tc.envName, tc.env)
+			cfg := DefaultConfig()
+			require.NoError(t, cfg.LoadFile(path))
+			err := cfg.LoadEnv()
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			want := fileSections()
+			tc.want(&want)
+			assert.Equal(t, want.OSFS, cfg.OSFS)
+			assert.Equal(t, want.S3, cfg.S3)
+			assert.Equal(t, want.GCS, cfg.GCS)
+			assert.Equal(t, want.Azblob, cfg.Azblob)
+		})
+	}
+}

@@ -38,9 +38,11 @@ As JSON:
 
 Access control is governed by filesystem permissions.
 
+s2-server takes this section from the `osfs` key of its config file or from `S2_SERVER_OSFS`, which replaces the file's section as a whole, so it must repeat a `confined_root` or `no_sync` the file sets.
+
 ### Skipping fsync
 
-On `osfs`, a write fsyncs the object and its metadata file before renaming each into place, then the directories holding them and the parent of each directory it created, and a delete or `s2.Move` fsyncs the directories it changed, so an acknowledged change survives a power loss or kernel crash. Setting `osfs.no_sync` (`s2.Config.OSFS.NoSync`, for s2-server in the `S2_SERVER_CONFIG` file, or `fs.WithoutSync()` on `fs.NewStorageDir` and `fs.NewStorageFS`) skips every one of them; a 1 KiB `Put` then takes about 0.4 ms instead of 17.7 ms on macOS ([Benchmarks](../README.md#benchmarks)), and about 0.05 ms instead of 5.2 ms in a one-off run on Linux (EC2 m7i.large, EBS gp3, xfs).
+On `osfs`, a write fsyncs the object and its metadata file before renaming each into place, then the directories holding them and the parent of each directory it created, and a delete or `s2.Move` fsyncs the directories it changed, so an acknowledged change survives a power loss or kernel crash. Setting `osfs.no_sync` (`s2.Config.OSFS.NoSync`, for s2-server in the `S2_SERVER_CONFIG` file or `S2_SERVER_OSFS`, or `fs.WithoutSync()` on `fs.NewStorageDir` and `fs.NewStorageFS`) skips every one of them; a 1 KiB `Put` then takes about 0.4 ms instead of 17.7 ms on macOS ([Benchmarks](../README.md#benchmarks)), and about 0.05 ms instead of 5.2 ms in a one-off run on Linux (EC2 m7i.large, EBS gp3, xfs).
 
 A write still goes through a temp file and a rename, so a failed write leaves the previous object, and a crash of the s2-server process alone loses nothing the kernel has accepted. An OS crash or power loss, however, can undo recently acknowledged writes and deletes, and an object written shortly before may be left empty or truncated. So may its metadata file, and reading the object then fails (`500 InternalError` over S3) until it is written again or deleted. s2-server keeps each bucket's state under `.buckets/` in the same storage, so the same can happen to it: multipart requests on that bucket then fail with `500 InternalError` until the bucket is deleted and created again, or `.buckets/.meta/<bucket>` under the root is removed by hand. A storage on the same root without the setting syncs only what it writes itself, not a directory a `no_sync` storage created earlier. Use it for data that can be regenerated, such as a cache or a bulk import whose source is kept elsewhere, and for test or development runs.
 
@@ -113,6 +115,8 @@ As JSON:
 
 When `S3Config` is nil or all fields are empty, the standard AWS SDK credential chain is used.
 
+s2-server takes this section from the `s3` key of its config file or from `S2_SERVER_S3`, in a build with the `server_s3` tag ([Build tags](../README.md#build-tags)).
+
 `Open` and `OpenRange` read only the version `Get` or `List` saw: they send its ETag as If-Match and compare the ETag of the response, so a key replaced since then fails with `s2.ErrModified` rather than serving another body. A metadata update that gives the object a new ETag fails them too, which happens for an object whose ETag is not the MD5 of its body, such as one uploaded in parts or stored with SSE-KMS or SSE-C.
 
 `Copy`, `Move` and `PutMetadata` each send one CopyObject. When the provider refuses it for a source above 5 GiB, as AWS S3 does, they copy the source as a multipart upload instead, in 1 GiB UploadPartCopy ranges sent five at a time, each pinned to the source's ETag; a source replaced meanwhile fails the call with `s2.ErrModified`. The copy gets a multipart ETag (`"<hex>-N"`), keeps the source's tags, and needs `s3:GetObjectTagging` on AWS even when the source has none, since HEAD does not tell a caller without it whether any exist: without it the copy fails with AccessDenied, which a single CopyObject answers only for a tagged source. A tagged source also needs `s3:PutObjectTagging`, and every copy needs `s3:AbortMultipartUpload` to clean up after a failure. `PutMetadata` completes that upload with If-Match on the source's ETag, so a write landing during the copy is not overwritten; an endpoint that ignores If-Match there can put the old bytes over it. s2-server's CopyObject is not affected: it streams the source through `Upload`, so the s3 backend pointed at it keeps sending one CopyObject.
@@ -159,6 +163,8 @@ As JSON:
 |-------|-------------|
 | `credentials_file` | Path to a service account JSON key file |
 
+s2-server takes this section from the `gcs` key of its config file or from `S2_SERVER_GCS`, in a build with the `server_gcs` tag ([Build tags](../README.md#build-tags)).
+
 `Open` and `OpenRange` read only the generation `Get` or `List` saw, so a key replaced since then fails with `s2.ErrModified` rather than serving another body. A metadata update keeps the generation and does not affect them.
 
 ## Azure Blob Storage
@@ -197,6 +203,8 @@ As JSON:
 | `connection_string` | Full Azure Storage connection string (takes precedence over name+key) |
 
 Authentication priority: `connection_string` > `account_name`+`account_key` > DefaultAzureCredential.
+
+s2-server takes this section from the `azblob` key of its config file or from `S2_SERVER_AZBLOB`, in a build with the `server_azblob` tag ([Build tags](../README.md#build-tags)).
 
 `Open` and `OpenRange` read only the version `Get` or `List` saw, by its native ETag, so a blob replaced since then fails with `s2.ErrModified` rather than serving another body. Azure gives a blob a new ETag on every metadata update, so one since `Get` or `List` fails them too.
 
@@ -291,7 +299,7 @@ To find links under a server root, run `find -H "${S2_SERVER_ROOT:?}" -type l` (
 
 ### Confined root
 
-Setting `osfs.confined_root` (`s2.Config.OSFS.ConfinedRoot`, for s2-server in the `S2_SERVER_CONFIG` file, or `fs.WithConfinedRoot()` on `fs.NewStorageDir` and on `fs.NewStorageFS` over an `osfs` directory) makes `osfs` resolve every path through [`os.Root`](https://pkg.go.dev/os#Root), so no request reaches outside the root the storage was created on, for s2-server `$S2_SERVER_ROOT`, even through a link placed by mistake. It is off by default, since it also stops a symlink from adding a disk.
+Setting `osfs.confined_root` (`s2.Config.OSFS.ConfinedRoot`, for s2-server in the `S2_SERVER_CONFIG` file or `S2_SERVER_OSFS`, or `fs.WithConfinedRoot()` on `fs.NewStorageDir` and on `fs.NewStorageFS` over an `osfs` directory) makes `osfs` resolve every path through [`os.Root`](https://pkg.go.dev/os#Root), so no request reaches outside the root the storage was created on, for s2-server `$S2_SERVER_ROOT`, even through a link placed by mistake. It is off by default, since it also stops a symlink from adding a disk.
 
 - **Links that stay inside keep working:** a relative link whose target lies under the root and whose `..` never climbs above it on the way, such as `ln -s inner "$S2_SERVER_ROOT/<bucket>/in"` or `../<other-bucket>/dir`, behaves as described above. `os.Root` reads `..` by name, so one that climbs above the root and comes back, such as `../../root/<bucket>/inner` for a root named `root`, leads nowhere as a link leading outside does. A PutObject below a link whose target is missing fails and creates nothing, as without `confined_root`, rather than creating the target, such as a deleted bucket. `os.Root` follows at most 8 links in one lookup, fewer than the kernel, so a path crossing more is treated as a link to itself: left out of listings, and a request below it fails. Listing a directory stats each of its entries, so a very large directory lists more slowly than without `confined_root`.
 - **Links leading outside, and every absolute link, lead nowhere:** a link whose target lies outside the root, or that is absolute, even when it points inside, is treated as a link leading nowhere. Listings and `Count` leave it out, a GetObject or HeadObject below it answers `404 NoSuchKey`, and a DeleteObject below it succeeds and removes nothing. A PutObject or `s2.Move` below it fails and writes nothing to the target; PutObject answers `500 InternalError`, as it does below a link leading nowhere without `confined_root`. A PutObject or `s2.Move` to the link's own key replaces the link with the object and leaves the target alone, as for a link leading nowhere without `confined_root`. No delete naming the link removes it: a recursive delete whose prefix is the link's, `out/`, or a part of its name does nothing, as for a link leading to a missing path, while a recursive delete of a folder or bucket above it, and DeleteBucket, remove it with that directory and leave the target's objects.
