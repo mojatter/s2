@@ -42,7 +42,7 @@ type CopyStorageObjectResult struct {
 	DstName string
 	// Status is the count the object went into.
 	Status CopyStorageStatus
-	// Err is why the object was unsupported or rejected, nil otherwise; a rejection by name wraps ErrInvalidName.
+	// Err is why the object was unsupported or rejected, nil otherwise; a rejection wraps ErrInvalidName or ErrOverlap.
 	Err error
 }
 
@@ -54,7 +54,7 @@ type CopyStorageResult struct {
 	Skipped int64
 	// Unsupported is the number of objects src lists but cannot read; they are skipped.
 	Unsupported int64
-	// Rejected is the number of objects src or dst refuses by name (ErrInvalidName), or whose copy lands in the selection.
+	// Rejected is the number of objects src or dst refuses by name (ErrInvalidName), or whose copy lands in the selection (ErrOverlap).
 	Rejected int64
 	// ResumeOptions is nil when the call finished; otherwise pass it as SrcOptions to continue.
 	// Its StartAfter ends the range already processed; with Overwrite, objects past it may be written again, and an invalid name past it is counted again.
@@ -64,7 +64,7 @@ type CopyStorageResult struct {
 // CopyStorage copies the objects opts.SrcOptions selects on src to dst, keeping each object's name, Content-Type and metadata.
 // It stops at the first error, keeping what was copied. With Overwrite false, the check for an existing object is atomic
 // against a concurrent writer only when dst != src and dst's Uploader honours IfNoneMatch.
-// When dst == src, or their URIs share a scheme and host, a dst and DstDir that place copies inside the selection are refused,
+// When dst == src, or their URIs share a scheme and host, a dst and DstDir that place copies inside the selection are refused with ErrOverlap,
 // and with such URIs an object whose copy would still land there is counted in Rejected.
 // A dst that is another view of src in a way the URIs do not show is not detected, and a recursive copy can then loop.
 func CopyStorage(ctx context.Context, src, dst Storage, opts CopyStorageOptions) (res CopyStorageResult, err error) {
@@ -83,7 +83,7 @@ func CopyStorage(ctx context.Context, src, dst Storage, opts CopyStorageOptions)
 	}
 	same := sameStorage(src, dst)
 	if same && strings.HasPrefix(Key(opts.DstDir, opts.SrcOptions.Prefix), opts.SrcOptions.Prefix) {
-		return res, fmt.Errorf("s2: CopyStorage onto the same storage: DstDir %q overlaps Prefix %q", opts.DstDir, opts.SrcOptions.Prefix)
+		return res, fmt.Errorf("%w: DstDir %q overlaps Prefix %q on the same storage", ErrOverlap, opts.DstDir, opts.SrcOptions.Prefix)
 	}
 	srcAt, dstAt, views := uriPaths(src, dst)
 	views = views && !same
@@ -102,8 +102,8 @@ func CopyStorage(ctx context.Context, src, dst Storage, opts CopyStorageOptions)
 		// Every copy lands under out, so out inside the selection would list the copies again.
 		out := dstAt + dirPrefix(opts.DstDir) + prefix
 		if listed(out) {
-			return res, fmt.Errorf("s2: CopyStorage: DstDir %q on %s overlaps Prefix %q on %s",
-				opts.DstDir, JoinURI(dst.URI(), ""), opts.SrcOptions.Prefix, JoinURI(src.URI(), ""))
+			return res, fmt.Errorf("%w: DstDir %q on %s overlaps Prefix %q on %s",
+				ErrOverlap, opts.DstDir, JoinURI(dst.URI(), ""), opts.SrcOptions.Prefix, JoinURI(src.URI(), ""))
 		}
 	}
 	t := tally{res: &res, done: opts.ObjectDone}
@@ -122,8 +122,8 @@ func CopyStorage(ctx context.Context, src, dst Storage, opts CopyStorageOptions)
 			dstName := Key(opts.DstDir, obj.Name())
 			// A copy inside the selection would be listed again, or change the objects being copied.
 			if views && listed(dstAt+dstName) {
-				t.add(obj.Name(), dstName, CopyStorageRejected, fmt.Errorf("s2: CopyStorage: copy %q on %s lands in Prefix %q on %s",
-					dstName, JoinURI(dst.URI(), ""), opts.SrcOptions.Prefix, JoinURI(src.URI(), "")))
+				t.add(obj.Name(), dstName, CopyStorageRejected, fmt.Errorf("%w: %q on %s lands in Prefix %q on %s",
+					ErrOverlap, dstName, JoinURI(dst.URI(), ""), opts.SrcOptions.Prefix, JoinURI(src.URI(), "")))
 				last = obj.Name()
 				continue
 			}
