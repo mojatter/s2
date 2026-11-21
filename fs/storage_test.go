@@ -4986,7 +4986,7 @@ func TestCopyStorageOntoView(t *testing.T) {
 				Overwrite:  true,
 			})
 			if tc.wantErr {
-				assert.ErrorContains(t, err, "overlaps")
+				assert.ErrorIs(t, err, s2.ErrOverlap)
 			} else {
 				assert.NoError(t, err)
 			}

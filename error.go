@@ -43,5 +43,9 @@ var ErrInvalidName = errors.New("s2: invalid name")
 // A Copy or PutMetadata that reads the source in several requests returns it when the source changed in between; retry the call.
 var ErrModified = errors.New("s2: object modified since Get")
 
+// ErrOverlap is returned or reported by CopyStorage for copies that would land inside the objects it selects on src;
+// with dst == src it is also returned for some non-recursive copies that would not.
+var ErrOverlap = errors.New("s2: copy inside the selection")
+
 // ErrPreconditionFailed is returned by Upload when a condition in UploadOptions does not hold; the key is left as it was.
 var ErrPreconditionFailed = errors.New("s2: precondition failed")

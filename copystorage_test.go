@@ -174,6 +174,7 @@ func TestCopyStorage(t *testing.T) {
 		wantPuts    []string
 		asValue     bool
 		wantErr     string
+		wantErrIs   error
 		wantResume  *ListOptions
 		wantKeepsMD string
 		wantReports []string // "status name>dstName", then ": err" when Err is set
@@ -421,6 +422,7 @@ func TestCopyStorage(t *testing.T) {
 			src:        newMapStorage(photo("a/1")),
 			opts:       CopyStorageOptions{DstDir: "a/bk", SrcOptions: ListOptions{Prefix: "a/", Recursive: true}},
 			wantErr:    "overlaps",
+			wantErrIs:  ErrOverlap,
 			wantDst:    []string{"a/1"},
 			wantResume: &ListOptions{Prefix: "a/", Recursive: true},
 		},
@@ -429,6 +431,7 @@ func TestCopyStorage(t *testing.T) {
 			src:        newMapStorage(photo("a/1")),
 			opts:       CopyStorageOptions{SrcOptions: ListOptions{Prefix: "a/", Recursive: true}},
 			wantErr:    "overlaps",
+			wantErrIs:  ErrOverlap,
 			wantDst:    []string{"a/1"},
 			wantResume: &ListOptions{Prefix: "a/", Recursive: true},
 		},
@@ -438,6 +441,7 @@ func TestCopyStorage(t *testing.T) {
 			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://1/backup/"},
 			opts:       CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
 			wantErr:    `DstDir "" on mem://1/backup/ overlaps Prefix "" on mem://1/`,
+			wantErrIs:  ErrOverlap,
 			wantResume: &ListOptions{Recursive: true},
 		},
 		{
@@ -455,7 +459,7 @@ func TestCopyStorage(t *testing.T) {
 			opts:        CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}, Overwrite: true},
 			want:        CopyStorageResult{Copied: 2, Rejected: 1},
 			wantDst:     []string{"a", "z"},
-			wantReports: []string{"copied a>a", `rejected x/a>x/a: s2: CopyStorage: copy "x/a" on s3://b/ lands in Prefix "" on s3://b/x/`, "copied z>z"},
+			wantReports: []string{"copied a>a", `rejected x/a>x/a: s2: copy inside the selection: "x/a" on s3://b/ lands in Prefix "" on s3://b/x/`, "copied z>z"},
 		},
 		{
 			caseName:   "resumes past an object whose copy would land inside the selection",
@@ -480,6 +484,7 @@ func TestCopyStorage(t *testing.T) {
 			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://1/"},
 			opts:       CopyStorageOptions{DstDir: "backup", SrcOptions: ListOptions{Recursive: true}},
 			wantErr:    "overlaps",
+			wantErrIs:  ErrOverlap,
 			wantResume: &ListOptions{Recursive: true},
 		},
 		{
@@ -502,6 +507,7 @@ func TestCopyStorage(t *testing.T) {
 			src:        &mapStorage{objs: newMapStorage(photo("a")).objs, pageSize: 1000, uri: "mem://1/"},
 			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://1/"},
 			wantErr:    "overlaps",
+			wantErrIs:  ErrOverlap,
 			wantResume: &ListOptions{},
 		},
 		{
@@ -510,6 +516,7 @@ func TestCopyStorage(t *testing.T) {
 			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://1/"},
 			opts:       CopyStorageOptions{SrcOptions: ListOptions{Prefix: "d"}},
 			wantErr:    "overlaps",
+			wantErrIs:  ErrOverlap,
 			wantResume: &ListOptions{Prefix: "d"},
 		},
 		{
@@ -518,6 +525,7 @@ func TestCopyStorage(t *testing.T) {
 			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://1/"},
 			opts:       CopyStorageOptions{DstDir: "x"},
 			wantErr:    `DstDir "x" on mem://1/ overlaps Prefix "" on mem://1/x/`,
+			wantErrIs:  ErrOverlap,
 			wantResume: &ListOptions{},
 		},
 		{
@@ -534,6 +542,7 @@ func TestCopyStorage(t *testing.T) {
 			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "s3://b/x/bk/"},
 			opts:       CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
 			wantErr:    `DstDir "" on s3://b/x/bk/ overlaps Prefix "" on s3://b/x/`,
+			wantErrIs:  ErrOverlap,
 			wantResume: &ListOptions{Recursive: true},
 		},
 		{
@@ -542,6 +551,7 @@ func TestCopyStorage(t *testing.T) {
 			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "https://h/b/bk/"},
 			opts:       CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
 			wantErr:    `DstDir "" on https://h/b/bk/ overlaps Prefix "" on https://h/b/`,
+			wantErrIs:  ErrOverlap,
 			wantResume: &ListOptions{Recursive: true},
 		},
 		{
@@ -550,6 +560,7 @@ func TestCopyStorage(t *testing.T) {
 			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "file:///d/a/bk/"},
 			opts:       CopyStorageOptions{SrcOptions: ListOptions{Recursive: true}},
 			wantErr:    "overlaps",
+			wantErrIs:  ErrOverlap,
 			wantResume: &ListOptions{Recursive: true},
 		},
 		{
@@ -582,6 +593,7 @@ func TestCopyStorage(t *testing.T) {
 			dst:        newMapStorage(),
 			opts:       CopyStorageOptions{DstDir: "../x"},
 			wantErr:    "invalid name",
+			wantErrIs:  ErrInvalidName,
 			wantResume: &ListOptions{},
 		},
 		{
@@ -589,6 +601,7 @@ func TestCopyStorage(t *testing.T) {
 			src:        newMapStorage(photo("a")),
 			opts:       CopyStorageOptions{SrcOptions: ListOptions{Prefix: "a//", Recursive: true}},
 			wantErr:    "invalid name",
+			wantErrIs:  ErrInvalidName,
 			wantDst:    []string{"a"},
 			wantResume: &ListOptions{Prefix: "a//", Recursive: true},
 		},
@@ -598,6 +611,7 @@ func TestCopyStorage(t *testing.T) {
 			dst:        &mapStorage{objs: map[string]Object{}, pageSize: 1000, uri: "mem://1/"},
 			opts:       CopyStorageOptions{SrcOptions: ListOptions{Prefix: "./a", Recursive: true}},
 			wantErr:    "invalid name",
+			wantErrIs:  ErrInvalidName,
 			wantResume: &ListOptions{Prefix: "./a", Recursive: true},
 		},
 	}
@@ -628,9 +642,15 @@ func TestCopyStorage(t *testing.T) {
 					counted.Unsupported++
 				case CopyStorageRejected:
 					counted.Rejected++
+					if !errors.Is(r.Err, ErrInvalidName) {
+						assert.ErrorIs(t, r.Err, ErrOverlap, "a rejection wraps ErrInvalidName or ErrOverlap")
+					}
 				}
 			}
 			got, err := CopyStorage(t.Context(), src, dst, tc.opts)
+			if tc.wantErrIs != nil {
+				assert.ErrorIs(t, err, tc.wantErrIs)
+			}
 			if tc.wantErr != "" {
 				assert.ErrorContains(t, err, tc.wantErr)
 			} else {
