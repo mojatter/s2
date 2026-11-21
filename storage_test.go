@@ -2,6 +2,7 @@ package s2
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"strings"
@@ -18,16 +19,19 @@ var _ Storage = (*nilStorage)(nil)
 
 func TestNewStorage(t *testing.T) {
 	testType := Type("test")
+	var gotExtra json.RawMessage
 	RegisterNewStorageFunc(testType, func(ctx context.Context, cfg Config) (Storage, error) {
+		gotExtra = cfg.Extra
 		return &nilStorage{}, nil
 	})
 	defer UnregisterNewStorageFunc(testType)
 
 	testCases := []struct {
-		caseName string
-		ctx      context.Context
-		cfg      Config
-		wantErr  string
+		caseName  string
+		ctx       context.Context
+		cfg       Config
+		wantExtra string
+		wantErr   string
 	}{
 		{
 			caseName: "typical",
@@ -42,15 +46,26 @@ func TestNewStorage(t *testing.T) {
 			},
 			wantErr: "s2: unknown storage type: UNKNOWN",
 		},
+		{
+			caseName:  "extra passed through",
+			cfg:       Config{Type: testType, Extra: json.RawMessage(`{"a": 1}`)},
+			wantExtra: `{"a": 1}`,
+		},
+		{
+			caseName: "null extra reaches the backend empty",
+			cfg:      Config{Type: testType, Extra: json.RawMessage("null")},
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
+			gotExtra = nil
 			_, err := NewStorage(tc.ctx, tc.cfg)
 			if tc.wantErr != "" {
 				assert.EqualError(t, err, tc.wantErr)
 				return
 			}
 			assert.NoError(t, err)
+			assert.Equal(t, tc.wantExtra, string(gotExtra))
 		})
 	}
 }

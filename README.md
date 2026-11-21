@@ -430,6 +430,7 @@ if _, err := strg.Get(ctx, "missing.txt"); errors.Is(err, s2.ErrNotExist) {
 | `S2_SERVER_HEALTH_PATH` | `/healthz` | Health check path served on the S3 listener (set empty to disable) |
 | `S2_SERVER_TYPE` | `osfs` | Storage backend type |
 | `S2_SERVER_ROOT` | `/var/lib/s2` | Root directory for bucket data |
+| `S2_SERVER_EXTRA` | — | JSON settings for a backend registered outside s2, replacing the config file's `extra` as a whole (see [docs/backends.md](docs/backends.md#backends-registered-outside-s2)) |
 | `S2_SERVER_USER` | — | Username for authentication (disables auth if empty) |
 | `S2_SERVER_PASSWORD` | — | Password for authentication |
 | `S2_SERVER_BUCKETS` | — | Comma-separated list of buckets to create on startup |
@@ -507,6 +508,8 @@ aws --profile s2 s3 ls
 ```sh
 s2-server -f config.json
 ```
+
+A backend registered outside s2 reads its own settings from `extra`, a JSON value s2 passes through as is; see [docs/backends.md](docs/backends.md#backends-registered-outside-s2).
 
 `-f` takes precedence over `S2_SERVER_CONFIG`.
 
