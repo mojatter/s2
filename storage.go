@@ -1,6 +1,7 @@
 package s2
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -393,6 +394,9 @@ func NewStorage(ctx context.Context, cfg Config) (Storage, error) {
 	defer storageMux.Unlock()
 
 	if fn, ok := newStorageFuncs[cfg.Type]; ok {
+		if bytes.Equal(cfg.Extra, []byte("null")) {
+			cfg.Extra = nil
+		}
 		return fn(ctx, cfg)
 	}
 	return nil, fmt.Errorf("%w: %s", ErrUnknownType, cfg.Type)

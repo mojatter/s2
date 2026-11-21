@@ -2,6 +2,7 @@ package s2_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +23,8 @@ func TestLoadConfigs(t *testing.T) {
 		"public-assets": {
 			"type": "osfs",
 			"root": "/tmp/assets",
-			"signed_url": "http://localhost:8080/assets"
+			"signed_url": "http://localhost:8080/assets",
+			"extra": {"folder_id": "abc"}
 		}
 	}`
 
@@ -34,6 +36,12 @@ func TestLoadConfigs(t *testing.T) {
 	assert.Equal(t, s2.TypeOSFS, configs["public-assets"].Type)
 	assert.Equal(t, "/tmp/assets", configs["public-assets"].Root)
 	assert.Equal(t, "http://localhost:8080/assets", configs["public-assets"].SignedURL)
+	assert.JSONEq(t, `{"folder_id": "abc"}`, string(configs["public-assets"].Extra))
+	assert.Empty(t, configs["local-dev"].Extra)
+
+	data, err := json.Marshal(configs["local-dev"])
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "extra")
 }
 
 func TestLoadConfigsFileError(t *testing.T) {

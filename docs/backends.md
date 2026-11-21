@@ -399,3 +399,23 @@ assets := storages["assets"]
 ```
 
 Any backend type referenced in the JSON that has not been blank-imported will fail at `Storages(ctx)` time.
+
+## Backends registered outside s2
+
+A backend in another module registers itself with `s2.RegisterNewStorageFunc` under its own `Type`, and is selected by setting `type` to it. Its settings go under `extra`, which s2 does not interpret: the backend's `NewStorageFunc` decodes `cfg.Extra` itself, and treats an empty `Extra` as no settings. `s2.NewStorage` passes a JSON `null` as an empty `Extra`.
+
+```json
+{
+  "type": "example",
+  "root": "my-folder",
+  "extra": {"credentials_file": "/etc/example/credentials.json"}
+}
+```
+
+s2-server takes `extra` from its config file or from `S2_SERVER_EXTRA`, which replaces the file's `extra` as a whole (`S2_SERVER_EXTRA=null` clears it); a value that is not valid JSON fails startup with `invalid S2_SERVER_EXTRA`.
+
+```sh
+S2_SERVER_TYPE=example S2_SERVER_EXTRA='{"credentials_file": "/etc/example/credentials.json"}' s2-server
+```
+
+s2-server compiles its backends in by import, so serving a backend from another module needs a main package of its own: a copy of [cmd/s2-server/main.go](../cmd/s2-server/main.go) that also imports the backend's package.

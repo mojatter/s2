@@ -540,3 +540,33 @@ func TestLoadFileOSFS(t *testing.T) {
 	assert.True(t, cfg.OSFS.ConfinedRoot)
 	assert.True(t, cfg.OSFS.NoSync)
 }
+
+func TestLoadEnvExtra(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		env      string
+		want     string
+		wantErr  string
+	}{
+		{caseName: "unset keeps the file value", env: "", want: `{"a": 1, "b": 2}`},
+		{caseName: "replaces the file value whole", env: `{"a": 3}`, want: `{"a": 3}`},
+		{caseName: "null replaces the file value", env: "null", want: "null"},
+		{caseName: "not JSON", env: `{"a":`, wantErr: "invalid S2_SERVER_EXTRA"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			require.NoError(t, os.WriteFile(path, []byte(`{"type": "gdrive", "extra": {"a": 1, "b": 2}}`), 0o600))
+			t.Setenv(EnvS2ServerExtra, tc.env)
+			cfg := DefaultConfig()
+			require.NoError(t, cfg.LoadFile(path))
+			err := cfg.LoadEnv()
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.want, string(cfg.Extra))
+		})
+	}
+}

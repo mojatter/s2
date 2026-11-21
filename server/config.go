@@ -38,6 +38,7 @@ const (
 	EnvS2ServerHealthPath      = "S2_SERVER_HEALTH_PATH"
 	EnvS2ServerType            = "S2_SERVER_TYPE"
 	EnvS2ServerRoot            = "S2_SERVER_ROOT"
+	EnvS2ServerExtra           = "S2_SERVER_EXTRA"
 	EnvS2ServerMaxUploadSize   = "S2_SERVER_MAX_UPLOAD_SIZE"
 	EnvS2ServerMaxPreviewSize  = "S2_SERVER_MAX_PREVIEW_SIZE"
 	EnvS2ServerMultipartMaxAge = "S2_SERVER_MULTIPART_MAX_AGE"
@@ -290,6 +291,13 @@ func (cfg *Config) LoadEnv() error {
 	}
 	if root := os.Getenv(EnvS2ServerRoot); root != "" {
 		cfg.Root = root
+	}
+	if v := os.Getenv(EnvS2ServerExtra); v != "" {
+		var extra json.RawMessage
+		if err := json.Unmarshal([]byte(v), &extra); err != nil {
+			return fmt.Errorf("invalid %s: %w", EnvS2ServerExtra, err)
+		}
+		cfg.Extra = extra
 	}
 	if v := os.Getenv(EnvS2ServerMaxUploadSize); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)

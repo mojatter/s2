@@ -1,6 +1,7 @@
 package s2
 
 import (
+	"encoding/json"
 	"path"
 	"strings"
 )
@@ -107,4 +108,6 @@ type Config struct {
 	GCS *GCSConfig `json:"gcs,omitempty"`
 	// Azblob holds Azure Blob Storage-specific settings. Only used when Type is TypeAzblob.
 	Azblob *AzblobConfig `json:"azblob,omitempty"`
+	// Extra holds the settings of a backend registered outside s2, which decodes them itself; empty means none, and NewStorage passes JSON null as empty.
+	Extra json.RawMessage `json:"extra,omitempty"`
 }
