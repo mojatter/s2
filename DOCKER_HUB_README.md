@@ -48,6 +48,7 @@ services:
 | `S2_SERVER_HEALTH_PATH` | `/healthz` | Health check path on the S3 listener (set empty to disable) |
 | `S2_SERVER_TYPE` | `osfs` | Storage backend (`osfs`, `memfs`) |
 | `S2_SERVER_ROOT` | `/var/lib/s2` | Root directory for bucket data |
+| `S2_SERVER_OSFS` | — | JSON `osfs` section replacing the config file's, e.g. `{"confined_root": true}` |
 | `S2_SERVER_USER` | — | Username for authentication (disables auth if empty) |
 | `S2_SERVER_PASSWORD` | — | Password for authentication |
 | `S2_SERVER_BUCKETS` | — | Comma-separated list of buckets to create on startup |

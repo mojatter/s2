@@ -39,6 +39,10 @@ const (
 	EnvS2ServerType            = "S2_SERVER_TYPE"
 	EnvS2ServerRoot            = "S2_SERVER_ROOT"
 	EnvS2ServerExtra           = "S2_SERVER_EXTRA"
+	EnvS2ServerOSFS            = "S2_SERVER_OSFS"
+	EnvS2ServerS3              = "S2_SERVER_S3"
+	EnvS2ServerGCS             = "S2_SERVER_GCS"
+	EnvS2ServerAzblob          = "S2_SERVER_AZBLOB"
 	EnvS2ServerMaxUploadSize   = "S2_SERVER_MAX_UPLOAD_SIZE"
 	EnvS2ServerMaxPreviewSize  = "S2_SERVER_MAX_PREVIEW_SIZE"
 	EnvS2ServerMultipartMaxAge = "S2_SERVER_MULTIPART_MAX_AGE"
@@ -299,6 +303,18 @@ func (cfg *Config) LoadEnv() error {
 		}
 		cfg.Extra = extra
 	}
+	if err := loadEnvSection(EnvS2ServerOSFS, &cfg.OSFS); err != nil {
+		return err
+	}
+	if err := loadEnvSection(EnvS2ServerS3, &cfg.S3); err != nil {
+		return err
+	}
+	if err := loadEnvSection(EnvS2ServerGCS, &cfg.GCS); err != nil {
+		return err
+	}
+	if err := loadEnvSection(EnvS2ServerAzblob, &cfg.Azblob); err != nil {
+		return err
+	}
 	if v := os.Getenv(EnvS2ServerMaxUploadSize); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
@@ -334,5 +350,19 @@ func (cfg *Config) LoadEnv() error {
 			return fmt.Errorf("invalid %s: %w", EnvS2ServerLogLevel, err)
 		}
 	}
+	return nil
+}
+
+// loadEnvSection replaces *section as a whole with the JSON in env var name, if set; JSON null clears it.
+func loadEnvSection[T any](name string, section **T) error {
+	v := os.Getenv(name)
+	if v == "" {
+		return nil
+	}
+	var decoded *T
+	if err := json.Unmarshal([]byte(v), &decoded); err != nil {
+		return fmt.Errorf("invalid %s: %w", name, err)
+	}
+	*section = decoded
 	return nil
 }

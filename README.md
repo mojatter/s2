@@ -430,6 +430,10 @@ if _, err := strg.Get(ctx, "missing.txt"); errors.Is(err, s2.ErrNotExist) {
 | `S2_SERVER_HEALTH_PATH` | `/healthz` | Health check path served on the S3 listener (set empty to disable) |
 | `S2_SERVER_TYPE` | `osfs` | Storage backend type |
 | `S2_SERVER_ROOT` | `/var/lib/s2` | Root directory for bucket data |
+| `S2_SERVER_OSFS` | — | JSON `osfs` section, e.g. `{"confined_root": true}` (see [docs/backends.md](docs/backends.md#osfs)) |
+| `S2_SERVER_S3` | — | JSON `s3` section (see [docs/backends.md](docs/backends.md#s3)) |
+| `S2_SERVER_GCS` | — | JSON `gcs` section (see [docs/backends.md](docs/backends.md#gcs)) |
+| `S2_SERVER_AZBLOB` | — | JSON `azblob` section (see [docs/backends.md](docs/backends.md#azure-blob-storage)) |
 | `S2_SERVER_EXTRA` | — | JSON settings for a backend registered outside s2, replacing the config file's `extra` as a whole (see [docs/backends.md](docs/backends.md#backends-registered-outside-s2)) |
 | `S2_SERVER_USER` | — | Username for authentication (disables auth if empty) |
 | `S2_SERVER_PASSWORD` | — | Password for authentication |
@@ -439,7 +443,11 @@ if _, err := strg.Get(ctx, "missing.txt"); errors.Is(err, s2.ErrNotExist) {
 | `S2_SERVER_MULTIPART_MAX_AGE` | `86400` | Seconds an unfinished multipart upload stays usable; past it the upload is refused and its parts are reclaimed (negative keeps uploads forever) |
 | `S2_SERVER_LOG_LEVEL` | `info` | Lowest level logged: `debug`, `info`, `warn` or `error`; `debug` adds one line per S3 API request and the detail of 4xx error responses |
 
-Environment variables take precedence over the config file.
+Environment variables take precedence over the config file. The JSON variables (`S2_SERVER_OSFS`, `S2_SERVER_S3`, `S2_SERVER_GCS`, `S2_SERVER_AZBLOB` and `S2_SERVER_EXTRA`) replace the file's section as a whole rather than merging into it, `null` clears it, and a value that is not valid JSON, or for the four section variables one that does not decode into the section (an array, or a field of the wrong type), fails startup with `invalid S2_SERVER_<NAME>`, while a key the section does not know is ignored, as in the config file. Empty `s3` and `gcs` fields fall back to each SDK's own defaults, so credentials can stay in the SDK's environment variables instead; `azblob` needs at least `account_name` or `connection_string`, and with `account_name` alone takes credentials from DefaultAzureCredential.
+
+```sh
+S2_SERVER_OSFS='{"confined_root": true}' s2-server
+```
 
 ### Build tags
 
