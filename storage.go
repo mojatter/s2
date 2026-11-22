@@ -372,6 +372,7 @@ func countByList(ctx context.Context, s Storage, opts CountOptions) (CountResult
 type NewStorageFunc func(ctx context.Context, cfg Config) (Storage, error)
 
 // RegisterNewStorageFunc registers a new storage function.
+// fn may call NewStorage; a call for t runs fn again.
 func RegisterNewStorageFunc(t Type, fn NewStorageFunc) {
 	storageMux.Lock()
 	defer storageMux.Unlock()
@@ -392,13 +393,13 @@ func UnregisterNewStorageFunc(t Type) {
 // plugin is registered for cfg.Type, the returned error wraps ErrUnknownType.
 func NewStorage(ctx context.Context, cfg Config) (Storage, error) {
 	storageMux.Lock()
-	defer storageMux.Unlock()
-
-	if fn, ok := newStorageFuncs[cfg.Type]; ok {
-		if bytes.Equal(cfg.Extra, []byte("null")) {
-			cfg.Extra = nil
-		}
-		return fn(ctx, cfg)
+	fn, ok := newStorageFuncs[cfg.Type]
+	storageMux.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownType, cfg.Type)
 	}
-	return nil, fmt.Errorf("%w: %s", ErrUnknownType, cfg.Type)
+	if bytes.Equal(cfg.Extra, []byte("null")) {
+		cfg.Extra = nil
+	}
+	return fn(ctx, cfg)
 }
