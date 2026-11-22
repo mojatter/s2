@@ -188,6 +188,13 @@ func TestWriteConsoleError(t *testing.T) {
 			wantLog:  []string{"level=ERROR", "status=500"},
 		},
 		{
+			caseName: "listed but not readable",
+			status:   http.StatusForbidden,
+			err:      fmt.Errorf("k: %w", errors.ErrUnsupported),
+			wantBody: "object cannot be read as stored",
+			wantLog:  []string{"level=DEBUG", "status=403"},
+		},
+		{
 			caseName: "backend error answered not found",
 			status:   http.StatusNotFound,
 			err:      errors.New("stat /root/b: permission denied"),

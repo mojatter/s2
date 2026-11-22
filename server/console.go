@@ -85,6 +85,15 @@ func WriteConsoleStorageError(w http.ResponseWriter, r *http.Request, err error)
 	WriteConsoleError(w, r, consoleErrorStatus(err), err)
 }
 
+// WriteConsoleGetError is WriteConsoleStorageError for a failure from Storage.Get: an object listed but not readable answers 403.
+func WriteConsoleGetError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, errors.ErrUnsupported) {
+		WriteConsoleError(w, r, http.StatusForbidden, err)
+		return
+	}
+	WriteConsoleStorageError(w, r, err)
+}
+
 // consoleErrorStatus is the status for err: 400 for a name refused, 404 for a missing bucket or object, 500 otherwise.
 func consoleErrorStatus(err error) int {
 	var notFound *ErrBucketNotFound
@@ -107,6 +116,8 @@ func consoleErrorBody(status int, err error) string {
 		return "bucket not found"
 	case errors.Is(err, s2.ErrNotExist):
 		return "object not found"
+	case status == http.StatusForbidden && errors.Is(err, errors.ErrUnsupported):
+		return "object cannot be read as stored"
 	case errors.Is(err, s2.ErrModified):
 		// A retry reads the key's current version, as the S3 API tells its clients.
 		return "object modified while it was being read; try again"

@@ -397,7 +397,7 @@ func (s *ViewTestSuite) TestHandlePreview() {
 
 const typeBroken = s2.Type("broken-view-test")
 
-// brokenStorage fails Get of broken.txt as an unreachable backend would, and the Open of gone.txt and eio.txt.
+// brokenStorage fails Get of broken.txt as an unreachable backend would, Get of unreadable.txt as a backend that lists but cannot read it would, and the Open of gone.txt and eio.txt.
 // The Length of short.txt is 1, below its stored bytes, and that of huge.txt is one over DefaultMaxPreviewSize.
 type brokenStorage struct {
 	s2.Storage
@@ -414,6 +414,9 @@ func (b brokenStorage) Sub(ctx context.Context, prefix string) (s2.Storage, erro
 func (b brokenStorage) Get(ctx context.Context, name string) (s2.Object, error) {
 	if name == "broken.txt" {
 		return nil, errors.New("backend unreachable")
+	}
+	if name == "unreadable.txt" {
+		return nil, fmt.Errorf("unreadable.txt: %w", errors.ErrUnsupported)
 	}
 	obj, err := b.Storage.Get(ctx, name)
 	if err != nil {
@@ -505,6 +508,7 @@ func (s *ViewTestSuite) TestErrorStatus() {
 		wantStatus int
 	}{
 		{caseName: "backend failure", bucket: "eb", object: "broken.txt", wantStatus: http.StatusInternalServerError},
+		{caseName: "listed but not readable", bucket: "eb", object: "unreadable.txt", wantStatus: http.StatusForbidden},
 		{caseName: "invalid name", bucket: "eb", object: "a/../b.txt", wantStatus: http.StatusBadRequest},
 		{caseName: "missing object", bucket: "eb", object: "missing.txt", wantStatus: http.StatusNotFound},
 		{caseName: "missing bucket", bucket: "nope", object: "x.txt", wantStatus: http.StatusNotFound},

@@ -7,6 +7,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -3451,6 +3452,89 @@ func (s *ObjectsTestSuite) TestGetObjectLogsAFailedBody() {
 			s.Require().NoError(resp.Body.Close())
 
 			s.Contains(buf.String(), `level=ERROR msg="Failed to send object body" request_id=`+resp.Header.Get("x-amz-request-id")+" method=GET path=/fb/k bytes=2 ")
+		})
+	}
+}
+
+const typeUnreadable = s2.Type("unreadable-test")
+
+// unreadableStorage lists every object but cannot read those named "archived".
+type unreadableStorage struct {
+	s2.Storage
+}
+
+func (u unreadableStorage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
+	sub, err := u.Storage.Sub(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return unreadableStorage{sub}, nil
+}
+
+func (u unreadableStorage) Get(ctx context.Context, name string) (s2.Object, error) {
+	if name == "archived" {
+		return nil, fmt.Errorf("unreadable-test: %s: %w", name, errors.ErrUnsupported)
+	}
+	return u.Storage.Get(ctx, name)
+}
+
+// TestGetUnreadableObject checks every request that reads an object answers 403 InvalidObjectState for one the backend cannot read, and GetObjectTagging, which reads nothing, answers its empty tag set (#515).
+func (s *ObjectsTestSuite) TestGetUnreadableObject() {
+	root := s.T().TempDir()
+	base, err := s2.NewStorage(context.Background(), s2.Config{Type: s2.TypeOSFS, Root: root})
+	s.Require().NoError(err)
+	s2.RegisterNewStorageFunc(typeUnreadable, func(context.Context, s2.Config) (s2.Storage, error) {
+		return unreadableStorage{base}, nil
+	})
+	s.T().Cleanup(func() { s2.UnregisterNewStorageFunc(typeUnreadable) })
+
+	cfg := server.DefaultConfig()
+	cfg.Root = root
+	cfg.Type = typeUnreadable
+	srv, err := server.NewServer(context.Background(), cfg)
+	s.Require().NoError(err)
+	s.Require().NoError(srv.Buckets.Create(context.Background(), "ub"))
+	s.Require().NoError(base.Put(context.Background(), s2.NewObjectBytes("ub/archived", []byte("hello"))))
+	ts := httptest.NewServer(srv.S3Handler())
+	defer ts.Close()
+
+	createResp, err := ts.Client().Post(ts.URL+"/ub/part?uploads", "", nil)
+	s.Require().NoError(err)
+	var created InitiateMultipartUploadResult
+	s.Require().NoError(xml.NewDecoder(createResp.Body).Decode(&created))
+	s.Require().NoError(createResp.Body.Close())
+
+	testCases := []struct {
+		caseName   string
+		method     string
+		path       string
+		copySource string
+		wantStatus int
+		wantBody   string // in the body, unless HEAD
+	}{
+		{caseName: "GetObject", method: http.MethodGet, path: "/ub/archived", wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>"},
+		{caseName: "HeadObject", method: http.MethodHead, path: "/ub/archived", wantStatus: http.StatusForbidden},
+		{caseName: "GetObjectTagging", method: http.MethodGet, path: "/ub/archived?tagging", wantStatus: http.StatusOK, wantBody: "<TagSet></TagSet>"},
+		{caseName: "CopyObject source", method: http.MethodPut, path: "/ub/copy", copySource: "/ub/archived", wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>"},
+		{caseName: "UploadPartCopy source", method: http.MethodPut, path: "/ub/part?partNumber=1&uploadId=" + created.UploadID, copySource: "/ub/archived", wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			req, err := http.NewRequest(tc.method, ts.URL+tc.path, nil)
+			s.Require().NoError(err)
+			if tc.copySource != "" {
+				req.Header.Set(copySourceHeader, tc.copySource)
+			}
+			resp, err := ts.Client().Do(req)
+			s.Require().NoError(err)
+			body, err := io.ReadAll(resp.Body)
+			s.Require().NoError(err)
+			s.Require().NoError(resp.Body.Close())
+
+			s.Equal(tc.wantStatus, resp.StatusCode)
+			if tc.method != http.MethodHead {
+				s.Contains(string(body), tc.wantBody)
+			}
 		})
 	}
 }

@@ -188,6 +188,26 @@ func (s *UtilsTestSuite) TestUploadErrorToS3Error() {
 	}
 }
 
+func (s *UtilsTestSuite) TestGetErrorToS3Error() {
+	testCases := []struct {
+		caseName   string
+		err        error
+		wantCode   string
+		wantStatus int
+	}{
+		{caseName: "listed but not readable", err: fmt.Errorf("example: export only: %w", errors.ErrUnsupported), wantCode: "InvalidObjectState", wantStatus: http.StatusForbidden},
+		{caseName: "not exist", err: fmt.Errorf("%w: key", s2.ErrNotExist), wantCode: "NoSuchKey", wantStatus: http.StatusNotFound},
+		{caseName: "other", err: errors.New("boom"), wantCode: "InternalError", wantStatus: http.StatusInternalServerError},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			code, _, status := getErrorToS3Error(tc.err)
+			s.Equal(tc.wantCode, code)
+			s.Equal(tc.wantStatus, status)
+		})
+	}
+}
+
 func (s *UtilsTestSuite) TestAWSChunkedReader() {
 	testCases := []struct {
 		caseName string
