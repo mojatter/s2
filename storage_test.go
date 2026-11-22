@@ -26,6 +26,12 @@ func TestNewStorage(t *testing.T) {
 	})
 	defer UnregisterNewStorageFunc(testType)
 
+	wrapperType := Type("test-wrapper")
+	RegisterNewStorageFunc(wrapperType, func(ctx context.Context, cfg Config) (Storage, error) {
+		return NewStorage(ctx, Config{Type: testType})
+	})
+	defer UnregisterNewStorageFunc(wrapperType)
+
 	testCases := []struct {
 		caseName  string
 		ctx       context.Context
@@ -54,6 +60,10 @@ func TestNewStorage(t *testing.T) {
 		{
 			caseName: "null extra reaches the backend empty",
 			cfg:      Config{Type: testType, Extra: json.RawMessage("null")},
+		},
+		{
+			caseName: "constructor calling NewStorage returns",
+			cfg:      Config{Type: wrapperType},
 		},
 	}
 	for _, tc := range testCases {
