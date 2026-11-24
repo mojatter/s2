@@ -207,7 +207,15 @@ func copyWithin(ctx context.Context, s Storage, name, dstName string, overwrite 
 			return nil
 		}
 	}
-	if err := s.Copy(ctx, name, dstName); err != nil {
+	err := s.Copy(ctx, name, dstName)
+	// Only a source Get cannot read counts; an ErrUnsupported from the write side stops the copy, as Put's does across storages.
+	if errors.Is(err, errors.ErrUnsupported) {
+		if _, gerr := s.Get(ctx, name); errors.Is(gerr, errors.ErrUnsupported) {
+			t.add(name, dstName, CopyStorageUnsupported, err)
+			return nil
+		}
+	}
+	if err != nil {
 		return t.rejected(name, dstName, err)
 	}
 	t.add(name, dstName, CopyStorageCopied, nil)

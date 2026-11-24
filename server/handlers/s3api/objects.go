@@ -385,7 +385,7 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	rc, err := obj.Open()
 	if err != nil {
-		writeS2Error(w, r, err)
+		writeGetError(w, r, err)
 		return
 	}
 	defer func() { _ = rc.Close() }()
@@ -549,7 +549,7 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, obj s2.Object, k
 	length := end - start + 1
 	rc, err := obj.OpenRange(start, length)
 	if err != nil {
-		writeS2Error(w, r, err)
+		writeGetError(w, r, err)
 		return
 	}
 	defer func() { _ = rc.Close() }()
@@ -734,7 +734,7 @@ func handleCopyObject(s *server.Server, w http.ResponseWriter, r *http.Request, 
 
 	rc, err := srcObj.Open()
 	if err != nil {
-		writeS2Error(w, r, err)
+		writeGetError(w, r, err)
 		return
 	}
 	defer func() { _ = rc.Close() }()

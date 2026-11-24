@@ -85,7 +85,7 @@ func WriteConsoleStorageError(w http.ResponseWriter, r *http.Request, err error)
 	WriteConsoleError(w, r, consoleErrorStatus(err), err)
 }
 
-// WriteConsoleGetError is WriteConsoleStorageError for a failure from Storage.Get: an object listed but not readable answers 403.
+// WriteConsoleGetError is WriteConsoleStorageError for a failure from Storage.Get or a body read: an object listed but not readable answers 403.
 func WriteConsoleGetError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, errors.ErrUnsupported) {
 		WriteConsoleError(w, r, http.StatusForbidden, err)

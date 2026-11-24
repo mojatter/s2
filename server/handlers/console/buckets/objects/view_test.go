@@ -397,7 +397,7 @@ func (s *ViewTestSuite) TestHandlePreview() {
 
 const typeBroken = s2.Type("broken-view-test")
 
-// brokenStorage fails Get of broken.txt as an unreachable backend would, Get of unreadable.txt as a backend that lists but cannot read it would, and the Open of gone.txt and eio.txt.
+// brokenStorage fails Get of broken.txt as an unreachable backend would, Get of unreadable.txt as a backend that lists but cannot read it would, and the Open of gone.txt, eio.txt and expired.txt.
 // The Length of short.txt is 1, below its stored bytes, and that of huge.txt is one over DefaultMaxPreviewSize.
 type brokenStorage struct {
 	s2.Storage
@@ -427,6 +427,8 @@ func (b brokenStorage) Get(ctx context.Context, name string) (s2.Object, error) 
 		return brokenObject{Object: obj, err: fmt.Errorf("%w: gone.txt", s2.ErrNotExist)}, nil
 	case "eio.txt":
 		return brokenObject{Object: obj, err: syscall.EIO}, nil
+	case "expired.txt":
+		return brokenObject{Object: obj, err: fmt.Errorf("expired.txt: %w", errors.ErrUnsupported)}, nil
 	case "short.txt":
 		return shortObject{obj}, nil
 	case "huge.txt":
@@ -489,7 +491,7 @@ func (s *ViewTestSuite) brokenServer(names ...string) *server.Server {
 
 // TestErrorStatus checks the status follows the error, not the handler (#418).
 func (s *ViewTestSuite) TestErrorStatus() {
-	srv := s.brokenServer("gone.txt", "eio.txt")
+	srv := s.brokenServer("gone.txt", "eio.txt", "expired.txt")
 
 	handlers := []struct {
 		caseName string
@@ -514,6 +516,7 @@ func (s *ViewTestSuite) TestErrorStatus() {
 		{caseName: "missing bucket", bucket: "nope", object: "x.txt", wantStatus: http.StatusNotFound},
 		{caseName: "object gone before Open", bucket: "eb", object: "gone.txt", opens: true, wantStatus: http.StatusNotFound},
 		{caseName: "Open fails", bucket: "eb", object: "eio.txt", opens: true, wantStatus: http.StatusInternalServerError},
+		{caseName: "body not readable", bucket: "eb", object: "expired.txt", opens: true, wantStatus: http.StatusForbidden},
 	}
 	for _, h := range handlers {
 		for _, tc := range testCases {

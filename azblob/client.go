@@ -26,6 +26,8 @@ type blobProps struct {
 	contentType   string
 	contentMD5    []byte
 	etag          string
+	// accessTier is the blob's tier, "Archive" while it is archived or still rehydrating.
+	accessTier string
 }
 
 type listBlobsResult struct {
@@ -91,6 +93,7 @@ func (c *sdkClient) getProperties(ctx context.Context, ctr, blobName string) (bl
 		contentType:   derefString(resp.ContentType),
 		contentMD5:    resp.ContentMD5,
 		etag:          derefETag(resp.ETag),
+		accessTier:    derefString(resp.AccessTier),
 	}, nil
 }
 

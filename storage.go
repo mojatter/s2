@@ -129,6 +129,7 @@ type Storage interface {
 	// backend uses server-side copy, while file-backed backends stream the
 	// body. A backend may fail the call when src changes concurrently; that
 	// error is ErrModified or the provider's own.
+	// A src the backend cannot read wraps errors.ErrUnsupported, as Get does.
 	Copy(ctx context.Context, src, dst string) error
 	// Delete removes the object at name. Deleting a non-existent object is
 	// a no-op and does not return an error.

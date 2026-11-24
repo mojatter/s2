@@ -20,10 +20,12 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/mojatter/s2"
 	"github.com/mojatter/s2/s2test"
 	"github.com/stretchr/testify/suite"
@@ -40,6 +42,8 @@ type mockObject struct {
 	tags         map[string]string
 	// headers holds the HEAD fields beside Content-Type a test sets on the object.
 	headers *s3.HeadObjectOutput
+	// unreadable answers GetObject and a CopyObject from it with InvalidObjectState, as S3 does for an archived object.
+	unreadable bool
 }
 
 // mockDefaultContentType is what S3 stores when a write sends no Content-Type.
@@ -423,6 +427,9 @@ func (m *mockS3Client) GetObject(ctx context.Context, params *s3.GetObjectInput,
 	if !ok {
 		return nil, &s3types.NoSuchKey{}
 	}
+	if obj.unreadable {
+		return nil, &smithy.GenericAPIError{Code: "InvalidObjectState"}
+	}
 	if params.IfMatch != nil && !m.ignoreIfMatch && aws.ToString(params.IfMatch) != obj.etag {
 		return nil, &smithy.GenericAPIError{Code: "PreconditionFailed"}
 	}
@@ -473,6 +480,9 @@ func (m *mockS3Client) CopyObject(ctx context.Context, params *s3.CopyObjectInpu
 	srcObj, ok := m.get(srcBucket, srcKey)
 	if !ok {
 		return nil, &s3types.NoSuchKey{}
+	}
+	if srcObj.unreadable {
+		return nil, &smithy.GenericAPIError{Code: "InvalidObjectState"}
 	}
 	m.mu.Lock()
 	m.copyObjects++
@@ -1415,6 +1425,94 @@ func (s *StorageTestSuite) TestGet() {
 		s.Error(err)
 		s.ErrorIs(err, s2.ErrNotExist)
 	})
+}
+
+func (s *StorageTestSuite) TestArchived() {
+	forbidden := &awshttp.ResponseError{ResponseError: &smithyhttp.ResponseError{
+		Response: &smithyhttp.Response{Response: &http.Response{StatusCode: http.StatusForbidden}},
+		Err:      &smithy.GenericAPIError{Code: "Forbidden"},
+	}}
+	testCases := []struct {
+		caseName   string
+		headers    *s3.HeadObjectOutput
+		unreadable bool
+		headErr    error
+		want       error
+	}{
+		{caseName: "GLACIER", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassGlacier}, unreadable: true, want: errors.ErrUnsupported},
+		{caseName: "DEEP_ARCHIVE", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassDeepArchive}, unreadable: true, want: errors.ErrUnsupported},
+		{caseName: "Intelligent-Tiering archive", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassIntelligentTiering, ArchiveStatus: s3types.ArchiveStatusArchiveAccess}, unreadable: true, want: errors.ErrUnsupported},
+		{caseName: "restore ongoing", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassGlacier, Restore: aws.String(`ongoing-request="true"`)}, unreadable: true, want: errors.ErrUnsupported},
+		{caseName: "restored", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassGlacier, Restore: aws.String(`ongoing-request="false", expiry-date="Thu, 26 Nov 2026 00:00:00 GMT"`)}},
+		{caseName: "GLACIER_IR", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassGlacierIr}},
+		{caseName: "s2-server HEAD 403", unreadable: true, headErr: forbidden, want: errors.ErrUnsupported},
+		{caseName: "AccessDenied HEAD 403", headErr: forbidden, want: forbidden},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m, strg := s.testMockClient()
+			obj, _ := m.get("mybucket", "a.txt")
+			obj.headers, obj.unreadable = tc.headers, tc.unreadable
+			listed := &object{client: m, bucket: "mybucket", name: "a.txt", etag: obj.etag}
+			ctx := context.Background()
+
+			m.headErr = tc.headErr
+			_, err := strg.Get(ctx, "a.txt")
+			s.ErrorIs(err, tc.want, "Get")
+			_, err = listed.OpenRange(0, 0)
+			s.ErrorIs(err, tc.want, "OpenRange(0, 0)")
+			ok, err := strg.Exists(ctx, "a.txt")
+			if tc.want == forbidden {
+				s.ErrorIs(err, forbidden, "Exists")
+			} else {
+				s.NoError(err, "Exists")
+				s.True(ok, "Exists")
+			}
+			m.headErr = nil
+
+			if tc.headErr != nil {
+				return
+			}
+			want := tc.want
+			for _, open := range []func() (io.ReadCloser, error){
+				listed.Open,
+				func() (io.ReadCloser, error) { return listed.OpenRange(0, 1) },
+				func() (io.ReadCloser, error) { return s2.Open(ctx, strg, "a.txt") },
+			} {
+				rc, err := open()
+				if err == nil {
+					rc.Close()
+				}
+				s.ErrorIs(err, want, "open")
+			}
+			s.ErrorIs(strg.Copy(ctx, "a.txt", "dst.txt"), want, "Copy")
+		})
+	}
+}
+
+// TestArchivedOverCopyLimit checks a source over the CopyObject limit, refused for its size perhaps before its storage class.
+func (s *StorageTestSuite) TestArchivedOverCopyLimit() {
+	defer func(limit int64) { maxCopyObjectSize = limit }(maxCopyObjectSize)
+
+	maxCopyObjectSize = 0
+	testCases := []struct {
+		caseName string
+		headers  *s3.HeadObjectOutput
+		want     error
+	}{
+		{caseName: "over the CopyObject limit", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassDeepArchive}, want: errors.ErrUnsupported},
+		{caseName: "restored over the CopyObject limit", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassGlacier, Restore: aws.String(`ongoing-request="false"`)}},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m, strg := s.testMockClient()
+			obj, _ := m.get("mybucket", "a.txt")
+			obj.headers = tc.headers
+
+			s.ErrorIs(strg.Copy(context.Background(), "a.txt", "dst.txt"), tc.want)
+			s.Equal(tc.want == nil, m.lastCreate != nil, "CreateMultipartUpload sent")
+		})
+	}
 }
 
 func (s *StorageTestSuite) TestPut() {
