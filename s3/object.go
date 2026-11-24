@@ -59,6 +59,9 @@ func (o *object) get(ctx context.Context, rng *string) (io.ReadCloser, error) {
 		if isNotFoundErr(err) {
 			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, o.name)
 		}
+		if isInvalidObjectState(err) {
+			return nil, errArchived(o.name)
+		}
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && apiErr.ErrorCode() == "PreconditionFailed" {
 			return nil, fmt.Errorf("%w: %s: %w", s2.ErrModified, o.name, err)
@@ -93,15 +96,9 @@ func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
 
 // openEmpty fails as get does but reads nothing, since a Range cannot name zero bytes.
 func (o *object) openEmpty(ctx context.Context) (io.ReadCloser, error) {
-	res, err := o.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(o.bucket),
-		Key:    aws.String(o.key()),
-	})
+	res, err := headObject(ctx, o.client, o.bucket, o.key(), o.name)
 	if err != nil {
-		if isNotFoundErr(err) {
-			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, o.name)
-		}
-		return nil, fmt.Errorf("failed to head object: %w", err)
+		return nil, err
 	}
 	if o.etag != "" && res.ETag != nil && strings.Trim(aws.ToString(res.ETag), `"`) != strings.Trim(o.etag, `"`) {
 		return nil, fmt.Errorf("%w: %s", s2.ErrModified, o.name)

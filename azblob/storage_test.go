@@ -34,6 +34,10 @@ type mockBlob struct {
 	etag        string
 	contentType string
 	contentMD5  []byte
+	// accessTier "Archive" answers a download, or a copy from the blob, with BlobArchived.
+	accessTier string
+	// pendingCopy answers a copy from or onto the blob with PendingCopyOperation, as a rehydration or a copy in flight does.
+	pendingCopy bool
 }
 
 type mockAzblobClient struct {
@@ -120,6 +124,7 @@ func (m *mockAzblobClient) getProperties(_ context.Context, container, blobName 
 		etag:          etag,
 		contentType:   b.contentType,
 		contentMD5:    b.contentMD5,
+		accessTier:    b.accessTier,
 	}, nil
 }
 
@@ -133,6 +138,9 @@ func (m *mockAzblobClient) downloadStream(_ context.Context, container, blobName
 	}
 	if ifMatch != "" && strings.Trim(ifMatch, `"`) != b.etag {
 		return nil, &azcore.ResponseError{ErrorCode: string(bloberror.ConditionNotMet), StatusCode: http.StatusPreconditionFailed}
+	}
+	if b.accessTier == "Archive" {
+		return nil, newBlobArchivedError()
 	}
 	body := b.body
 	if offset > 0 || count > 0 {
@@ -192,6 +200,12 @@ func (m *mockAzblobClient) copyBlob(_ context.Context, container, src, dst strin
 	b, ok := m.get(container, src)
 	if !ok {
 		return newBlobNotFoundError()
+	}
+	if d, ok := m.get(container, dst); b.pendingCopy || ok && d.pendingCopy {
+		return &azcore.ResponseError{ErrorCode: string(bloberror.PendingCopyOperation), StatusCode: http.StatusConflict}
+	}
+	if b.accessTier == "Archive" {
+		return newBlobArchivedError()
 	}
 	body := make([]byte, len(b.body))
 	copy(body, b.body)
@@ -302,6 +316,10 @@ func (m *mockAzblobClient) signedURL(container, blobName string, _ string, _ tim
 // bloberror.HasCode checks for *azcore.ResponseError via errors.As.
 func newBlobNotFoundError() error {
 	return &azcore.ResponseError{ErrorCode: "BlobNotFound"}
+}
+
+func newBlobArchivedError() error {
+	return &azcore.ResponseError{ErrorCode: string(bloberror.BlobArchived), StatusCode: http.StatusConflict}
 }
 
 // --- test suite ---
@@ -864,6 +882,45 @@ func (s *StorageTestSuite) TestGet() {
 	})
 }
 
+func (s *StorageTestSuite) TestArchived() {
+	testCases := []struct {
+		caseName    string
+		accessTier  string
+		pendingCopy bool
+		want        error
+	}{
+		{caseName: "Archive", accessTier: "Archive", want: errors.ErrUnsupported},
+		{caseName: "rehydrating", accessTier: "Archive", pendingCopy: true, want: errors.ErrUnsupported},
+		{caseName: "Cool", accessTier: "Cool"},
+		{caseName: "Hot", accessTier: "Hot"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			m, strg := s.testMockStorage()
+			b, _ := m.get("mycontainer", "a.txt")
+			b.accessTier, b.pendingCopy = tc.accessTier, tc.pendingCopy
+			listed := &object{client: m, container: "mycontainer", name: "a.txt", version: b.etag}
+			ctx := context.Background()
+
+			_, err := strg.Get(ctx, "a.txt")
+			s.ErrorIs(err, tc.want, "Get")
+			for _, open := range []func() (io.ReadCloser, error){
+				listed.Open,
+				func() (io.ReadCloser, error) { return listed.OpenRange(0, 1) },
+				func() (io.ReadCloser, error) { return listed.OpenRange(0, 0) },
+				func() (io.ReadCloser, error) { return s2.Open(ctx, strg, "a.txt") },
+			} {
+				rc, err := open()
+				if err == nil {
+					rc.Close()
+				}
+				s.ErrorIs(err, tc.want, "open")
+			}
+			s.ErrorIs(strg.Copy(ctx, "a.txt", "dst.txt"), tc.want, "Copy")
+		})
+	}
+}
+
 func (s *StorageTestSuite) TestPut() {
 	_, strg := s.testMockStorage()
 	ctx := context.Background()
@@ -993,6 +1050,15 @@ func (s *StorageTestSuite) TestCopy() {
 		_, strg := s.testMockStorage()
 		err := strg.Copy(context.Background(), "not-found.txt", "dst.txt")
 		s.True(errors.Is(err, s2.ErrNotExist), "got %v, want s2.ErrNotExist", err)
+	})
+
+	s.Run("copy pending onto dst", func() {
+		m, strg := s.testMockStorage()
+		b, _ := m.get("mycontainer", "b.txt")
+		b.pendingCopy = true
+		err := strg.Copy(context.Background(), "a.txt", "b.txt")
+		s.True(bloberror.HasCode(err, bloberror.PendingCopyOperation), "got %v, want PendingCopyOperation", err)
+		s.False(errors.Is(err, errors.ErrUnsupported), "got %v, want no errors.ErrUnsupported", err)
 	})
 }
 

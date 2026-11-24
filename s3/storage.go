@@ -287,15 +287,9 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 	if err := s2.ValidateName(name); err != nil {
 		return nil, err
 	}
-	params, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(s.key(name)),
-	})
+	params, err := headObject(ctx, s.client, s.bucket, s.key(name), name)
 	if err != nil {
-		if isNotFoundErr(err) {
-			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, name)
-		}
-		return nil, fmt.Errorf("failed to get object: %w", err)
+		return nil, err
 	}
 	md, contentType := liftLegacy(params.Metadata)
 	if md == nil {
@@ -355,14 +349,12 @@ func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
 	}
 	key := s.key(name)
 
-	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-	})
-	if err == nil {
+	// An archived object is present though it cannot be read.
+	_, err := headObject(ctx, s.client, s.bucket, key, name)
+	if err == nil || errors.Is(err, errors.ErrUnsupported) {
 		return true, nil
 	}
-	if !isNotFoundErr(err) {
+	if !errors.Is(err, s2.ErrNotExist) {
 		return false, err
 	}
 	// A marker is an object like any other, so only HEAD answers for it.
@@ -404,6 +396,52 @@ func isNotFoundErr(err error) bool {
 	}
 	var apiErr smithy.APIError
 	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchKey"
+}
+
+// headObject reads key's HEAD, failing with s2.ErrNotExist for a missing key and errors.ErrUnsupported for an archived one.
+func headObject(ctx context.Context, client clientAPI, bucket, key, name string) (*s3.HeadObjectOutput, error) {
+	res, err := client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	if err == nil {
+		if isArchived(res) {
+			return nil, errArchived(name)
+		}
+		return res, nil
+	}
+	if isNotFoundErr(err) {
+		return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, name)
+	}
+	// A HEAD has no body, so s2-server's InvalidObjectState arrives as a bare 403; one ranged GET tells it from AccessDenied.
+	var status interface{ HTTPStatusCode() int }
+	if errors.As(err, &status) && status.HTTPStatusCode() == http.StatusForbidden {
+		got, gerr := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), Range: aws.String("bytes=0-0")})
+		if gerr == nil {
+			_ = got.Body.Close()
+		}
+		if isInvalidObjectState(gerr) {
+			return nil, errArchived(name)
+		}
+	}
+	return nil, fmt.Errorf("failed to head object: %w", err)
+}
+
+// isArchived reports whether a HEAD describes an object S3 serves only once it is restored.
+func isArchived(h *s3.HeadObjectOutput) bool {
+	switch {
+	case h.StorageClass == s3types.StorageClassGlacier, h.StorageClass == s3types.StorageClassDeepArchive, h.ArchiveStatus != "":
+		return !strings.Contains(aws.ToString(h.Restore), `ongoing-request="false"`)
+	}
+	return false
+}
+
+// isInvalidObjectState reports S3's refusal to read an archived object.
+func isInvalidObjectState(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "InvalidObjectState"
+}
+
+// errArchived is the error for name when it is archived and not restored.
+func errArchived(name string) error {
+	return fmt.Errorf("%w: %s is archived", errors.ErrUnsupported, name)
 }
 
 // mapNotExist wraps err as s2.ErrNotExist when it indicates name is
@@ -541,6 +579,9 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 		Key:        aws.String(s.key(dst)),
 		CopySource: aws.String(copySource(s.bucket, srcKey)),
 	})
+	if isInvalidObjectState(err) {
+		return errArchived(src)
+	}
 	if !isInvalidRequest(err) {
 		return mapNotExist(err, src)
 	}
@@ -554,6 +595,9 @@ func (s *storage) Copy(ctx context.Context, src, dst string) error {
 	}
 	if herr != nil {
 		return fmt.Errorf("%w; HeadObject for its size: %w", err, herr)
+	}
+	if isArchived(head) {
+		return errArchived(src)
 	}
 	if aws.ToInt64(head.ContentLength) <= maxCopyObjectSize {
 		return err

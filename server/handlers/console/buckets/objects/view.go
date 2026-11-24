@@ -32,7 +32,7 @@ func handleView(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	rc, err := obj.Open()
 	if err != nil {
-		server.WriteConsoleStorageError(w, r, err)
+		server.WriteConsoleGetError(w, r, err)
 		return
 	}
 	defer func() { _ = rc.Close() }()
@@ -104,7 +104,7 @@ func handlePreview(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	if previewType == "text" && !tooLarge {
 		rc, err := obj.Open()
 		if err != nil {
-			server.WriteConsoleStorageError(w, r, err)
+			server.WriteConsoleGetError(w, r, err)
 			return
 		}
 		defer func() { _ = rc.Close() }()

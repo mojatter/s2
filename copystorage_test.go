@@ -23,6 +23,7 @@ type mapStorage struct {
 	stuck         bool
 	invalid       string // refused by name, as fs refuses its reserved names
 	getErrStored  error  // Get answers it once the object is stored
+	copyErr       error  // Copy answers it while Get still reads the source
 	uri           string
 	copies        []string
 	gets          []string
@@ -125,6 +126,9 @@ func (s *mapStorage) Put(_ context.Context, obj Object) error {
 
 func (s *mapStorage) Copy(ctx context.Context, src, dst string) error {
 	s.copies = append(s.copies, src+" "+dst)
+	if s.copyErr != nil {
+		return s.copyErr
+	}
 	o, err := s.Get(ctx, src)
 	if err != nil {
 		return err
@@ -416,6 +420,25 @@ func TestCopyStorage(t *testing.T) {
 			wantDst:     []string{"a/1", "a/b/", "bk/a/1", "bk/a/b/"},
 			wantCopies:  []string{"a/b/ bk/a/b/"},
 			wantReports: []string{"skipped a/1>bk/a/1", "copied a/b/>bk/a/b/"},
+		},
+		{
+			caseName:    "counts an object Copy cannot read within one storage",
+			src:         &mapStorage{objs: newMapStorage(photo("a/1"), photo("a/2")).objs, pageSize: 1000, unreadable: "a/1"},
+			opts:        CopyStorageOptions{DstDir: "bk", SrcOptions: ListOptions{Prefix: "a/", Recursive: true}},
+			want:        CopyStorageResult{Copied: 1, Unsupported: 1},
+			wantDst:     []string{"a/1", "a/2", "bk/a/2"},
+			wantCopies:  []string{"a/1 bk/a/1", "a/2 bk/a/2"},
+			wantReports: []string{"unsupported a/1>bk/a/1: unsupported operation: a/1", "copied a/2>bk/a/2"},
+		},
+		{
+			caseName:   "stops on an ErrUnsupported from Copy when Get reads the source",
+			src:        &mapStorage{objs: newMapStorage(photo("a/1")).objs, pageSize: 1000, copyErr: fmt.Errorf("copy: %w", errors.ErrUnsupported)},
+			opts:       CopyStorageOptions{DstDir: "bk", SrcOptions: ListOptions{Prefix: "a/", Recursive: true}},
+			wantDst:    []string{"a/1"},
+			wantCopies: []string{"a/1 bk/a/1"},
+			wantErr:    "copy: unsupported operation",
+			wantErrIs:  errors.ErrUnsupported,
+			wantResume: &ListOptions{Prefix: "a/", Recursive: true},
 		},
 		{
 			caseName:   "refuses a DstDir inside the selection on one storage",

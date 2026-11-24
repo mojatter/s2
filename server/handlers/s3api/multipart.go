@@ -191,7 +191,7 @@ func uploadPartCopy(s *server.Server, w http.ResponseWriter, r *http.Request, up
 		rc, err = srcObj.Open()
 	}
 	if err != nil {
-		writeS2Error(w, r, err)
+		writeGetError(w, r, err)
 		return
 	}
 	defer func() { _ = rc.Close() }()

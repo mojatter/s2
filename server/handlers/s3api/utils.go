@@ -89,7 +89,7 @@ func writeS2Error(w http.ResponseWriter, r *http.Request, err error) {
 	writeError(w, r, code, msg, status)
 }
 
-// writeGetError is writeS2Error for a failure from Storage.Get.
+// writeGetError is writeS2Error for a failure from Storage.Get or a read of the object's body.
 func writeGetError(w http.ResponseWriter, r *http.Request, err error) {
 	code, msg, status := getErrorToS3Error(err)
 	logS3Error(r, code, status, err)

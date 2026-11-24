@@ -51,6 +51,9 @@ func (o *object) openEmpty(ctx context.Context) (io.ReadCloser, error) {
 	if o.version != "" && props.etag != "" && strings.Trim(props.etag, `"`) != strings.Trim(o.version, `"`) {
 		return nil, fmt.Errorf("%w: %s", s2.ErrModified, o.name)
 	}
+	if props.archived() {
+		return nil, errArchived(o.name)
+	}
 	return io.NopCloser(strings.NewReader("")), nil
 }
 
@@ -63,6 +66,9 @@ func (o *object) download(ctx context.Context, offset, count int64) (io.ReadClos
 			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, o.name)
 		}
 		return nil, fmt.Errorf("%w: %s: %w", s2.ErrModified, o.name, err)
+	}
+	if bloberror.HasCode(err, bloberror.BlobArchived) {
+		return nil, errArchived(o.name)
 	}
 	if err != nil {
 		return nil, mapNotExist(err, o.name)

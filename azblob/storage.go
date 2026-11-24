@@ -11,6 +11,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	azsdk "github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 
 	"github.com/mojatter/s2"
@@ -224,6 +225,9 @@ func (s *azblobStorage) Get(ctx context.Context, name string) (s2.Object, error)
 	if err != nil {
 		return nil, mapNotExist(err, name)
 	}
+	if props.archived() {
+		return nil, errArchived(name)
+	}
 	md := s2.Metadata(fromPtrMetadata(props.metadata))
 	if md == nil {
 		md = make(s2.Metadata)
@@ -358,7 +362,17 @@ func (s *azblobStorage) Copy(ctx context.Context, src, dst string) error {
 			return err
 		}
 	}
-	return mapNotExist(s.client.copyBlob(ctx, s.container, s.key(src), s.key(dst)), src)
+	err := s.client.copyBlob(ctx, s.container, s.key(src), s.key(dst))
+	if bloberror.HasCode(err, bloberror.BlobArchived) {
+		return errArchived(src)
+	}
+	// A rehydrating source answers PendingCopyOperation, as a copy still pending onto dst does.
+	if bloberror.HasCode(err, bloberror.PendingCopyOperation) {
+		if props, perr := s.client.getProperties(ctx, s.container, s.key(src)); perr == nil && props.archived() {
+			return errArchived(src)
+		}
+	}
+	return mapNotExist(err, src)
 }
 
 func (s *azblobStorage) Delete(_ context.Context, name string) error {
@@ -425,6 +439,16 @@ func (s *azblobStorage) listPrefix(prefix string, recursive bool) string {
 		full += "/"
 	}
 	return full
+}
+
+// archived reports whether the blob is in the Archive tier, where it cannot be read until rehydrated.
+func (p blobProps) archived() bool {
+	return p.accessTier == string(blob.AccessTierArchive)
+}
+
+// errArchived is the error for name when it is archived and not rehydrated.
+func errArchived(name string) error {
+	return fmt.Errorf("%w: %s is archived", errors.ErrUnsupported, name)
 }
 
 func mapNotExist(err error, name string) error {

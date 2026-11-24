@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -3458,7 +3459,7 @@ func (s *ObjectsTestSuite) TestGetObjectLogsAFailedBody() {
 
 const typeUnreadable = s2.Type("unreadable-test")
 
-// unreadableStorage lists every object but cannot read those named "archived".
+// unreadableStorage lists every object but cannot read those named "archived", nor the body of those named "expired".
 type unreadableStorage struct {
 	s2.Storage
 }
@@ -3475,7 +3476,24 @@ func (u unreadableStorage) Get(ctx context.Context, name string) (s2.Object, err
 	if name == "archived" {
 		return nil, fmt.Errorf("unreadable-test: %s: %w", name, errors.ErrUnsupported)
 	}
-	return u.Storage.Get(ctx, name)
+	obj, err := u.Storage.Get(ctx, name)
+	if err == nil && path.Base(name) == "expired" {
+		return unreadableBody{obj}, nil
+	}
+	return obj, err
+}
+
+// unreadableBody is an object Get finds but whose body cannot be read, as a restore that expired after the HEAD.
+type unreadableBody struct {
+	s2.Object
+}
+
+func (o unreadableBody) Open() (io.ReadCloser, error) {
+	return nil, fmt.Errorf("unreadable-test: %s: %w", o.Name(), errors.ErrUnsupported)
+}
+
+func (o unreadableBody) OpenRange(uint64, uint64) (io.ReadCloser, error) {
+	return o.Open()
 }
 
 // TestGetUnreadableObject checks every request that reads an object answers 403 InvalidObjectState for one the backend cannot read, and GetObjectTagging, which reads nothing, answers its empty tag set (#515).
@@ -3495,6 +3513,7 @@ func (s *ObjectsTestSuite) TestGetUnreadableObject() {
 	s.Require().NoError(err)
 	s.Require().NoError(srv.Buckets.Create(context.Background(), "ub"))
 	s.Require().NoError(base.Put(context.Background(), s2.NewObjectBytes("ub/archived", []byte("hello"))))
+	s.Require().NoError(base.Put(context.Background(), s2.NewObjectBytes("ub/expired", []byte("hello"))))
 	ts := httptest.NewServer(srv.S3Handler())
 	defer ts.Close()
 
@@ -3509,6 +3528,7 @@ func (s *ObjectsTestSuite) TestGetUnreadableObject() {
 		method     string
 		path       string
 		copySource string
+		header     map[string]string
 		wantStatus int
 		wantBody   string // in the body, unless HEAD
 	}{
@@ -3517,6 +3537,12 @@ func (s *ObjectsTestSuite) TestGetUnreadableObject() {
 		{caseName: "GetObjectTagging", method: http.MethodGet, path: "/ub/archived?tagging", wantStatus: http.StatusOK, wantBody: "<TagSet></TagSet>"},
 		{caseName: "CopyObject source", method: http.MethodPut, path: "/ub/copy", copySource: "/ub/archived", wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>"},
 		{caseName: "UploadPartCopy source", method: http.MethodPut, path: "/ub/part?partNumber=1&uploadId=" + created.UploadID, copySource: "/ub/archived", wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>"},
+		{caseName: "GetObject of an unreadable body", method: http.MethodGet, path: "/ub/expired", wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>"},
+		{caseName: "ranged GetObject of an unreadable body", method: http.MethodGet, path: "/ub/expired", header: map[string]string{"Range": "bytes=0-1"}, wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>"},
+		{caseName: "HeadObject of an unreadable body", method: http.MethodHead, path: "/ub/expired", wantStatus: http.StatusOK},
+		{caseName: "CopyObject source with an unreadable body", method: http.MethodPut, path: "/ub/copy", copySource: "/ub/expired", wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>"},
+		{caseName: "UploadPartCopy source with an unreadable body", method: http.MethodPut, path: "/ub/part?partNumber=1&uploadId=" + created.UploadID, copySource: "/ub/expired", wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>"},
+		{caseName: "UploadPartCopy source range with an unreadable body", method: http.MethodPut, path: "/ub/part?partNumber=1&uploadId=" + created.UploadID, copySource: "/ub/expired", header: map[string]string{"x-amz-copy-source-range": "bytes=0-1"}, wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>"},
 	}
 	for _, tc := range testCases {
 		s.Run(tc.caseName, func() {
@@ -3524,6 +3550,9 @@ func (s *ObjectsTestSuite) TestGetUnreadableObject() {
 			s.Require().NoError(err)
 			if tc.copySource != "" {
 				req.Header.Set(copySourceHeader, tc.copySource)
+			}
+			for k, v := range tc.header {
+				req.Header.Set(k, v)
 			}
 			resp, err := ts.Client().Do(req)
 			s.Require().NoError(err)
