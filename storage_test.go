@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type nilStorage struct {
@@ -413,7 +415,7 @@ func TestCount(t *testing.T) {
 	}
 }
 
-// moveStorage records the calls s2.Move's fallback makes; Get finds only "k".
+// moveStorage records the calls the s2.Move and s2.Open fallbacks make; Get finds only "k".
 type moveStorage struct {
 	Storage
 	calls []string
@@ -424,7 +426,7 @@ func (s *moveStorage) Get(_ context.Context, name string) (Object, error) {
 	if name != "k" {
 		return nil, ErrNotExist
 	}
-	return NewObjectBytes(name, nil), nil
+	return NewObjectBytes(name, []byte("via get")), nil
 }
 
 func (s *moveStorage) Copy(_ context.Context, src, dst string) error {
@@ -454,6 +456,59 @@ func TestMove(t *testing.T) {
 			err := Move(context.Background(), s, tc.src, tc.dst)
 			assert.ErrorIs(t, err, tc.wantErr)
 			assert.Equal(t, tc.wantCalls, s.calls)
+		})
+	}
+}
+
+// openerStorage is a moveStorage that also opens by name.
+type openerStorage struct {
+	moveStorage
+}
+
+func (s *openerStorage) Open(_ context.Context, name string) (io.ReadCloser, error) {
+	s.calls = append(s.calls, "Open "+name)
+	return io.NopCloser(strings.NewReader("by name")), nil
+}
+
+func TestOpen(t *testing.T) {
+	testCases := []struct {
+		caseName  string
+		opener    bool
+		name      string
+		want      string
+		wantErr   error
+		wantCalls []string
+	}{
+		{caseName: "Opener opens by name", opener: true, name: "k", want: "by name", wantCalls: []string{"Open k"}},
+		{caseName: "falls back to Get then Open", name: "k", want: "via get", wantCalls: []string{"Get k"}},
+		{caseName: "fallback passes on Get's error", name: "x", wantErr: ErrNotExist, wantCalls: []string{"Get x"}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			var (
+				s     Storage
+				calls func() []string
+			)
+			if tc.opener {
+				o := &openerStorage{}
+				s, calls = o, func() []string { return o.calls }
+			} else {
+				m := &moveStorage{}
+				s, calls = m, func() []string { return m.calls }
+			}
+			rc, err := Open(context.Background(), s, tc.name)
+			assert.Equal(t, tc.wantCalls, calls())
+			if tc.wantErr != nil {
+				assert.ErrorIs(t, err, tc.wantErr)
+				assert.Nil(t, rc)
+				return
+			}
+			require.NoError(t, err)
+			defer rc.Close()
+
+			got, err := io.ReadAll(rc)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, string(got))
 		})
 	}
 }

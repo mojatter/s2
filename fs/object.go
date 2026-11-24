@@ -50,6 +50,11 @@ func (o *object) Name() string {
 
 // Open refuses a body of another length or modification time than Get saw, so a Put since Get cannot pair it with what Get returned (#349); a deleted one, or a directory, is s2.ErrNotExist.
 func (o *object) Open() (io.ReadCloser, error) {
+	return o.open(true)
+}
+
+// open opens the body, refusing another version than o describes only when pinned.
+func (o *object) open(pinned bool) (io.ReadCloser, error) {
 	if isMarker(o.name) {
 		return o.openMarker()
 	}
@@ -71,7 +76,7 @@ func (o *object) Open() (io.ReadCloser, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, o.name)
 	}
-	if s2.MustUint64(info.Size()) != o.length || !info.ModTime().Equal(o.lastModified) {
+	if pinned && (s2.MustUint64(info.Size()) != o.length || !info.ModTime().Equal(o.lastModified)) {
 		_ = f.Close()
 		return nil, fmt.Errorf("%w: %s", s2.ErrModified, o.name)
 	}

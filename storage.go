@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 )
@@ -172,6 +173,26 @@ func Move(ctx context.Context, s Storage, src, dst string) error {
 		return err
 	}
 	return s.Delete(ctx, src)
+}
+
+// Opener is an optional interface a Storage may satisfy to open a body by name without fetching its attributes first.
+//
+// Open returns the body name holds when the read starts and pins no version, so it never fails with ErrModified.
+// It fails as Get does for a missing or invalid name, and ctx must stay live until the reader is closed.
+type Opener interface {
+	Open(ctx context.Context, name string) (io.ReadCloser, error)
+}
+
+// Open opens name's body on s, via Opener when s has it, else by Get and Object.Open, where ctx reaches only Get and a Put between the two fails with ErrModified.
+func Open(ctx context.Context, s Storage, name string) (io.ReadCloser, error) {
+	if o, ok := s.(Opener); ok {
+		return o.Open(ctx, name)
+	}
+	obj, err := s.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return obj.Open()
 }
 
 // Uploader is an optional interface that a Storage implementation may satisfy

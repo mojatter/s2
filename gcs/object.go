@@ -34,17 +34,17 @@ func (o *object) Name() string {
 }
 
 func (o *object) Open() (io.ReadCloser, error) {
-	return o.read(0, -1)
+	return o.read(context.Background(), 0, -1)
 }
 
 func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
-	return o.read(s2.MustInt64(offset), s2.MustInt64(length))
+	return o.read(context.Background(), s2.MustInt64(offset), s2.MustInt64(length))
 }
 
-// read reads the generation Get or List saw; the precondition spares the transfer, the check covers endpoints that ignore it.
-func (o *object) read(offset, length int64) (io.ReadCloser, error) {
+// read reads the generation Get or List saw, or the live one when it is 0; the precondition spares the transfer, the check covers endpoints that ignore it.
+func (o *object) read(ctx context.Context, offset, length int64) (io.ReadCloser, error) {
 	obj := o.client.bucket(o.bucket).object(o.key())
-	rc, generation, err := obj.newRangeReader(context.Background(), offset, length, o.generation)
+	rc, generation, err := obj.newRangeReader(ctx, offset, length, o.generation)
 	var apiErr *googleapi.Error
 	if errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed {
 		return nil, fmt.Errorf("%w: %s: %w", s2.ErrModified, o.name, err)

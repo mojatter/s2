@@ -668,6 +668,30 @@ func (s *storage) get(name string) (*object, error) {
 	return obj, nil
 }
 
+var _ s2.Opener = (*storage)(nil)
+
+// Open implements s2.Opener: it finds name as Get does, under the same lock, and opens the body without reading the metadata file.
+func (s *storage) Open(ctx context.Context, name string) (io.ReadCloser, error) {
+	if err := validateName(name); err != nil {
+		return nil, err
+	}
+	var rc io.ReadCloser
+	if err := s.slockName(ctx, name, func() error {
+		info, ok, err := s.statKey(name)
+		if err != nil {
+			return err
+		}
+		if !ok || info.IsDir() {
+			return fmt.Errorf("%w: %s", s2.ErrNotExist, name)
+		}
+		rc, err = newObjectFileInfo(s.fsys, name, info).open(false)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	return rc, nil
+}
+
 // Exists reports whether name is an object or a directory, or, for a name ending in "/", a stored marker.
 func (s *storage) Exists(ctx context.Context, name string) (bool, error) {
 	if err := validateName(name); err != nil {

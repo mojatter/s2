@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -314,6 +315,17 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 		contentType:  contentType,
 		etag:         aws.ToString(params.ETag),
 	}, nil
+}
+
+var _ s2.Opener = (*storage)(nil)
+
+// Open implements s2.Opener with one GetObject.
+func (s *storage) Open(ctx context.Context, name string) (io.ReadCloser, error) {
+	if err := s2.ValidateName(name); err != nil {
+		return nil, err
+	}
+	o := &object{client: s.client, bucket: s.bucket, prefix: s.prefix, name: name}
+	return o.get(ctx, nil)
 }
 
 // Exists reports whether name resolves to either a leaf object or a
