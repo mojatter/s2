@@ -35,7 +35,23 @@ func (o *object) Open() (io.ReadCloser, error) {
 }
 
 func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
+	if length == 0 {
+		return o.openEmpty(context.Background())
+	}
 	return o.download(context.Background(), s2.MustInt64(offset), s2.MustInt64(length))
+}
+
+// openEmpty fails as download does but reads nothing, since a count of 0 means to the end.
+func (o *object) openEmpty(ctx context.Context) (io.ReadCloser, error) {
+	props, err := o.client.getProperties(ctx, o.container, o.key())
+	if err != nil {
+		return nil, mapNotExist(err, o.name)
+	}
+	// A listing reports Azure's ETag unquoted, the properties quoted.
+	if o.version != "" && props.etag != "" && strings.Trim(props.etag, `"`) != strings.Trim(o.version, `"`) {
+		return nil, fmt.Errorf("%w: %s", s2.ErrModified, o.name)
+	}
+	return io.NopCloser(strings.NewReader("")), nil
 }
 
 // download reads the version Get or List saw, or the current one when version is "".

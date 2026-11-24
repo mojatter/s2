@@ -182,7 +182,7 @@ func uploadPartCopy(s *server.Server, w http.ResponseWriter, r *http.Request, up
 		return
 	}
 
-	// Only a range opens a range: its length is at least 1, which OpenRange needs on every backend.
+	// Without a range the whole body is opened.
 	var rc io.ReadCloser
 	var err error
 	if h != "" {

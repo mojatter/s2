@@ -21,7 +21,7 @@ type Object interface {
 	Open() (io.ReadCloser, error)
 	// OpenRange opens the object for reading the specified range and returns the reader stream.
 	// The caller is responsible for closing the returned io.ReadCloser.
-	// It fails as Open does.
+	// It fails as Open does; a length of 0 reads nothing.
 	OpenRange(offset, length uint64) (io.ReadCloser, error)
 	// Length returns the length of the object in bytes.
 	Length() uint64

@@ -113,7 +113,8 @@ func (m *mockAzblobClient) getProperties(_ context.Context, container, blobName 
 	if !ok {
 		return blobProps{}, newBlobNotFoundError()
 	}
-	etag := b.etag
+	// The service quotes the ETag here and not in a listing.
+	etag := `"` + b.etag + `"`
 	if m.omitETag {
 		etag = ""
 	}
@@ -135,7 +136,7 @@ func (m *mockAzblobClient) downloadStream(_ context.Context, container, blobName
 	if !ok {
 		return nil, newBlobNotFoundError()
 	}
-	if ifMatch != "" && ifMatch != b.etag {
+	if ifMatch != "" && strings.Trim(ifMatch, `"`) != b.etag {
 		return nil, &azcore.ResponseError{ErrorCode: string(bloberror.ConditionNotMet), StatusCode: http.StatusPreconditionFailed}
 	}
 	body := b.body
@@ -163,7 +164,7 @@ func (m *mockAzblobClient) upload(_ context.Context, container, blobName string,
 	if ifMatch != "" && !exists && !m.preconditionOnMissing {
 		return "", &azcore.ResponseError{ErrorCode: string(bloberror.BlobNotFound), StatusCode: http.StatusNotFound}
 	}
-	if ifMatch != "" && (!exists || ifMatch != cur.etag) {
+	if ifMatch != "" && (!exists || strings.Trim(ifMatch, `"`) != cur.etag) {
 		return "", &azcore.ResponseError{ErrorCode: string(bloberror.ConditionNotMet), StatusCode: http.StatusPreconditionFailed}
 	}
 	m.put(container, blobName, data, metadata)
