@@ -166,10 +166,33 @@ func (c *sdkClient) setMetadata(ctx context.Context, ctr, blobName string, metad
 	return err
 }
 
+// copyPollInterval is how often copyBlob checks a copy the service reports as pending.
+var copyPollInterval = 500 * time.Millisecond
+
+// copyBlob uses Copy Blob, which authorizes the source with the request's credential; a pending copy outlives ctx.
 func (c *sdkClient) copyBlob(ctx context.Context, ctr, src, dst string) error {
-	srcURL := c.blobClient(ctr, src).URL()
-	_, err := c.blobClient(ctr, dst).CopyFromURL(ctx, srcURL, nil)
-	return err
+	dstClient := c.blobClient(ctr, dst)
+	res, err := dstClient.StartCopyFromURL(ctx, c.blobClient(ctr, src).URL(), nil)
+	if err != nil {
+		return err
+	}
+	status, desc := res.CopyStatus, (*string)(nil)
+	for status != nil && *status == blob.CopyStatusTypePending {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(copyPollInterval):
+		}
+		props, err := dstClient.GetProperties(ctx, nil)
+		if err != nil {
+			return err
+		}
+		status, desc = props.CopyStatus, props.CopyStatusDescription
+	}
+	if status != nil && *status != blob.CopyStatusTypeSuccess {
+		return fmt.Errorf("azblob: copy %s: %s: %s", src, *status, derefString(desc))
+	}
+	return nil
 }
 
 func (c *sdkClient) listBlobs(ctx context.Context, ctr, prefix string, maxResults int32, marker string) (listBlobsResult, error) {

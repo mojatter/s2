@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5" // #nosec G501 -- checks Content-MD5
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -62,6 +63,7 @@ func TestCopyBlobSource(t *testing.T) {
 	testCases := []struct {
 		caseName string
 		key      string
+		sas      string
 	}{
 		{caseName: "plain", key: "dir/plain.txt"},
 		{caseName: "space", key: "sp ace.txt"},
@@ -72,6 +74,7 @@ func TestCopyBlobSource(t *testing.T) {
 		{caseName: "plus", key: "plus+.txt"},
 		{caseName: "non-ASCII", key: "dir/日本語.txt"},
 		{caseName: "directory marker", key: "d+ir/"},
+		{caseName: "SAS connection string", key: "dir/plain.txt", sas: "sv=2020-02-10&sp=rw&sig=c2ln"},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.caseName, func(t *testing.T) {
@@ -83,7 +86,11 @@ func TestCopyBlobSource(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			c, err := newSDKClient(&AzblobConfig{ConnectionString: "DefaultEndpointsProtocol=http;AccountName=acct;AccountKey=a2V5;BlobEndpoint=" + srv.URL + "/acct;"})
+			conn := "DefaultEndpointsProtocol=http;AccountName=acct;AccountKey=a2V5;BlobEndpoint=" + srv.URL + "/acct;"
+			if tc.sas != "" {
+				conn = "BlobEndpoint=" + srv.URL + "/acct;SharedAccessSignature=" + tc.sas
+			}
+			c, err := newSDKClient(&AzblobConfig{ConnectionString: conn})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -94,8 +101,71 @@ func TestCopyBlobSource(t *testing.T) {
 			if err != nil {
 				t.Fatalf("x-ms-copy-source %q: %v", got, err)
 			}
-			if u.RawQuery != "" || u.Fragment != "" || u.Path != "/acct/ctr/"+tc.key {
-				t.Errorf("x-ms-copy-source %q names path %q (query %q, fragment %q), want %q", got, u.Path, u.RawQuery, u.Fragment, "/acct/ctr/"+tc.key)
+			if u.RawQuery != tc.sas || u.Fragment != "" || u.Path != "/acct/ctr/"+tc.key {
+				t.Errorf("x-ms-copy-source %q names path %q (query %q, fragment %q), want %q (query %q)", got, u.Path, u.RawQuery, u.Fragment, "/acct/ctr/"+tc.key, tc.sas)
+			}
+		})
+	}
+}
+
+func TestCopyBlobWait(t *testing.T) {
+	testCases := []struct {
+		caseName string
+		start    string
+		props    []string
+		cancel   bool
+		wantErr  bool
+	}{
+		{caseName: "success at start", start: "success"},
+		{caseName: "pending then success", start: "pending", props: []string{"pending", "success"}},
+		{caseName: "pending then failed", start: "pending", props: []string{"failed"}, wantErr: true},
+		{caseName: "aborted at start", start: "aborted", wantErr: true},
+		{caseName: "canceled while pending", start: "pending", cancel: true, wantErr: true},
+		{caseName: "pending then no status", start: "pending", props: []string{""}},
+	}
+	defer func(d time.Duration) { copyPollInterval = d }(copyPollInterval)
+
+	copyPollInterval = time.Millisecond
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			var polls int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPut {
+					if tc.cancel {
+						cancel()
+					}
+					w.Header().Set("x-ms-copy-status", tc.start)
+					w.WriteHeader(http.StatusAccepted)
+					return
+				}
+				if polls >= len(tc.props) {
+					t.Errorf("poll %d past the %d planned", polls+1, len(tc.props))
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				if tc.props[polls] != "" {
+					w.Header().Set("x-ms-copy-status", tc.props[polls])
+				}
+				polls++
+			}))
+			defer srv.Close()
+
+			c, err := newSDKClient(&AzblobConfig{ConnectionString: "DefaultEndpointsProtocol=http;AccountName=acct;AccountKey=a2V5;BlobEndpoint=" + srv.URL + "/acct;"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.copyBlob(ctx, "ctr", "src", "dst")
+			if (err != nil) != tc.wantErr {
+				t.Errorf("copyBlob: %v, want error %v", err, tc.wantErr)
+			}
+			if tc.cancel && !errors.Is(err, context.Canceled) {
+				t.Errorf("copyBlob: %v, want context.Canceled", err)
+			}
+			if polls != len(tc.props) {
+				t.Errorf("polled %d times, want %d", polls, len(tc.props))
 			}
 		})
 	}
