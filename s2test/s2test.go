@@ -507,6 +507,77 @@ func TestStorageCount(ctx context.Context, strg s2.Storage) error {
 	return nil
 }
 
+// TestStorageOpen validates s2.Open against a fixture of its own: the body of an object and a marker, through Sub as well, and the names Get refuses. It removes the fixture afterwards.
+func TestStorageOpen(ctx context.Context, strg s2.Storage) error {
+	const base = "s2test-open"
+	// base+"/": the bare base would also match s2test-open-since-get.txt.
+	defer func() { _ = strg.DeleteRecursive(context.WithoutCancel(ctx), base+"/") }()
+
+	for _, name := range []string{base + "/a.txt", base + "/d/", base + "/sub/b.txt"} {
+		body := []byte("hello")
+		if strings.HasSuffix(name, "/") {
+			body = nil
+		}
+		if err := strg.Put(ctx, s2.NewObjectBytes(name, body)); err != nil {
+			return fmt.Errorf("Put(%q) failed: %w", name, err)
+		}
+	}
+	sub, err := strg.Sub(ctx, base)
+	if err != nil {
+		return fmt.Errorf("Sub(%q) failed: %w", base, err)
+	}
+	// Sub hands back the backend itself, so a caller that hid Opener gets the same.
+	if _, ok := strg.(s2.Opener); !ok {
+		sub = struct{ s2.Storage }{sub}
+	}
+
+	var errs []string
+	testCases := []struct {
+		caseName string
+		strg     s2.Storage
+		name     string
+		want     string
+		wantErr  error
+	}{
+		{caseName: "object", strg: strg, name: base + "/a.txt", want: "hello"},
+		{caseName: "marker", strg: strg, name: base + "/d/", want: ""},
+		{caseName: "object in Sub", strg: sub, name: "a.txt", want: "hello"},
+		{caseName: "missing", strg: strg, name: base + "/none.txt", wantErr: s2.ErrNotExist},
+		{caseName: "prefix of objects", strg: strg, name: base + "/sub", wantErr: s2.ErrNotExist},
+		{caseName: "invalid", strg: strg, name: "../" + base + "/a.txt", wantErr: s2.ErrInvalidName},
+	}
+	for _, tc := range testCases {
+		rc, err := s2.Open(ctx, tc.strg, tc.name)
+		if tc.wantErr != nil {
+			if !errors.Is(err, tc.wantErr) {
+				errs = append(errs, fmt.Sprintf("%s: Open(%q) error = %v, want %v", tc.caseName, tc.name, err, tc.wantErr))
+			}
+			if rc != nil {
+				_ = rc.Close()
+			}
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: Open(%q) failed: %v", tc.caseName, tc.name, err))
+			continue
+		}
+		got, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: reading Open(%q) failed: %v", tc.caseName, tc.name, err))
+			continue
+		}
+		if string(got) != tc.want {
+			errs = append(errs, fmt.Sprintf("%s: Open(%q) read %q, want %q", tc.caseName, tc.name, got, tc.want))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("TestStorageOpen found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
+	}
+	return nil
+}
+
 // TestStorageOpenSinceGet validates that Open and OpenRange of an object from Get or List fail with s2.ErrModified once its key holds another version, and with s2.ErrNotExist once it is deleted.
 func TestStorageOpenSinceGet(ctx context.Context, strg s2.Storage) error {
 	const name = "s2test-open-since-get.txt"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"strings"
 	"time"
@@ -239,6 +240,17 @@ func (s *azblobStorage) Get(ctx context.Context, name string) (s2.Object, error)
 		etag:        blobETag(props.contentMD5, props.etag),
 		version:     props.etag,
 	}, nil
+}
+
+var _ s2.Opener = (*azblobStorage)(nil)
+
+// Open implements s2.Opener with one download, no properties call first.
+func (s *azblobStorage) Open(ctx context.Context, name string) (io.ReadCloser, error) {
+	if err := s2.ValidateName(name); err != nil {
+		return nil, err
+	}
+	o := &object{client: s.client, container: s.container, prefix: s.prefix, name: name}
+	return o.download(ctx, 0, 0)
 }
 
 func (s *azblobStorage) Exists(ctx context.Context, name string) (bool, error) {

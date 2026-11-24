@@ -101,19 +101,30 @@ func (s *ObjectTestSuite) TestObjectOpenRange() {
 }
 
 func (s *ObjectTestSuite) TestObjectOpenNotFound() {
-	obj := &object{
-		client: s.client,
-		bucket: "my-bucket",
-		prefix: "",
-		name:   "not-found.txt",
+	testCases := []struct {
+		caseName string
+		prefix   string
+	}{
+		{caseName: "no prefix"},
+		{caseName: "under a prefix", prefix: "p"},
 	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			obj := &object{
+				client: s.client,
+				bucket: "my-bucket",
+				prefix: tc.prefix,
+				name:   "not-found.txt",
+			}
 
-	rc, err := obj.Open()
-	s.Require().Error(err)
-	s.Nil(rc)
-
-	// Ensure it wraps into s2.ErrNotExist
-	s.Require().ErrorIs(err, s2.ErrNotExist)
+			rc, err := obj.Open()
+			s.Require().Error(err)
+			s.Nil(rc)
+			s.Require().ErrorIs(err, s2.ErrNotExist)
+			// Named as Get names it, without the storage's prefix.
+			s.Equal(s2.ErrNotExist.Error()+": not-found.txt", err.Error())
+		})
+	}
 }
 
 // Open and OpenRange read the version Get or List saw, or fail.

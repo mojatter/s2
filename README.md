@@ -410,6 +410,16 @@ res, err := s2.Count(ctx, strg, s2.CountOptions{Prefix: "images/image-20260929",
 // res.Objects is exact, or 1000 with res.Truncated set when more exist.
 ```
 
+`Get` fetches an object's attributes before its body can be opened, which on `s3`, `gcs` and `azblob` is a request of its own. `s2.Open` opens a body by name in one: all four bundled backends satisfy the optional `s2.Opener` interface, and the free function falls back to `Get` followed by `Object.Open` for those that do not. An `Opener` pins no version, so it never fails with `ErrModified`, and `ctx` must stay live until the reader is closed. The fallback reads the version `Get` saw, so a `Put` between the two still fails it with `ErrModified`, and `ctx` reaches only its `Get`:
+
+```go
+rc, err := s2.Open(ctx, strg, "images/a.jpg")
+if err != nil {
+	return err
+}
+defer rc.Close()
+```
+
 Errors that report a missing object wrap [`s2.ErrNotExist`](https://pkg.go.dev/github.com/mojatter/s2#pkg-variables); detect them with `errors.Is`:
 
 ```go

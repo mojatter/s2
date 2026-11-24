@@ -224,6 +224,17 @@ func (s *gcsStorage) Get(ctx context.Context, name string) (s2.Object, error) {
 	}, nil
 }
 
+var _ s2.Opener = (*gcsStorage)(nil)
+
+// Open implements s2.Opener with one reader, no attributes call first.
+func (s *gcsStorage) Open(ctx context.Context, name string) (io.ReadCloser, error) {
+	if err := s2.ValidateName(name); err != nil {
+		return nil, err
+	}
+	o := &object{client: s.client, bucket: s.bucket, prefix: s.prefix, name: name}
+	return o.read(ctx, 0, -1)
+}
+
 func (s *gcsStorage) Exists(ctx context.Context, name string) (bool, error) {
 	// "" is the root; "/" is a spelling of it that no name may take.
 	if name == "" {
