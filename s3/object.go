@@ -85,7 +85,28 @@ func (o *object) Metadata() s2.Metadata {
 }
 
 func (o *object) OpenRange(offset, length uint64) (io.ReadCloser, error) {
+	if length == 0 {
+		return o.openEmpty(context.Background())
+	}
 	return o.get(context.Background(), aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)))
+}
+
+// openEmpty fails as get does but reads nothing, since a Range cannot name zero bytes.
+func (o *object) openEmpty(ctx context.Context) (io.ReadCloser, error) {
+	res, err := o.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(o.bucket),
+		Key:    aws.String(o.key()),
+	})
+	if err != nil {
+		if isNotFoundErr(err) {
+			return nil, fmt.Errorf("%w: %s", s2.ErrNotExist, o.name)
+		}
+		return nil, fmt.Errorf("failed to head object: %w", err)
+	}
+	if o.etag != "" && res.ETag != nil && strings.Trim(aws.ToString(res.ETag), `"`) != strings.Trim(o.etag, `"`) {
+		return nil, fmt.Errorf("%w: %s", s2.ErrModified, o.name)
+	}
+	return io.NopCloser(strings.NewReader("")), nil
 }
 
 func (o *object) ContentType() string {

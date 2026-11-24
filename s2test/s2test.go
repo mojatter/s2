@@ -650,6 +650,8 @@ func checkOpenSinceLookup(ctx context.Context, strg s2.Storage, name, caseName s
 		{call: "Open()", open: obj.Open, body: "body"},
 		{call: "OpenRange(0, 2)", open: func() (io.ReadCloser, error) { return obj.OpenRange(0, 2) }, body: "bo"},
 		{call: "OpenRange(1, 2)", open: func() (io.ReadCloser, error) { return obj.OpenRange(1, 2) }, body: "od"},
+		{call: "OpenRange(0, 0)", open: func() (io.ReadCloser, error) { return obj.OpenRange(0, 0) }, body: ""},
+		{call: "OpenRange(1, 0)", open: func() (io.ReadCloser, error) { return obj.OpenRange(1, 0) }, body: ""},
 	}
 	for _, o := range opens {
 		rc, err := o.open()

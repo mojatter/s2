@@ -169,10 +169,12 @@ func (s *ObjectTestSuite) TestObjectOpenSinceGet() {
 					caseName string
 					open     func() (io.ReadCloser, error)
 					offset   int
+					empty    bool
 				}{
 					{caseName: "Open", open: obj.Open},
 					{caseName: "OpenRange", open: func() (io.ReadCloser, error) { return obj.OpenRange(0, obj.Length()) }},
 					{caseName: "OpenRange mid", open: func() (io.ReadCloser, error) { return obj.OpenRange(1, obj.Length()-1) }, offset: 1},
+					{caseName: "OpenRange empty", open: func() (io.ReadCloser, error) { return obj.OpenRange(1, 0) }, empty: true},
 				}
 				for _, op := range opens {
 					s.Run(op.caseName, func() {
@@ -185,6 +187,10 @@ func (s *ObjectTestSuite) TestObjectOpenSinceGet() {
 						b, err := io.ReadAll(rc)
 						_ = rc.Close()
 						s.Require().NoError(err)
+						if op.empty {
+							s.Empty(b)
+							return
+						}
 						s.Equal(tc.wantBody[op.offset:], string(b))
 					})
 				}
