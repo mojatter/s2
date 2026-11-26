@@ -267,7 +267,7 @@ func buildListBucketResult(p listObjectsParams, objs []s2.Object, prefixes []str
 			LastModified: obj.LastModified().UTC(),
 			ETag:         obj.ETag(),
 			Size:         obj.Length(),
-			StorageClass: "STANDARD",
+			StorageClass: listedClassName(obj),
 		})
 	}
 	commonPrefixes := make([]CommonPrefix, 0, len(prefixes))
@@ -356,6 +356,17 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 	}
 
 	obj, err := strg.Get(ctx, key)
+	if errors.Is(err, errors.ErrUnsupported) {
+		// HEAD describes an object Get refuses only when Stat names an archived class, as S3 does.
+		statObj, ok := statClassed(ctx, strg, key)
+		switch {
+		case r.Method == http.MethodGet:
+			writeGetObjectError(w, r, err, statObj)
+			return
+		case ok:
+			obj, err = statObj, nil
+		}
+	}
 	if err != nil {
 		writeGetError(w, r, err)
 		return
@@ -385,7 +396,7 @@ func handleGetObject(s *server.Server, w http.ResponseWriter, r *http.Request) {
 
 	rc, err := obj.Open()
 	if err != nil {
-		writeGetError(w, r, err)
+		writeGetObjectError(w, r, err, obj)
 		return
 	}
 	defer func() { _ = rc.Close() }()
@@ -470,6 +481,57 @@ func setObjectHeaders(w http.ResponseWriter, obj s2.Object, key string) {
 	setValidatorHeaders(w, obj)
 	w.Header().Set("Content-Type", server.ResolveContentType(obj, key))
 	w.Header().Set("Content-Length", strconv.FormatUint(obj.Length(), 10))
+	setStorageClassHeaders(w, s2.StorageClassOf(obj))
+}
+
+// setStorageClassHeaders sets the storage class and restore state as S3 does, which names no class for STANDARD.
+func setStorageClassHeaders(w http.ResponseWriter, c s2.StorageClass) {
+	if c.Name != "" && c.Name != storageClassStandard {
+		w.Header().Set("x-amz-storage-class", c.Name)
+	}
+	if c.ArchiveStatus != "" {
+		w.Header().Set("x-amz-archive-status", c.ArchiveStatus)
+	}
+	switch {
+	case c.Restoring:
+		w.Header().Set("x-amz-restore", `ongoing-request="true"`)
+	case c.Restored:
+		v := `ongoing-request="false"`
+		if !c.RestoredUntil.IsZero() {
+			v += `, expiry-date="` + c.RestoredUntil.UTC().Format(http.TimeFormat) + `"`
+		}
+		w.Header().Set("x-amz-restore", v)
+	}
+}
+
+// S3's class names: the default a listing names, and the archived ones clients skip.
+const (
+	storageClassStandard    = "STANDARD"
+	storageClassGlacier     = "GLACIER"
+	storageClassDeepArchive = "DEEP_ARCHIVE"
+)
+
+// listedClassName is the class a listing names for obj.
+func listedClassName(obj s2.Object) string {
+	if name := s2.StorageClassOf(obj).Name; name != "" {
+		return name
+	}
+	return storageClassStandard
+}
+
+// statClassed returns key from Stat and whether its class is archived; nil when Stat fails.
+func statClassed(ctx context.Context, strg s2.Storage, key string) (s2.Object, bool) {
+	obj, err := s2.Stat(ctx, strg, key)
+	if err != nil {
+		return nil, false
+	}
+	return obj, archivedClass(obj)
+}
+
+// archivedClass reports whether obj names GLACIER, DEEP_ARCHIVE or an archive status, the classes clients treat as archived.
+func archivedClass(obj s2.Object) bool {
+	c := s2.StorageClassOf(obj)
+	return c.Name == storageClassGlacier || c.Name == storageClassDeepArchive || c.ArchiveStatus != ""
 }
 
 // handleGetObjectTagging answers the empty tag set of an existing object, since s2 keeps no tags; one Get cannot read exists too.
@@ -549,7 +611,7 @@ func handleRangeRequest(w http.ResponseWriter, r *http.Request, obj s2.Object, k
 	length := end - start + 1
 	rc, err := obj.OpenRange(start, length)
 	if err != nil {
-		writeGetError(w, r, err)
+		writeGetObjectError(w, r, err, obj)
 		return
 	}
 	defer func() { _ = rc.Close() }()

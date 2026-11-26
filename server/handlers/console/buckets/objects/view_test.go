@@ -397,7 +397,8 @@ func (s *ViewTestSuite) TestHandlePreview() {
 
 const typeBroken = s2.Type("broken-view-test")
 
-// brokenStorage fails Get of broken.txt as an unreachable backend would, Get of unreadable.txt as a backend that lists but cannot read it would, and the Open of gone.txt, eio.txt and expired.txt.
+// brokenStorage fails Get of broken.txt as an unreachable backend would, Get of unreadable.txt and archived.txt as a backend that lists but cannot read them would, and the Open of gone.txt, eio.txt and expired.txt.
+// Stat returns archived.txt, whose Open fails; it answers the rest as Get does.
 // The Length of short.txt is 1, below its stored bytes, and that of huge.txt is one over DefaultMaxPreviewSize.
 type brokenStorage struct {
 	s2.Storage
@@ -415,8 +416,8 @@ func (b brokenStorage) Get(ctx context.Context, name string) (s2.Object, error) 
 	if name == "broken.txt" {
 		return nil, errors.New("backend unreachable")
 	}
-	if name == "unreadable.txt" {
-		return nil, fmt.Errorf("unreadable.txt: %w", errors.ErrUnsupported)
+	if name == "unreadable.txt" || name == "archived.txt" {
+		return nil, fmt.Errorf("%s: %w", name, errors.ErrUnsupported)
 	}
 	obj, err := b.Storage.Get(ctx, name)
 	if err != nil {
@@ -435,6 +436,17 @@ func (b brokenStorage) Get(ctx context.Context, name string) (s2.Object, error) 
 		return hugeObject{obj}, nil
 	}
 	return obj, nil
+}
+
+func (b brokenStorage) Stat(ctx context.Context, name string) (s2.Object, error) {
+	if name != "archived.txt" {
+		return b.Get(ctx, name)
+	}
+	obj, err := b.Storage.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return brokenObject{Object: obj, err: fmt.Errorf("archived.txt: %w", errors.ErrUnsupported)}, nil
 }
 
 // shortObject reports a Length of 1 whatever it stores.
@@ -491,7 +503,7 @@ func (s *ViewTestSuite) brokenServer(names ...string) *server.Server {
 
 // TestErrorStatus checks the status follows the error, not the handler (#418).
 func (s *ViewTestSuite) TestErrorStatus() {
-	srv := s.brokenServer("gone.txt", "eio.txt", "expired.txt")
+	srv := s.brokenServer("gone.txt", "eio.txt", "expired.txt", "archived.txt")
 
 	handlers := []struct {
 		caseName string
@@ -508,7 +520,10 @@ func (s *ViewTestSuite) TestErrorStatus() {
 		object     string
 		opens      bool
 		wantStatus int
+		// wantMeta is meta's status when it differs from wantStatus.
+		wantMeta int
 	}{
+		{caseName: "readable by Stat only", bucket: "eb", object: "archived.txt", wantStatus: http.StatusForbidden, wantMeta: http.StatusOK},
 		{caseName: "backend failure", bucket: "eb", object: "broken.txt", wantStatus: http.StatusInternalServerError},
 		{caseName: "listed but not readable", bucket: "eb", object: "unreadable.txt", wantStatus: http.StatusForbidden},
 		{caseName: "invalid name", bucket: "eb", object: "a/../b.txt", wantStatus: http.StatusBadRequest},
@@ -529,7 +544,11 @@ func (s *ViewTestSuite) TestErrorStatus() {
 				req.SetPathValue("object", tc.object)
 				w := httptest.NewRecorder()
 				h.handler(srv, w, req)
-				s.Equal(tc.wantStatus, w.Code)
+				want := tc.wantStatus
+				if h.caseName == "meta" && tc.wantMeta != 0 {
+					want = tc.wantMeta
+				}
+				s.Equal(want, w.Code)
 			})
 		}
 	}

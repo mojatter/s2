@@ -57,7 +57,7 @@ func handleMeta(s *server.Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	obj, err := strg.Get(ctx, objectName)
+	obj, err := s2.Stat(ctx, strg, objectName)
 	if err != nil {
 		server.WriteConsoleGetError(w, r, err)
 		return
