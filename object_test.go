@@ -261,3 +261,28 @@ func TestPrefetchMetadata(t *testing.T) {
 		})
 	}
 }
+
+// classObject is an Object that reports a storage class.
+type classObject struct {
+	Object
+	class StorageClass
+}
+
+func (o classObject) StorageClass() StorageClass { return o.class }
+
+func TestStorageClassOf(t *testing.T) {
+	archived := StorageClass{Name: "DEEP_ARCHIVE", Restoring: true}
+	testCases := []struct {
+		caseName string
+		obj      Object
+		want     StorageClass
+	}{
+		{caseName: "StorageClasser", obj: classObject{Object: NewObjectBytes("k", nil), class: archived}, want: archived},
+		{caseName: "not a StorageClasser", obj: NewObjectBytes("k", nil), want: StorageClass{}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			assert.Equal(t, tc.want, StorageClassOf(tc.obj))
+		})
+	}
+}

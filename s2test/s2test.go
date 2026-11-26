@@ -578,6 +578,86 @@ func TestStorageOpen(ctx context.Context, strg s2.Storage) error {
 	return nil
 }
 
+// TestStorageStat validates that s2.Stat answers as Get does for an object and a marker, through Sub as well, and for the names Get refuses. It removes the fixture afterwards.
+func TestStorageStat(ctx context.Context, strg s2.Storage) error {
+	const base = "s2test-stat"
+	defer func() { _ = strg.DeleteRecursive(context.WithoutCancel(ctx), base+"/") }()
+
+	md := s2.Metadata{"k": "v"}
+	for _, obj := range []s2.Object{
+		s2.NewObjectBytes(base+"/a.txt", []byte("hello"), s2.WithMetadata(md), s2.WithContentType("text/plain")),
+		s2.NewObjectBytes(base+"/d/", nil),
+		s2.NewObjectBytes(base+"/sub/b.txt", []byte("hello")),
+	} {
+		if err := strg.Put(ctx, obj); err != nil {
+			return fmt.Errorf("Put(%q) failed: %w", obj.Name(), err)
+		}
+	}
+	sub, err := strg.Sub(ctx, base)
+	if err != nil {
+		return fmt.Errorf("Sub(%q) failed: %w", base, err)
+	}
+	// Sub hands back the backend itself, so a caller that hid Stater gets the same.
+	if _, ok := strg.(s2.Stater); !ok {
+		sub = struct{ s2.Storage }{sub}
+	}
+
+	var errs []string
+	testCases := []struct {
+		caseName string
+		strg     s2.Storage
+		name     string
+		wantErr  error
+	}{
+		{caseName: "object", strg: strg, name: base + "/a.txt"},
+		{caseName: "marker", strg: strg, name: base + "/d/"},
+		{caseName: "object in Sub", strg: sub, name: "a.txt"},
+		{caseName: "missing", strg: strg, name: base + "/none.txt", wantErr: s2.ErrNotExist},
+		{caseName: "prefix of objects", strg: strg, name: base + "/sub", wantErr: s2.ErrNotExist},
+		{caseName: "invalid", strg: strg, name: "../" + base + "/a.txt", wantErr: s2.ErrInvalidName},
+	}
+	for _, tc := range testCases {
+		got, err := s2.Stat(ctx, tc.strg, tc.name)
+		if tc.wantErr != nil {
+			if !errors.Is(err, tc.wantErr) {
+				errs = append(errs, fmt.Sprintf("%s: Stat(%q) error = %v, want %v", tc.caseName, tc.name, err, tc.wantErr))
+			}
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: Stat(%q) failed: %v", tc.caseName, tc.name, err))
+			continue
+		}
+		want, err := tc.strg.Get(ctx, tc.name)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: Get(%q) failed: %v", tc.caseName, tc.name, err))
+			continue
+		}
+		if got.Name() != want.Name() || got.Length() != want.Length() || got.ETag() != want.ETag() ||
+			got.ContentType() != want.ContentType() || !got.LastModified().Equal(want.LastModified()) ||
+			!maps.Equal(got.Metadata(), want.Metadata()) || !sameStorageClass(s2.StorageClassOf(got), s2.StorageClassOf(want)) {
+			errs = append(errs, fmt.Sprintf("%s: Stat(%q) = %s, Get = %s", tc.caseName, tc.name, describeObject(got), describeObject(want)))
+		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("TestStorageStat found %d errors:\n\t%s", len(errs), strings.Join(errs, "\n\t"))
+	}
+	return nil
+}
+
+// sameStorageClass compares a and b field by field, RestoredUntil as an instant.
+func sameStorageClass(a, b s2.StorageClass) bool {
+	return a.Name == b.Name && a.ArchiveStatus == b.ArchiveStatus && a.Restoring == b.Restoring &&
+		a.Restored == b.Restored && a.RestoredUntil.Equal(b.RestoredUntil)
+}
+
+// describeObject formats the attributes TestStorageStat compares.
+func describeObject(o s2.Object) string {
+	return fmt.Sprintf("{name %q, length %d, etag %s, type %q, modified %s, metadata %v, class %+v}",
+		o.Name(), o.Length(), o.ETag(), o.ContentType(), o.LastModified(), o.Metadata(), s2.StorageClassOf(o))
+}
+
 // TestStorageOpenSinceGet validates that Open and OpenRange of an object from Get or List fail with s2.ErrModified once its key holds another version, and with s2.ErrNotExist once it is deleted.
 func TestStorageOpenSinceGet(ctx context.Context, strg s2.Storage) error {
 	const name = "s2test-open-since-get.txt"

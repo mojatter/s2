@@ -196,6 +196,22 @@ func Open(ctx context.Context, s Storage, name string) (io.ReadCloser, error) {
 	return obj.Open()
 }
 
+// Stater is an optional interface a Storage may satisfy to return an object's attributes even when its body cannot be read.
+//
+// Stat answers as Get does, except that it returns an object Get refuses with errors.ErrUnsupported,
+// whose Open and OpenRange then fail that way; it still wraps errors.ErrUnsupported when it cannot read the attributes either.
+type Stater interface {
+	Stat(ctx context.Context, name string) (Object, error)
+}
+
+// Stat returns name's object on s, via Stater when s has it, else via Get.
+func Stat(ctx context.Context, s Storage, name string) (Object, error) {
+	if st, ok := s.(Stater); ok {
+		return st.Stat(ctx, name)
+	}
+	return s.Get(ctx, name)
+}
+
 // Uploader is an optional interface that a Storage implementation may satisfy
 // to report what it stored. Put answers nothing, so a caller that needs the
 // stored ETag otherwise has to read the object back; a backend already has the

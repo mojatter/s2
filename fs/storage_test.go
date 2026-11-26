@@ -205,6 +205,10 @@ func (s *StorageTestSuite) TestS2TestList() {
 	s.Require().NoError(s2test.TestStorageOpen(ctx, strg))
 	// Hiding Opener runs the same checks through the Get fallback.
 	s.Require().NoError(s2test.TestStorageOpen(ctx, struct{ s2.Storage }{strg}))
+
+	s.Require().NoError(s2test.TestStorageStat(ctx, strg))
+	// Hiding Stater runs the same checks through the Get fallback.
+	s.Require().NoError(s2test.TestStorageStat(ctx, struct{ s2.Storage }{strg}))
 }
 
 func (s *StorageTestSuite) TestS2TestListPaging() {
@@ -4628,6 +4632,7 @@ func TestConfinedRootConforms(t *testing.T) {
 		{caseName: "ListDefaultPage", check: s2test.TestStorageListDefaultPage},
 		{caseName: "Count", check: s2test.TestStorageCount},
 		{caseName: "Open", check: s2test.TestStorageOpen},
+		{caseName: "Stat", check: s2test.TestStorageStat},
 		{caseName: "OpenSinceGet", check: s2test.TestStorageOpenSinceGet},
 		{caseName: "UploadConditions", check: s2test.TestStorageUploadConditions},
 		{caseName: "GetPut", check: func(ctx context.Context, strg s2.Storage) error { return s2test.TestStorageGetPut(ctx, strg) }},

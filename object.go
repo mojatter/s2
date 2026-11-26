@@ -43,6 +43,36 @@ type Object interface {
 	ETag() string
 }
 
+// StorageClass is an object's storage class and archive state, as S3 reports them.
+type StorageClass struct {
+	// Name is S3's class name, such as "GLACIER"; "" for STANDARD or unknown.
+	// A backend other than s3 sets it only while the object must be restored before reading,
+	// as a mark of that state, not of S3's pricing or retention.
+	Name string
+	// ArchiveStatus is S3's Intelligent-Tiering archive tier, such as "ARCHIVE_ACCESS"; "" when none.
+	ArchiveStatus string
+	// Restoring reports a restore or rehydration in progress; it is never set with Restored.
+	Restoring bool
+	// Restored reports a restored copy that can be read.
+	Restored bool
+	// RestoredUntil is when the restored copy expires; zero when unknown.
+	RestoredUntil time.Time
+}
+
+// StorageClasser is an optional interface an Object may satisfy to report its storage class.
+// An Object from List may report the class name alone; use Stat or Get for the restore state.
+type StorageClasser interface {
+	StorageClass() StorageClass
+}
+
+// StorageClassOf returns obj's storage class, or the zero value when obj does not report one.
+func StorageClassOf(obj Object) StorageClass {
+	if c, ok := obj.(StorageClasser); ok {
+		return c.StorageClass()
+	}
+	return StorageClass{}
+}
+
 // prefetchWorkers caps the goroutines PrefetchMetadata runs.
 const prefetchWorkers = 8
 

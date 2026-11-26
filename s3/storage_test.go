@@ -638,6 +638,10 @@ func (s *StorageTestSuite) TestS2TestList() {
 	s.Require().NoError(s2test.TestStorageOpen(ctx, strg))
 	// Hiding Opener runs the same checks through the Get fallback.
 	s.Require().NoError(s2test.TestStorageOpen(ctx, struct{ s2.Storage }{strg}))
+
+	s.Require().NoError(s2test.TestStorageStat(ctx, strg))
+	// Hiding Stater runs the same checks through the Get fallback.
+	s.Require().NoError(s2test.TestStorageStat(ctx, struct{ s2.Storage }{strg}))
 }
 
 // TestListCursorMapping pins which ListObjectsV2 parameter each cursor field

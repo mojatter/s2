@@ -88,6 +88,10 @@ func (s *S3IntegrationSuite) TestOpen() {
 	s.Require().NoError(s2test.TestStorageOpen(context.Background(), s.strg))
 }
 
+func (s *S3IntegrationSuite) TestStat() {
+	s.Require().NoError(s2test.TestStorageStat(context.Background(), s.strg))
+}
+
 func (s *S3IntegrationSuite) TestOpenSinceGet() {
 	s.Require().NoError(s2test.TestStorageOpenSinceGet(context.Background(), s.strg))
 }
