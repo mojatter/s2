@@ -24,6 +24,14 @@ type object struct {
 	etag        string
 	// version is the native ETag Get or List saw; "" when unknown.
 	version string
+	class   s2.StorageClass
+}
+
+var _ s2.StorageClasser = (*object)(nil)
+
+// StorageClass implements s2.StorageClasser.
+func (o *object) StorageClass() s2.StorageClass {
+	return o.class
 }
 
 func (o *object) Name() string {

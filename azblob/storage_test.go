@@ -38,6 +38,8 @@ type mockBlob struct {
 	accessTier string
 	// pendingCopy answers a copy from or onto the blob with PendingCopyOperation, as a rehydration or a copy in flight does.
 	pendingCopy bool
+	// archiveStatus is what the properties and a listing report while the blob rehydrates.
+	archiveStatus string
 }
 
 type mockAzblobClient struct {
@@ -125,6 +127,7 @@ func (m *mockAzblobClient) getProperties(_ context.Context, container, blobName 
 		contentType:   b.contentType,
 		contentMD5:    b.contentMD5,
 		accessTier:    b.accessTier,
+		archiveStatus: b.archiveStatus,
 	}, nil
 }
 
@@ -303,6 +306,8 @@ func (m *mockAzblobClient) doList(ctr, prefix, delimiter string, maxResults int3
 			etag:          b.etag,
 			contentType:   b.contentType,
 			contentMD5:    b.contentMD5,
+			accessTier:    b.accessTier,
+			archiveStatus: b.archiveStatus,
 		})
 	}
 	return result, nil
@@ -888,13 +893,16 @@ func (s *StorageTestSuite) TestGet() {
 
 func (s *StorageTestSuite) TestArchived() {
 	testCases := []struct {
-		caseName    string
-		accessTier  string
-		pendingCopy bool
-		want        error
+		caseName      string
+		accessTier    string
+		archiveStatus string
+		pendingCopy   bool
+		want          error
+		wantClass     s2.StorageClass
 	}{
-		{caseName: "Archive", accessTier: "Archive", want: errors.ErrUnsupported},
-		{caseName: "rehydrating", accessTier: "Archive", pendingCopy: true, want: errors.ErrUnsupported},
+		{caseName: "Archive", accessTier: "Archive", want: errors.ErrUnsupported, wantClass: s2.StorageClass{Name: "DEEP_ARCHIVE"}},
+		{caseName: "rehydrating", accessTier: "Archive", archiveStatus: "rehydrate-pending-to-hot", pendingCopy: true, want: errors.ErrUnsupported, wantClass: s2.StorageClass{Name: "DEEP_ARCHIVE", Restoring: true}},
+		{caseName: "Cold", accessTier: "Cold"},
 		{caseName: "Cool", accessTier: "Cool"},
 		{caseName: "Hot", accessTier: "Hot"},
 	}
@@ -902,17 +910,32 @@ func (s *StorageTestSuite) TestArchived() {
 		s.Run(tc.caseName, func() {
 			m, strg := s.testMockStorage()
 			b, _ := m.get("mycontainer", "a.txt")
-			b.accessTier, b.pendingCopy = tc.accessTier, tc.pendingCopy
+			b.accessTier, b.archiveStatus, b.pendingCopy = tc.accessTier, tc.archiveStatus, tc.pendingCopy
 			listed := &object{client: m, container: "mycontainer", name: "a.txt", version: b.etag}
 			ctx := context.Background()
 
 			_, err := strg.Get(ctx, "a.txt")
 			s.ErrorIs(err, tc.want, "Get")
+			stat, err := s2.Stat(ctx, strg, "a.txt")
+			s.Require().NoError(err, "Stat")
+			s.Equal(tc.wantClass, s2.StorageClassOf(stat), "Stat class")
+			res, err := strg.List(ctx, s2.ListOptions{})
+			s.Require().NoError(err, "List")
+			found := false
+			for _, o := range res.Objects {
+				if o.Name() == "a.txt" {
+					found = true
+					s.Equal(tc.wantClass, s2.StorageClassOf(o), "List class")
+				}
+			}
+			s.True(found, "List a.txt")
 			for _, open := range []func() (io.ReadCloser, error){
 				listed.Open,
 				func() (io.ReadCloser, error) { return listed.OpenRange(0, 1) },
 				func() (io.ReadCloser, error) { return listed.OpenRange(0, 0) },
 				func() (io.ReadCloser, error) { return s2.Open(ctx, strg, "a.txt") },
+				stat.Open,
+				func() (io.ReadCloser, error) { return stat.OpenRange(0, 0) },
 			} {
 				rc, err := open()
 				if err == nil {
