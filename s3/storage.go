@@ -253,6 +253,7 @@ func (s *storage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult,
 				length:       s2.MustUint64(aws.ToInt64(c.Size)),
 				lastModified: aws.ToTime(c.LastModified),
 				etag:         aws.ToString(c.ETag),
+				class:        s2.StorageClass{Name: className(string(c.StorageClass))},
 			})
 		}
 		out.NextAfter = ""
@@ -291,6 +292,25 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 	if err != nil {
 		return nil, err
 	}
+	return s.objectFromHead(name, params), nil
+}
+
+var _ s2.Stater = (*storage)(nil)
+
+// Stat implements s2.Stater with the HEAD Get sends, returning an archived object whose reads fail.
+func (s *storage) Stat(ctx context.Context, name string) (s2.Object, error) {
+	if err := s2.ValidateName(name); err != nil {
+		return nil, err
+	}
+	params, err := rawHeadObject(ctx, s.client, s.bucket, s.key(name), name)
+	if err != nil {
+		return nil, err
+	}
+	return s.objectFromHead(name, params), nil
+}
+
+// objectFromHead builds name's object from its HEAD.
+func (s *storage) objectFromHead(name string, params *s3.HeadObjectOutput) *object {
 	md, contentType := liftLegacy(params.Metadata)
 	if md == nil {
 		md = make(s2.Metadata)
@@ -308,7 +328,8 @@ func (s *storage) Get(ctx context.Context, name string) (s2.Object, error) {
 		metadata:     md,
 		contentType:  contentType,
 		etag:         aws.ToString(params.ETag),
-	}, nil
+		class:        storageClassOf(params),
+	}
 }
 
 var _ s2.Opener = (*storage)(nil)
@@ -400,11 +421,20 @@ func isNotFoundErr(err error) bool {
 
 // headObject reads key's HEAD, failing with s2.ErrNotExist for a missing key and errors.ErrUnsupported for an archived one.
 func headObject(ctx context.Context, client clientAPI, bucket, key, name string) (*s3.HeadObjectOutput, error) {
+	res, err := rawHeadObject(ctx, client, bucket, key, name)
+	if err != nil {
+		return nil, err
+	}
+	if isArchived(res) {
+		return nil, errArchived(name)
+	}
+	return res, nil
+}
+
+// rawHeadObject reads key's HEAD as headObject does, but returns an archived one's.
+func rawHeadObject(ctx context.Context, client clientAPI, bucket, key, name string) (*s3.HeadObjectOutput, error) {
 	res, err := client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
 	if err == nil {
-		if isArchived(res) {
-			return nil, errArchived(name)
-		}
 		return res, nil
 	}
 	if isNotFoundErr(err) {
@@ -431,6 +461,35 @@ func isArchived(h *s3.HeadObjectOutput) bool {
 		return !strings.Contains(aws.ToString(h.Restore), `ongoing-request="false"`)
 	}
 	return false
+}
+
+// storageClassOf reads a HEAD's storage class and restore state.
+func storageClassOf(h *s3.HeadObjectOutput) s2.StorageClass {
+	c := s2.StorageClass{Name: className(string(h.StorageClass)), ArchiveStatus: string(h.ArchiveStatus)}
+	restore := aws.ToString(h.Restore)
+	switch {
+	case strings.Contains(restore, `ongoing-request="true"`):
+		c.Restoring = true
+	case strings.Contains(restore, `ongoing-request="false"`):
+		c.Restored = true
+		if _, v, ok := strings.Cut(restore, `expiry-date="`); ok {
+			if v, _, ok := strings.Cut(v, `"`); ok {
+				// A date that does not parse leaves the copy restored with no known expiry.
+				if t, err := http.ParseTime(v); err == nil {
+					c.RestoredUntil = t.UTC()
+				}
+			}
+		}
+	}
+	return c
+}
+
+// className maps S3's STANDARD, which a HEAD omits, to "".
+func className(name string) string {
+	if name == string(s3types.StorageClassStandard) {
+		return ""
+	}
+	return name
 }
 
 // isInvalidObjectState reports S3's refusal to read an archived object.

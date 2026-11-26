@@ -233,12 +233,21 @@ func (m *mockS3Client) ListObjectsV2(ctx context.Context, params *s3.ListObjects
 				Size:         aws.Int64(int64(len(obj.body))),
 				LastModified: aws.Time(obj.lastModified),
 				ETag:         aws.String(obj.etag),
+				StorageClass: listedClass(obj),
 			})
 		}
 		n++
 		last = entry
 	}
 	return out, nil
+}
+
+// listedClass is the class ListObjectsV2 reports for obj: its HEAD's, or STANDARD, which a listing names.
+func listedClass(obj *mockObject) s3types.ObjectStorageClass {
+	if obj.headers != nil && obj.headers.StorageClass != "" {
+		return s3types.ObjectStorageClass(obj.headers.StorageClass)
+	}
+	return s3types.ObjectStorageClassStandard
 }
 
 func (m *mockS3Client) HeadObject(ctx context.Context, params *s3.HeadObjectInput, optFns ...func(*s3.Options)) (*s3.HeadObjectOutput, error) {
@@ -1436,19 +1445,26 @@ func (s *StorageTestSuite) TestArchived() {
 		Response: &smithyhttp.Response{Response: &http.Response{StatusCode: http.StatusForbidden}},
 		Err:      &smithy.GenericAPIError{Code: "Forbidden"},
 	}}
+	restoredUntil := time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC)
 	testCases := []struct {
 		caseName   string
 		headers    *s3.HeadObjectOutput
 		unreadable bool
 		headErr    error
 		want       error
+		// wantClass is what Stat reports; a listing reports only its Name.
+		wantClass s2.StorageClass
 	}{
-		{caseName: "GLACIER", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassGlacier}, unreadable: true, want: errors.ErrUnsupported},
-		{caseName: "DEEP_ARCHIVE", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassDeepArchive}, unreadable: true, want: errors.ErrUnsupported},
-		{caseName: "Intelligent-Tiering archive", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassIntelligentTiering, ArchiveStatus: s3types.ArchiveStatusArchiveAccess}, unreadable: true, want: errors.ErrUnsupported},
-		{caseName: "restore ongoing", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassGlacier, Restore: aws.String(`ongoing-request="true"`)}, unreadable: true, want: errors.ErrUnsupported},
-		{caseName: "restored", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassGlacier, Restore: aws.String(`ongoing-request="false", expiry-date="Thu, 26 Nov 2026 00:00:00 GMT"`)}},
-		{caseName: "GLACIER_IR", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassGlacierIr}},
+		{caseName: "STANDARD"},
+		{caseName: "STANDARD_IA", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassStandardIa}, wantClass: s2.StorageClass{Name: "STANDARD_IA"}},
+		{caseName: "GLACIER", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassGlacier}, unreadable: true, want: errors.ErrUnsupported, wantClass: s2.StorageClass{Name: "GLACIER"}},
+		{caseName: "DEEP_ARCHIVE", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassDeepArchive}, unreadable: true, want: errors.ErrUnsupported, wantClass: s2.StorageClass{Name: "DEEP_ARCHIVE"}},
+		{caseName: "Intelligent-Tiering archive", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassIntelligentTiering, ArchiveStatus: s3types.ArchiveStatusArchiveAccess}, unreadable: true, want: errors.ErrUnsupported, wantClass: s2.StorageClass{Name: "INTELLIGENT_TIERING", ArchiveStatus: "ARCHIVE_ACCESS"}},
+		{caseName: "restore ongoing", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassGlacier, Restore: aws.String(`ongoing-request="true"`)}, unreadable: true, want: errors.ErrUnsupported, wantClass: s2.StorageClass{Name: "GLACIER", Restoring: true}},
+		{caseName: "restored", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassGlacier, Restore: aws.String(`ongoing-request="false", expiry-date="Thu, 26 Nov 2026 00:00:00 GMT"`)}, wantClass: s2.StorageClass{Name: "GLACIER", Restored: true, RestoredUntil: restoredUntil}},
+		{caseName: "restored with no expiry", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassGlacier, Restore: aws.String(`ongoing-request="false"`)}, wantClass: s2.StorageClass{Name: "GLACIER", Restored: true}},
+		{caseName: "restored with a malformed expiry", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassGlacier, Restore: aws.String(`ongoing-request="false", expiry-date="soon"`)}, wantClass: s2.StorageClass{Name: "GLACIER", Restored: true}},
+		{caseName: "GLACIER_IR", headers: &s3.HeadObjectOutput{StorageClass: s3types.StorageClassGlacierIr}, wantClass: s2.StorageClass{Name: "GLACIER_IR"}},
 		{caseName: "s2-server HEAD 403", unreadable: true, headErr: forbidden, want: errors.ErrUnsupported},
 		{caseName: "AccessDenied HEAD 403", headErr: forbidden, want: forbidden},
 	}
@@ -1465,6 +1481,21 @@ func (s *StorageTestSuite) TestArchived() {
 			s.ErrorIs(err, tc.want, "Get")
 			_, err = listed.OpenRange(0, 0)
 			s.ErrorIs(err, tc.want, "OpenRange(0, 0)")
+			stat, err := s2.Stat(ctx, strg, "a.txt")
+			if tc.headErr != nil {
+				// A HEAD that failed leaves Stat nothing to return.
+				s.ErrorIs(err, tc.want, "Stat")
+			} else {
+				s.Require().NoError(err, "Stat")
+				s.Equal(tc.wantClass, s2.StorageClassOf(stat), "Stat class")
+				_, err = stat.OpenRange(0, 0)
+				s.ErrorIs(err, tc.want, "Stat OpenRange(0, 0)")
+				rc, err := stat.Open()
+				if err == nil {
+					rc.Close()
+				}
+				s.ErrorIs(err, tc.want, "Stat Open")
+			}
 			ok, err := strg.Exists(ctx, "a.txt")
 			if tc.want == forbidden {
 				s.ErrorIs(err, forbidden, "Exists")
@@ -1490,6 +1521,16 @@ func (s *StorageTestSuite) TestArchived() {
 				s.ErrorIs(err, want, "open")
 			}
 			s.ErrorIs(strg.Copy(ctx, "a.txt", "dst.txt"), want, "Copy")
+			res, err := strg.List(ctx, s2.ListOptions{})
+			s.Require().NoError(err, "List")
+			found := false
+			for _, o := range res.Objects {
+				if o.Name() == "a.txt" {
+					found = true
+					s.Equal(s2.StorageClass{Name: tc.wantClass.Name}, s2.StorageClassOf(o), "List class")
+				}
+			}
+			s.True(found, "List a.txt")
 		})
 	}
 }
