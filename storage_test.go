@@ -512,3 +512,53 @@ func TestOpen(t *testing.T) {
 		})
 	}
 }
+
+// statStorage is a moveStorage that also returns objects Get refuses.
+type statStorage struct {
+	moveStorage
+}
+
+func (s *statStorage) Stat(_ context.Context, name string) (Object, error) {
+	s.calls = append(s.calls, "Stat "+name)
+	return NewObjectBytes(name, []byte("by stat")), nil
+}
+
+func TestStat(t *testing.T) {
+	testCases := []struct {
+		caseName   string
+		stater     bool
+		name       string
+		wantLength uint64
+		wantErr    error
+		wantCalls  []string
+	}{
+		{caseName: "Stater stats by name", stater: true, name: "k", wantLength: uint64(len("by stat")), wantCalls: []string{"Stat k"}},
+		{caseName: "falls back to Get", name: "k", wantLength: uint64(len("via get")), wantCalls: []string{"Get k"}},
+		{caseName: "fallback passes on Get's error", name: "x", wantErr: ErrNotExist, wantCalls: []string{"Get x"}},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			var (
+				s     Storage
+				calls func() []string
+			)
+			if tc.stater {
+				st := &statStorage{}
+				s, calls = st, func() []string { return st.calls }
+			} else {
+				m := &moveStorage{}
+				s, calls = m, func() []string { return m.calls }
+			}
+			obj, err := Stat(context.Background(), s, tc.name)
+			assert.Equal(t, tc.wantCalls, calls())
+			if tc.wantErr != nil {
+				assert.ErrorIs(t, err, tc.wantErr)
+				assert.Nil(t, obj)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.name, obj.Name())
+			assert.Equal(t, tc.wantLength, obj.Length())
+		})
+	}
+}

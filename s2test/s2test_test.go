@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mojatter/s2"
 	_ "github.com/mojatter/s2/fs" // registers memfs
@@ -612,6 +613,57 @@ func TestStorageSubConsistencyRejects(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("want an error containing %q, got: %v", want, err)
 				}
+			}
+		})
+	}
+}
+
+// classView reports getClass on objects from Get and statClass on those from Stat.
+type classView struct {
+	s2.Storage
+	getClass, statClass s2.StorageClass
+}
+
+type classedObject struct {
+	s2.Object
+	class s2.StorageClass
+}
+
+func (o classedObject) StorageClass() s2.StorageClass { return o.class }
+
+func (v *classView) Get(ctx context.Context, name string) (s2.Object, error) {
+	obj, err := v.Storage.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return classedObject{Object: obj, class: v.getClass}, nil
+}
+
+func (v *classView) Stat(ctx context.Context, name string) (s2.Object, error) {
+	obj, err := v.Storage.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return classedObject{Object: obj, class: v.statClass}, nil
+}
+
+func TestStorageStatComparesClass(t *testing.T) {
+	until := time.Date(2026, 11, 26, 0, 0, 0, 0, time.UTC)
+	restored := s2.StorageClass{Name: "GLACIER", Restored: true, RestoredUntil: until}
+	testCases := []struct {
+		caseName  string
+		statClass s2.StorageClass
+		wantErr   bool
+	}{
+		{caseName: "same instant in another zone", statClass: s2.StorageClass{Name: "GLACIER", Restored: true, RestoredUntil: until.In(time.FixedZone("JST", 9*60*60))}},
+		{caseName: "another instant", statClass: s2.StorageClass{Name: "GLACIER", Restored: true, RestoredUntil: until.Add(time.Second)}, wantErr: true},
+		{caseName: "another name", statClass: s2.StorageClass{Name: "DEEP_ARCHIVE", Restored: true, RestoredUntil: until}, wantErr: true},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			err := TestStorageStat(t.Context(), &classView{Storage: newMemFS(t), getClass: restored, statClass: tc.statClass})
+			if (err != nil) != tc.wantErr {
+				t.Errorf("TestStorageStat error = %v, want error %v", err, tc.wantErr)
 			}
 		})
 	}

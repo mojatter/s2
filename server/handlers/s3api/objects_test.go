@@ -3568,6 +3568,201 @@ func (s *ObjectsTestSuite) TestGetUnreadableObject() {
 	}
 }
 
+const typeClassed = s2.Type("classed-test")
+
+// classedObjects is the storage class classedStorage reports for each name; the unreadable ones Get refuses, and the expired ones Get finds with a body that cannot be read.
+var classedObjects = map[string]struct {
+	class      s2.StorageClass
+	unreadable bool
+	expired    bool
+}{
+	"expired":          {class: s2.StorageClass{Name: "GLACIER", Restored: true}, expired: true},
+	"archived":         {class: s2.StorageClass{Name: "DEEP_ARCHIVE"}, unreadable: true},
+	"restoring":        {class: s2.StorageClass{Name: "GLACIER", Restoring: true}, unreadable: true},
+	"tiered":           {class: s2.StorageClass{Name: "INTELLIGENT_TIERING", ArchiveStatus: "ARCHIVE_ACCESS"}, unreadable: true},
+	"restored":         {class: s2.StorageClass{Name: "GLACIER", Restored: true, RestoredUntil: time.Date(2026, 11, 27, 0, 0, 0, 0, time.FixedZone("JST", 9*60*60))}},
+	"restored-noexp":   {class: s2.StorageClass{Name: "GLACIER", Restored: true}},
+	"both":             {class: s2.StorageClass{Name: "GLACIER", Restoring: true, Restored: true}},
+	"ia":               {class: s2.StorageClass{Name: "STANDARD_IA"}},
+	"standard":         {class: s2.StorageClass{Name: "STANDARD"}},
+	"plain":            {},
+	"unclassed":        {unreadable: true},
+	"unreadable-ia":    {class: s2.StorageClass{Name: "STANDARD_IA"}, unreadable: true},
+	"expired-ia":       {class: s2.StorageClass{Name: "STANDARD_IA"}, expired: true},
+	"expired-standard": {class: s2.StorageClass{Name: "STANDARD"}, expired: true},
+}
+
+// classedStorage reports classedObjects' storage classes, refuses their unreadable ones in Get but not in Stat, and refuses "lost" in both.
+type classedStorage struct {
+	s2.Storage
+}
+
+// classedObject is an object reporting a storage class.
+type classedObject struct {
+	s2.Object
+	class s2.StorageClass
+}
+
+func (o classedObject) StorageClass() s2.StorageClass { return o.class }
+
+func (c classedStorage) Sub(ctx context.Context, prefix string) (s2.Storage, error) {
+	sub, err := c.Storage.Sub(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return classedStorage{sub}, nil
+}
+
+func (c classedStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListResult, error) {
+	res, err := c.Storage.List(ctx, opts)
+	for i, obj := range res.Objects {
+		res.Objects[i] = classedObject{obj, classedObjects[path.Base(obj.Name())].class}
+	}
+	return res, err
+}
+
+func (c classedStorage) Get(ctx context.Context, name string) (s2.Object, error) {
+	if path.Base(name) == "lost" || classedObjects[path.Base(name)].unreadable {
+		return nil, fmt.Errorf("classed-test: %s: %w", name, errors.ErrUnsupported)
+	}
+	obj, err := c.Storage.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	o := classedObjects[path.Base(name)]
+	if o.expired {
+		obj = unreadableBody{obj}
+	}
+	return classedObject{obj, o.class}, nil
+}
+
+func (c classedStorage) Stat(ctx context.Context, name string) (s2.Object, error) {
+	if path.Base(name) == "lost" {
+		return nil, fmt.Errorf("classed-test: %s: %w", name, errors.ErrUnsupported)
+	}
+	obj, err := c.Storage.Get(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	o := classedObjects[path.Base(name)]
+	if o.unreadable || o.expired {
+		obj = unreadableBody{obj}
+	}
+	return classedObject{obj, o.class}, nil
+}
+
+// TestStorageClass checks HeadObject describes an object Get cannot read, GetObject and HeadObject carry its storage class and restore state as S3 does, a GetObject refusing it names its class, and a listing names every class (#578).
+func (s *ObjectsTestSuite) TestStorageClass() {
+	root := s.T().TempDir()
+	base, err := s2.NewStorage(context.Background(), s2.Config{Type: s2.TypeOSFS, Root: root})
+	s.Require().NoError(err)
+	s2.RegisterNewStorageFunc(typeClassed, func(context.Context, s2.Config) (s2.Storage, error) {
+		return classedStorage{base}, nil
+	})
+	s.T().Cleanup(func() { s2.UnregisterNewStorageFunc(typeClassed) })
+
+	cfg := server.DefaultConfig()
+	cfg.Root = root
+	cfg.Type = typeClassed
+	srv, err := server.NewServer(context.Background(), cfg)
+	s.Require().NoError(err)
+	s.Require().NoError(srv.Buckets.Create(context.Background(), "cb"))
+	names := []string{"lost"}
+	for name := range classedObjects {
+		names = append(names, name)
+	}
+	for _, name := range names {
+		s.Require().NoError(base.Put(context.Background(), s2.NewObjectBytes("cb/"+name, []byte("hello"))))
+	}
+	ts := httptest.NewServer(srv.S3Handler())
+	defer ts.Close()
+
+	const restoredUntil = `ongoing-request="false", expiry-date="Thu, 26 Nov 2026 15:00:00 GMT"`
+	testCases := []struct {
+		caseName   string
+		method     string
+		path       string
+		copySource string
+		header     map[string]string
+		wantStatus int
+		// wantHeaders holds the class headers expected; one missing here must be absent.
+		wantHeaders map[string]string
+		wantBody    string // in the body, unless HEAD
+		notInBody   string
+	}{
+		{caseName: "HeadObject archived", method: http.MethodHead, path: "/cb/archived", wantStatus: http.StatusOK, wantHeaders: map[string]string{"x-amz-storage-class": "DEEP_ARCHIVE"}},
+		{caseName: "HeadObject restoring", method: http.MethodHead, path: "/cb/restoring", wantStatus: http.StatusOK, wantHeaders: map[string]string{"x-amz-storage-class": "GLACIER", "x-amz-restore": `ongoing-request="true"`}},
+		{caseName: "HeadObject Intelligent-Tiering archive", method: http.MethodHead, path: "/cb/tiered", wantStatus: http.StatusOK, wantHeaders: map[string]string{"x-amz-storage-class": "INTELLIGENT_TIERING", "x-amz-archive-status": "ARCHIVE_ACCESS"}},
+		{caseName: "HeadObject restored", method: http.MethodHead, path: "/cb/restored", wantStatus: http.StatusOK, wantHeaders: map[string]string{"x-amz-storage-class": "GLACIER", "x-amz-restore": restoredUntil}},
+		{caseName: "HeadObject restored with no expiry", method: http.MethodHead, path: "/cb/restored-noexp", wantStatus: http.StatusOK, wantHeaders: map[string]string{"x-amz-storage-class": "GLACIER", "x-amz-restore": `ongoing-request="false"`}},
+		{caseName: "HeadObject restoring and restored", method: http.MethodHead, path: "/cb/both", wantStatus: http.StatusOK, wantHeaders: map[string]string{"x-amz-storage-class": "GLACIER", "x-amz-restore": `ongoing-request="true"`}},
+		{caseName: "HeadObject STANDARD", method: http.MethodHead, path: "/cb/standard", wantStatus: http.StatusOK},
+		{caseName: "HeadObject with no class", method: http.MethodHead, path: "/cb/plain", wantStatus: http.StatusOK},
+		{caseName: "HeadObject Stat cannot read", method: http.MethodHead, path: "/cb/lost", wantStatus: http.StatusForbidden},
+		{caseName: "HeadObject unreadable with no class", method: http.MethodHead, path: "/cb/unclassed", wantStatus: http.StatusForbidden},
+		{caseName: "HeadObject unreadable with a readable class", method: http.MethodHead, path: "/cb/unreadable-ia", wantStatus: http.StatusForbidden},
+		{caseName: "GetObject archived", method: http.MethodGet, path: "/cb/archived", wantStatus: http.StatusForbidden, wantBody: "<StorageClass>DEEP_ARCHIVE</StorageClass>"},
+		{caseName: "ranged GetObject restoring", method: http.MethodGet, path: "/cb/restoring", header: map[string]string{"Range": "bytes=0-1"}, wantStatus: http.StatusForbidden, wantBody: "<StorageClass>GLACIER</StorageClass>"},
+		{caseName: "GetObject of a body that cannot be read", method: http.MethodGet, path: "/cb/expired", wantStatus: http.StatusForbidden, wantBody: "<StorageClass>GLACIER</StorageClass>"},
+		{caseName: "ranged GetObject of a body that cannot be read", method: http.MethodGet, path: "/cb/expired", header: map[string]string{"Range": "bytes=0-1"}, wantStatus: http.StatusForbidden, wantBody: "<StorageClass>GLACIER</StorageClass>"},
+		{caseName: "GetObject Stat cannot read", method: http.MethodGet, path: "/cb/lost", wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>", notInBody: "<StorageClass>"},
+		{caseName: "GetObject unreadable with no class", method: http.MethodGet, path: "/cb/unclassed", wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>", notInBody: "<StorageClass>"},
+		{caseName: "GetObject unreadable with a readable class", method: http.MethodGet, path: "/cb/unreadable-ia", wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>", notInBody: "<StorageClass>"},
+		{caseName: "GetObject of a body that cannot be read, STANDARD_IA", method: http.MethodGet, path: "/cb/expired-ia", wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>", notInBody: "<StorageClass>"},
+		{caseName: "ranged GetObject of a body that cannot be read, STANDARD_IA", method: http.MethodGet, path: "/cb/expired-ia", header: map[string]string{"Range": "bytes=0-1"}, wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>", notInBody: "<StorageClass>"},
+		{caseName: "GetObject of a body that cannot be read, STANDARD", method: http.MethodGet, path: "/cb/expired-standard", wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>", notInBody: "<StorageClass>"},
+		{caseName: "ranged GetObject of a body that cannot be read, STANDARD", method: http.MethodGet, path: "/cb/expired-standard", header: map[string]string{"Range": "bytes=0-1"}, wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>", notInBody: "<StorageClass>"},
+		{caseName: "GetObject restored", method: http.MethodGet, path: "/cb/restored", wantStatus: http.StatusOK, wantHeaders: map[string]string{"x-amz-storage-class": "GLACIER", "x-amz-restore": restoredUntil}, wantBody: "hello"},
+		{caseName: "ranged GetObject restored", method: http.MethodGet, path: "/cb/restored", header: map[string]string{"Range": "bytes=0-1"}, wantStatus: http.StatusPartialContent, wantHeaders: map[string]string{"x-amz-storage-class": "GLACIER", "x-amz-restore": restoredUntil}, wantBody: "he"},
+		{caseName: "GetObject STANDARD_IA", method: http.MethodGet, path: "/cb/ia", wantStatus: http.StatusOK, wantHeaders: map[string]string{"x-amz-storage-class": "STANDARD_IA"}, wantBody: "hello"},
+		{caseName: "GetObject STANDARD", method: http.MethodGet, path: "/cb/standard", wantStatus: http.StatusOK, wantBody: "hello"},
+		{caseName: "CopyObject source archived", method: http.MethodPut, path: "/cb/copy", copySource: "/cb/archived", wantStatus: http.StatusForbidden, wantBody: "<Code>InvalidObjectState</Code>", notInBody: "<StorageClass>"},
+	}
+	for _, tc := range testCases {
+		s.Run(tc.caseName, func() {
+			req, err := http.NewRequest(tc.method, ts.URL+tc.path, nil)
+			s.Require().NoError(err)
+			if tc.copySource != "" {
+				req.Header.Set(copySourceHeader, tc.copySource)
+			}
+			for k, v := range tc.header {
+				req.Header.Set(k, v)
+			}
+			resp, err := ts.Client().Do(req)
+			s.Require().NoError(err)
+			body, err := io.ReadAll(resp.Body)
+			s.Require().NoError(err)
+			s.Require().NoError(resp.Body.Close())
+
+			s.Equal(tc.wantStatus, resp.StatusCode)
+			for _, h := range []string{"x-amz-storage-class", "x-amz-restore", "x-amz-archive-status"} {
+				s.Equal(tc.wantHeaders[h], resp.Header.Get(h), h)
+			}
+			if tc.method != http.MethodHead {
+				s.Contains(string(body), tc.wantBody)
+				if tc.notInBody != "" {
+					s.NotContains(string(body), tc.notInBody)
+				}
+			}
+		})
+	}
+
+	resp, err := ts.Client().Get(ts.URL + "/cb?list-type=2")
+	s.Require().NoError(err)
+	var listed ListBucketResult
+	s.Require().NoError(xml.NewDecoder(resp.Body).Decode(&listed))
+	s.Require().NoError(resp.Body.Close())
+	got := map[string]string{}
+	for _, c := range listed.Contents {
+		got[c.Key] = c.StorageClass
+	}
+	s.Equal(map[string]string{
+		"archived": "DEEP_ARCHIVE", "restoring": "GLACIER", "tiered": "INTELLIGENT_TIERING", "restored": "GLACIER", "restored-noexp": "GLACIER",
+		"both": "GLACIER", "ia": "STANDARD_IA", "standard": "STANDARD", "plain": "STANDARD", "lost": "STANDARD", "expired": "GLACIER",
+		"unclassed": "STANDARD", "unreadable-ia": "STANDARD_IA", "expired-ia": "STANDARD_IA", "expired-standard": "STANDARD",
+	}, got)
+}
+
 func (s *ObjectsTestSuite) TestConditionalRequests() {
 	s.putObject("cond", "src.txt", "data")
 	head := httptest.NewRecorder()

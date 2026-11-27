@@ -68,6 +68,10 @@ func (s *GCSIntegrationSuite) TestOpen() {
 	s.Require().NoError(s2test.TestStorageOpen(context.Background(), s.strg))
 }
 
+func (s *GCSIntegrationSuite) TestStat() {
+	s.Require().NoError(s2test.TestStorageStat(context.Background(), s.strg))
+}
+
 func (s *GCSIntegrationSuite) TestOpenSinceGet() {
 	s.Require().NoError(s2test.TestStorageOpenSinceGet(context.Background(), s.strg))
 }

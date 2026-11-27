@@ -22,6 +22,8 @@ type S3ErrorResponse struct {
 	Message   string   `xml:"Message"`
 	Resource  string   `xml:"Resource"`
 	RequestID string   `xml:"RequestId"`
+	// StorageClass names the class of an object GetObject cannot read, as S3 does.
+	StorageClass string `xml:"StorageClass,omitempty"`
 }
 
 // WriteS3Error writes code/message as an S3ErrorResponse with the given

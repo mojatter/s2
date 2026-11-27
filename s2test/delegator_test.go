@@ -74,3 +74,62 @@ func TestStorageDelegatorOpen(t *testing.T) {
 		})
 	}
 }
+
+func TestStorageDelegatorStat(t *testing.T) {
+	errGet := errors.New("get failed")
+	testCases := []struct {
+		caseName string
+		d        *StorageDelegator
+		want     string
+		wantErr  error
+	}{
+		{
+			caseName: "StatFunc stats without Get",
+			d: &StorageDelegator{
+				StatFunc: func(context.Context, string) (s2.Object, error) {
+					return s2.NewObjectBytes("by stat", nil), nil
+				},
+				GetFunc: func(context.Context, string) (s2.Object, error) {
+					t.Error("GetFunc called with StatFunc set")
+					return nil, nil
+				},
+			},
+			want: "by stat",
+		},
+		{
+			caseName: "without StatFunc returns what Get returns",
+			d: &StorageDelegator{
+				GetFunc: func(context.Context, string) (s2.Object, error) {
+					return s2.NewObjectBytes("via get", nil), nil
+				},
+			},
+			want: "via get",
+		},
+		{
+			caseName: "without StatFunc passes on Get's error",
+			d: &StorageDelegator{
+				GetFunc: func(context.Context, string) (s2.Object, error) {
+					return nil, errGet
+				},
+			},
+			wantErr: errGet,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.caseName, func(t *testing.T) {
+			obj, err := tc.d.Stat(context.Background(), "k")
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) || obj != nil {
+					t.Fatalf("Stat = (%v, %v), want (nil, %v)", obj, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Stat failed: %v", err)
+			}
+			if obj.Name() != tc.want {
+				t.Errorf("Stat returned %q, want %q", obj.Name(), tc.want)
+			}
+		})
+	}
+}

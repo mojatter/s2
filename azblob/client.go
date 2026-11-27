@@ -28,6 +28,8 @@ type blobProps struct {
 	etag          string
 	// accessTier is the blob's tier, "Archive" while it is archived or still rehydrating.
 	accessTier string
+	// archiveStatus is "rehydrate-pending-to-hot" or the like while it rehydrates.
+	archiveStatus string
 }
 
 type listBlobsResult struct {
@@ -44,6 +46,8 @@ type blobItem struct {
 	contentType   string
 	contentMD5    []byte
 	etag          string
+	accessTier    string
+	archiveStatus string
 }
 
 // azblobClient abstracts the Azure Blob SDK so that tests can swap in a mock.
@@ -94,6 +98,7 @@ func (c *sdkClient) getProperties(ctx context.Context, ctr, blobName string) (bl
 		contentMD5:    resp.ContentMD5,
 		etag:          derefETag(resp.ETag),
 		accessTier:    derefString(resp.AccessTier),
+		archiveStatus: derefString(resp.ArchiveStatus),
 	}, nil
 }
 
@@ -272,6 +277,8 @@ func toBlobItem(item *container.BlobItem) blobItem {
 		contentType:   derefString(item.Properties.ContentType),
 		contentMD5:    item.Properties.ContentMD5,
 		etag:          derefETag(item.Properties.ETag),
+		accessTier:    derefEnum(item.Properties.AccessTier),
+		archiveStatus: derefEnum(item.Properties.ArchiveStatus),
 	}
 }
 
@@ -311,6 +318,14 @@ func (c *sdkClient) signedURL(ctr, blobName string, method string, expiry time.T
 // --- helpers ---
 
 func derefETag(p *azcore.ETag) string {
+	if p == nil {
+		return ""
+	}
+	return string(*p)
+}
+
+// derefEnum is derefString for the SDK's string enums, which a listing reports.
+func derefEnum[T ~string](p *T) string {
 	if p == nil {
 		return ""
 	}

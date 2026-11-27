@@ -197,6 +197,7 @@ func (s *azblobStorage) List(ctx context.Context, opts s2.ListOptions) (s2.ListR
 				contentType: item.contentType,
 				etag:        blobETag(item.contentMD5, item.etag),
 				version:     item.etag,
+				class:       storageClassOf(item.accessTier, item.archiveStatus),
 			})
 		}
 
@@ -228,6 +229,25 @@ func (s *azblobStorage) Get(ctx context.Context, name string) (s2.Object, error)
 	if props.archived() {
 		return nil, errArchived(name)
 	}
+	return s.objectFromProps(name, props), nil
+}
+
+var _ s2.Stater = (*azblobStorage)(nil)
+
+// Stat implements s2.Stater with the properties Get reads, returning an archived blob whose reads fail.
+func (s *azblobStorage) Stat(ctx context.Context, name string) (s2.Object, error) {
+	if err := s2.ValidateName(name); err != nil {
+		return nil, err
+	}
+	props, err := s.client.getProperties(ctx, s.container, s.key(name))
+	if err != nil {
+		return nil, mapNotExist(err, name)
+	}
+	return s.objectFromProps(name, props), nil
+}
+
+// objectFromProps builds name's object from its properties.
+func (s *azblobStorage) objectFromProps(name string, props blobProps) *object {
 	md := s2.Metadata(fromPtrMetadata(props.metadata))
 	if md == nil {
 		md = make(s2.Metadata)
@@ -243,7 +263,8 @@ func (s *azblobStorage) Get(ctx context.Context, name string) (s2.Object, error)
 		contentType: props.contentType,
 		etag:        blobETag(props.contentMD5, props.etag),
 		version:     props.etag,
-	}, nil
+		class:       storageClassOf(props.accessTier, props.archiveStatus),
+	}
 }
 
 var _ s2.Opener = (*azblobStorage)(nil)
@@ -445,6 +466,20 @@ func (s *azblobStorage) listPrefix(prefix string, recursive bool) string {
 func (p blobProps) archived() bool {
 	return p.accessTier == string(blob.AccessTierArchive)
 }
+
+// storageClassOf names the Archive tier DEEP_ARCHIVE, as a mark that the blob must be rehydrated before reading, and no other tier.
+func storageClassOf(accessTier, archiveStatus string) s2.StorageClass {
+	if accessTier != string(blob.AccessTierArchive) {
+		return s2.StorageClass{}
+	}
+	return s2.StorageClass{
+		Name:      s3DeepArchive,
+		Restoring: strings.HasPrefix(archiveStatus, "rehydrate-pending-"),
+	}
+}
+
+// s3DeepArchive is S3's class name an archived blob reports.
+const s3DeepArchive = "DEEP_ARCHIVE"
 
 // errArchived is the error for name when it is archived and not rehydrated.
 func errArchived(name string) error {

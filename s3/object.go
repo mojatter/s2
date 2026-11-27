@@ -24,6 +24,14 @@ type object struct {
 	metadata     s2.Metadata
 	contentType  string
 	etag         string
+	class        s2.StorageClass
+}
+
+var _ s2.StorageClasser = (*object)(nil)
+
+// StorageClass implements s2.StorageClasser; a listed object carries no restore state.
+func (o *object) StorageClass() s2.StorageClass {
+	return o.class
 }
 
 func (o *object) Name() string {

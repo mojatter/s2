@@ -96,6 +96,23 @@ func writeGetError(w http.ResponseWriter, r *http.Request, err error) {
 	writeError(w, r, code, msg, status)
 }
 
+// writeGetObjectError is writeGetError for GetObject, naming obj's archived class in the body when it cannot be read, as S3 does; obj may be nil.
+func writeGetObjectError(w http.ResponseWriter, r *http.Request, err error, obj s2.Object) {
+	code, msg, status := getErrorToS3Error(err)
+	logS3Error(r, code, status, err)
+	var class string
+	if errors.Is(err, errors.ErrUnsupported) && archivedClass(obj) {
+		class = s2.StorageClassOf(obj).Name
+	}
+	server.WriteXML(w, status, server.S3ErrorResponse{
+		Code:         code,
+		Message:      msg,
+		Resource:     r.URL.Path,
+		RequestID:    server.RequestIDFromContext(r.Context()),
+		StorageClass: class,
+	})
+}
+
 // writeUploadError is writeS2Error for a failure from s2.Upload.
 func writeUploadError(w http.ResponseWriter, r *http.Request, err error) {
 	code, msg, status := uploadErrorToS3Error(err, uploadConditions(r).Conditional())

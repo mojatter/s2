@@ -73,6 +73,10 @@ func (s *AzblobIntegrationSuite) TestOpen() {
 	s.Require().NoError(s2test.TestStorageOpen(context.Background(), s.strg))
 }
 
+func (s *AzblobIntegrationSuite) TestStat() {
+	s.Require().NoError(s2test.TestStorageStat(context.Background(), s.strg))
+}
+
 func (s *AzblobIntegrationSuite) TestOpenSinceGet() {
 	s.Require().NoError(s2test.TestStorageOpenSinceGet(context.Background(), s.strg))
 }

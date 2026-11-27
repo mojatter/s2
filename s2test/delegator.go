@@ -9,7 +9,7 @@ import (
 
 // StorageDelegator is a test double for s2.Storage. Each method delegates to
 // the corresponding *Func field, returning a zero value when the field is nil;
-// Open without OpenFunc opens what Get returns.
+// Open without OpenFunc opens what Get returns, and Stat without StatFunc returns it.
 type StorageDelegator struct {
 	TypeFunc            func() s2.Type
 	URIFunc             func() string
@@ -22,6 +22,7 @@ type StorageDelegator struct {
 	CopyFunc            func(ctx context.Context, src, dst string) error
 	MoveFunc            func(ctx context.Context, src, dst string) error              // optional Mover hook
 	OpenFunc            func(ctx context.Context, name string) (io.ReadCloser, error) // optional Opener hook
+	StatFunc            func(ctx context.Context, name string) (s2.Object, error)     // optional Stater hook
 	DeleteFunc          func(ctx context.Context, name string) error
 	DeleteRecursiveFunc func(ctx context.Context, prefix string) error
 	SignedURLFunc       func(ctx context.Context, opts s2.SignedURLOptions) (string, error)
@@ -111,6 +112,14 @@ func (d *StorageDelegator) Open(ctx context.Context, name string) (io.ReadCloser
 		return nil, err
 	}
 	return obj.Open()
+}
+
+// Stat makes StorageDelegator satisfy the optional s2.Stater interface; without StatFunc it returns what Get does.
+func (d *StorageDelegator) Stat(ctx context.Context, name string) (s2.Object, error) {
+	if d.StatFunc != nil {
+		return d.StatFunc(ctx, name)
+	}
+	return d.Get(ctx, name)
 }
 
 func (d *StorageDelegator) Delete(ctx context.Context, name string) error {
