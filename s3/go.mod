@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.5.11
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.116.0
 	github.com/aws/smithy-go v1.28.9
-	github.com/mojatter/s2 v0.37.0
+	github.com/mojatter/s2 v0.38.0
 	github.com/stretchr/testify v1.12.1
 )
 
