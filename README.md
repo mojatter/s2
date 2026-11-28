@@ -310,6 +310,8 @@ Each cloud backend is a separate Go module with its own dependencies, so `go get
 | `gcs` | `github.com/mojatter/s2/gcs` | Google Cloud Storage |
 | `azblob` | `github.com/mojatter/s2/azblob` | Azure Blob Storage |
 
+Backends outside this repository: [s2-gdrive](https://github.com/mojatter/s2-gdrive) (Google Drive, served by its own `s2-gdrive` command).
+
 Backends are registered via blank imports. Import only what you need:
 
 ```go
